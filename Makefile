@@ -38,5 +38,4 @@ cleanup:
 	@echo "Czyszczenie zasobów..."
 	@gcloud dataflow jobs cancel $$(gcloud dataflow jobs list --region $$(grep REGION .env | cut -d '=' -f2) --filter="NAME:$$(grep JOB_NAME .env | cut -d '=' -f2)" --format="value(JOB_ID)" | head -n 1)
 	@gcloud pubsub subscriptions seek $$(basename $$(grep INPUT_SUBSCRIPTION .env | cut -d '=' -f2)) --time=+0s
-	@python delete_firestore_collections.py
 	@echo "Zasoby wyczyszczone."
