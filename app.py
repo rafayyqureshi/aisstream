@@ -1,17 +1,22 @@
 import os
 import json
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 from google.cloud import bigquery
-from datetime import datetime, timedelta
 
-app = Flask(__name__)
+app = Flask(__name__,
+            static_folder='static',
+            template_folder='templates')
 
-# Inicjalizacja klienta BigQuery
 client = bigquery.Client()
+
+@app.route('/')
+def index():
+    # Renderuje index.html jako stronę główną
+    return render_template('index.html')
 
 @app.route('/ships')
 def ships():
-    # Pobieramy ostatnie dane pozycji statków np. z ostatnich 2 minut
+    # Pobiera ostatnie dane pozycji statków np. z ostatnich 2 minut
     query = """
     SELECT
       mmsi,
@@ -42,7 +47,7 @@ def ships():
 
 @app.route('/collisions')
 def collisions():
-    # Pobieramy kolizje z ostatnich 5 minut i dołączamy nazwy statków (o ile istnieją)
+    # Pobiera kolizje z ostatnich 5 minut i dołącza nazwy statków (o ile istnieją)
     query = """
     WITH ship_names AS (
       SELECT
@@ -90,12 +95,5 @@ def collisions():
         })
     return jsonify(result)
 
-@app.route('/')
-def index():
-    # Prosta strona index
-    return "AIS Collision Detection API"
-
 if __name__ == '__main__':
-    # Upewnij się, że masz zmienne środowiskowe ustawione, np. GOOGLE_CLOUD_PROJECT
-    # lub zrób to w kodzie, jeśli konieczne.
     app.run(host='0.0.0.0', port=5000, debug=True)
