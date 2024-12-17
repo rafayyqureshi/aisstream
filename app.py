@@ -3,7 +3,7 @@ import json
 import math
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
-from datetime import datetime, timezone
+from datetime import datetime
 
 app = Flask(__name__,
             static_folder='static',
@@ -12,15 +12,10 @@ app = Flask(__name__,
 client = bigquery.Client()
 
 def compute_cpa_tcpa(ship_a, ship_b):
-    # Funkcja obliczająca CPA/TCPA przeniesiona z pipeline.py
-    # Wykorzystujemy te same wzory
     if ship_a['ship_length'] is None or ship_b['ship_length'] is None:
         return (9999, -1)
     if ship_a['ship_length'] < 50 or ship_b['ship_length'] < 50:
         return (9999, -1)
-
-    CPA_THRESHOLD = 0.5
-    # Nie musimy tu thresholdów sprawdzać, tylko zwrócić wartości
 
     latRef = (ship_a['latitude']+ship_b['latitude'])/2
     scaleLat = 111000
@@ -78,7 +73,6 @@ def compute_cpa_tcpa(ship_a, ship_b):
     distNm = dist/1852
     return (distNm, tcpa)
 
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -115,37 +109,62 @@ def ships():
 
 @app.route('/collisions')
 def collisions():
-    # Pokazujemy tylko sytuacje z ostatnich 5 minut i tcpa > 0
-    # Zakładamy, że kolizje są aktualizowane często, jeśli tcpa <= 0 to sytuacja już minęła
     max_cpa = request.args.get('max_cpa', 0.5, type=float)
     max_tcpa = request.args.get('max_tcpa', 10.0, type=float)
 
+    # Wybieramy najnowsze kolizje dla każdej pary statków
     query = f"""
-    WITH latest_positions AS (
+    WITH filtered AS (
+      SELECT
+        c.mmsi_a,
+        c.mmsi_b,
+        c.timestamp,
+        c.cpa,
+        c.tcpa,
+        c.latitude_a,
+        c.longitude_a,
+        c.latitude_b,
+        c.longitude_b
+      FROM `ais_dataset.collisions` c
+      WHERE c.tcpa > 0
+        AND c.tcpa <= {max_tcpa}
+        AND c.cpa <= {max_cpa}
+        AND c.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
+    ),
+    ranked AS (
+      SELECT f.*,
+        ROW_NUMBER() OVER(
+          PARTITION BY
+            IF(f.mmsi_a < f.mmsi_b, f.mmsi_a, f.mmsi_b),
+            IF(f.mmsi_a < f.mmsi_b, f.mmsi_b, f.mmsi_a)
+          ORDER BY f.timestamp DESC
+        ) AS rn
+      FROM filtered f
+    ),
+    latest AS (
+      SELECT * FROM ranked WHERE rn=1
+    ),
+    latest_positions AS (
       SELECT mmsi, ship_name, timestamp,
-      ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rn
+      ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
       FROM `ais_dataset.ships_positions`
     )
     SELECT 
-      c.mmsi_a,
-      c.mmsi_b,
-      c.timestamp,
-      c.cpa,
-      c.tcpa,
-      c.latitude_a,
-      c.longitude_a,
-      c.latitude_b,
-      c.longitude_b,
+      l.mmsi_a,
+      l.mmsi_b,
+      l.timestamp,
+      l.cpa,
+      l.tcpa,
+      l.latitude_a,
+      l.longitude_a,
+      l.latitude_b,
+      l.longitude_b,
       la.ship_name AS ship1_name,
       lb.ship_name AS ship2_name
-    FROM `ais_dataset.collisions` c
-    LEFT JOIN latest_positions la ON la.mmsi = c.mmsi_a AND la.rn = 1
-    LEFT JOIN latest_positions lb ON lb.mmsi = c.mmsi_b AND lb.rn = 1
-    WHERE c.tcpa > 0
-      AND c.tcpa <= {max_tcpa}
-      AND c.cpa <= {max_cpa}
-      AND c.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-    ORDER BY c.timestamp DESC
+    FROM latest l
+    LEFT JOIN latest_positions la ON la.mmsi = l.mmsi_a AND la.rpos = 1
+    LEFT JOIN latest_positions lb ON lb.mmsi = l.mmsi_b AND lb.rpos = 1
+    ORDER BY l.timestamp DESC
     LIMIT 1000
     """
 
@@ -154,8 +173,6 @@ def collisions():
     for r in rows:
         ship1_name = r.ship1_name if r.ship1_name else str(r.mmsi_a)
         ship2_name = r.ship2_name if r.ship2_name else str(r.mmsi_b)
-        if ship1_name == ship2_name and r.mmsi_a != r.mmsi_b:
-            ship2_name = f"{ship2_name} ({r.mmsi_b})"
         if r.mmsi_a == r.mmsi_b:
             continue
 
@@ -176,7 +193,6 @@ def collisions():
 
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
-    # Endpoint do obliczania CPA/TCPA na żądanie dla dwóch wybranych statków
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
     if not mmsi_a or not mmsi_b:
@@ -189,9 +205,7 @@ def calculate_cpa_tcpa():
     AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
     ORDER BY timestamp DESC
     """
-
     rows = list(client.query(query).result())
-    # Oczekujemy ostatnie dane obu statków
     data_by_mmsi = {}
     for r in rows:
         if r.mmsi not in data_by_mmsi:
@@ -210,5 +224,6 @@ def calculate_cpa_tcpa():
 
     cpa,tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -7,6 +7,7 @@ let vectorLength = 15; // in minutes
 let cpaFilter = 0.5;
 let tcpaFilter = 10;
 let markerClusterGroup; 
+let collisionMarkers = [];
 
 function initMap() {
   map = L.map('map').setView([50.0, 0.0], 6);
@@ -20,7 +21,6 @@ function initMap() {
     attribution: 'Map data © OpenSeaMap contributors'
   });
 
-  // Dodajemy obie warstwy, OpenSeaMap jako overlay i włączamy domyślnie
   osmLayer.addTo(map);
   openSeaMapLayer.addTo(map);
 
@@ -33,7 +33,7 @@ function initMap() {
   L.control.layers(baseMaps, overlayMaps, {collapsed:false}).addTo(map);
 
   markerClusterGroup = L.markerClusterGroup({
-    maxClusterRadius:10,
+    maxClusterRadius:1, // jeszcze rzadsze klastrowanie
     removeOutsideVisibleBounds: true
   });
   map.addLayer(markerClusterGroup);
@@ -49,12 +49,12 @@ function initMap() {
   document.getElementById('cpaFilter').addEventListener('input', e=>{
     cpaFilter = parseFloat(e.target.value);
     document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
-    updateCollisionsList();
+    fetchAndUpdateData(); // odśwież kolizje
   });
   document.getElementById('tcpaFilter').addEventListener('input', e=>{
     tcpaFilter = parseFloat(e.target.value);
     document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
-    fetchAndUpdateData();
+    fetchAndUpdateData(); // odśwież kolizje
   });
 
   document.getElementById('clearSelectedShips').addEventListener('click', ()=>{
@@ -110,78 +110,63 @@ function updateShips(data) {
     }
 
     const rotation = ship.cog||0;
-    const baseSize = 20*scale;
-    const xAnchor = 10*scale;
-    const yAnchor = 15*scale;
+    // Dopasowujemy iconSize do viewBoxa
+    // viewBox: -10 -15 20 30
+    // iconSize = [20*scale,30*scale], iconAnchor=(10*scale,15*scale)
+    const width = 20*scale;
+    const height = 30*scale;
 
     let highlightRect = '';
     if(selectedShips.includes(ship.mmsi)) {
-      // Gruba linia, przerywana
-      highlightRect = `<rect x="-14" y="-19" width="28" height="38" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
+      highlightRect = `<rect x="-20" y="-20" width="40" height="40" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
     const shape = `<polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
     const shipIcon = L.divIcon({
       className:'',
-      html:`<svg width="${baseSize}" height="${baseSize}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
+      html:`<svg width="${width}" height="${height}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
         ${highlightRect}
         ${shape}
       </svg>`,
-      iconSize:[baseSize,baseSize],
-      iconAnchor:[xAnchor,yAnchor]
+      iconSize:[width,height],
+      iconAnchor:[width/2,height/2] // środek symbolu to pozycja statku
     });
 
     let marker = shipMarkers[ship.mmsi];
+    const now=Date.now();
+    const updatedAt=new Date(ship.timestamp).getTime();
+    const diffSec=Math.round((now-updatedAt)/1000);
+    let diffMin = Math.floor(diffSec/60);
+    let diffS = diffSec%60;
+    const diffStr= `${diffMin} min ${diffS} s ago`;
+    const content=`
+      <b>${ship.ship_name}</b><br>
+      MMSI: ${ship.mmsi}<br>
+      SOG: ${ship.sog||'N/A'} kn<br>
+      COG: ${ship.cog||'N/A'} deg<br>
+      Length: ${ship.ship_length||'N/A'}<br>
+      Updated: ${diffStr}
+    `;
+
     if(!marker) {
       marker = L.marker([ship.latitude, ship.longitude], {icon: shipIcon});
-
-      // Zamiast popup na mouseover/mouseout - używamy wbudowanego tooltipa
-      const now=Date.now();
-      const updatedAt=new Date(ship.timestamp).getTime();
-      const diffSec=Math.round((now-updatedAt)/1000);
-      let diffMin = Math.floor(diffSec/60);
-      let diffS = diffSec%60;
-      const diffStr= `${diffMin} min ${diffS} s ago`;
-      const content=`
-        <b>${ship.ship_name}</b><br>
-        MMSI: ${ship.mmsi}<br>
-        SOG: ${ship.sog||'N/A'} kn<br>
-        COG: ${ship.cog||'N/A'} deg<br>
-        Length: ${ship.ship_length||'N/A'}<br>
-        Updated: ${diffStr}
-      `;
       marker.bindTooltip(content, {direction:'top', sticky:true});
-
       marker.on('click', ()=>{
         selectShip(ship.mmsi);
       });
-
+      marker.shipData = ship;
       shipMarkers[ship.mmsi]=marker;
       markerClusterGroup.addLayer(marker);
     } else {
       marker.setLatLng([ship.latitude, ship.longitude]);
       marker.setIcon(shipIcon);
       marker.shipData=ship;
-      // Aktualizujemy tooltip dane
-      const now=Date.now();
-      const updatedAt=new Date(ship.timestamp).getTime();
-      const diffSec=Math.round((now-updatedAt)/1000);
-      let diffMin = Math.floor(diffSec/60);
-      let diffS = diffSec%60;
-      const diffStr= `${diffMin} min ${diffS} s ago`;
-      const content=`
-        <b>${ship.ship_name}</b><br>
-        MMSI: ${ship.mmsi}<br>
-        SOG: ${ship.sog||'N/A'} kn<br>
-        COG: ${ship.cog||'N/A'} deg<br>
-        Length: ${ship.ship_length||'N/A'}<br>
-        Updated: ${diffStr}
-      `;
       marker.setTooltipContent(content);
     }
   });
 
+  // Po zaktualizowaniu statków, aktualizujemy panel zaznaczonych
   updateSelectedShipsInfo();
 }
 
@@ -189,7 +174,13 @@ function updateCollisionsList() {
   const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML = '';
 
-  let filtered = collisionsData.filter(c=>c.cpa<=cpaFilter && c.tcpa<=tcpaFilter && c.tcpa>0);
+  // Usuwamy stare markery kolizji
+  collisionMarkers.forEach(m=>map.removeLayer(m));
+  collisionMarkers=[];
+
+  // Załóżmy, że wynik już jest najnowszy na parę statków
+  let filtered = collisionsData.filter(c=>c.tcpa>0);
+
   filtered.sort((a,b)=>a.tcpa - b.tcpa);
 
   filtered.forEach(c=>{
@@ -205,31 +196,54 @@ function updateCollisionsList() {
       </div>
     `;
     item.querySelector('.zoom-button').addEventListener('click', ()=>{
-      const lat = (c.latitude_a+c.latitude_b)/2;
-      const lon = (c.longitude_a+c.longitude_b)/2;
-      map.setView([lat,lon],10);
-
-      clearSelectedShips();
-      selectShip(c.mmsi_a);
-      selectShip(c.mmsi_b);
-
-      vectorLength=Math.ceil(c.tcpa);
-      if(vectorLength<1) vectorLength=1;
-      document.getElementById('vectorLengthSlider').value=vectorLength;
-      document.getElementById('vectorLengthValue').textContent=vectorLength;
-      updateSelectedShipsInfo();
+      zoomToCollision(c);
     });
 
     collisionList.appendChild(item);
+
+    // Dodajemy marker kolizji na mapę
+    const collisionLat = (c.latitude_a+c.latitude_b)/2;
+    const collisionLon = (c.longitude_a+c.longitude_b)/2;
+    const collisionIcon = L.divIcon({
+      className:'',
+      html:`<svg width="30" height="30" viewBox="-15 -15 30 30">
+        <polygon points="0,-10 10,10 -10,10" fill="yellow" stroke="red" stroke-width="2"/>
+        <text x="0" y="4" text-anchor="middle" font-size="12" font-weight="bold" fill="red">!</text>
+      </svg>`,
+      iconSize:[30,30],
+      iconAnchor:[15,15]
+    });
+
+    const collisionMarker = L.marker([collisionLat, collisionLon], {icon: collisionIcon});
+    collisionMarker.on('click', ()=>{
+      zoomToCollision(c);
+    });
+    collisionMarker.addTo(map);
+    collisionMarkers.push(collisionMarker);
   });
 }
 
+function zoomToCollision(c) {
+  const lat = (c.latitude_a+c.latitude_b)/2;
+  const lon = (c.longitude_a+c.longitude_b)/2;
+  map.setView([lat,lon],10);
+
+  clearSelectedShips();
+  selectShip(c.mmsi_a);
+  selectShip(c.mmsi_b);
+
+  vectorLength=Math.ceil(c.tcpa);
+  if(vectorLength<1) vectorLength=1;
+  document.getElementById('vectorLengthSlider').value=vectorLength;
+  document.getElementById('vectorLengthValue').textContent=vectorLength;
+  updateSelectedShipsInfo();
+}
+
 function selectShip(mmsi) {
-  // jeśli statek jest już zaznaczony, nic nie rób
   if(selectedShips.includes(mmsi)) {
-    return;
+    return; // już zaznaczony
   }
-  // jeśli mamy już 2 statki, usuń pierwszy (FIFO)
+  // jeśli mamy już 2 statki, to odznaczamy pierwszy
   if(selectedShips.length===2) {
     selectedShips.shift();
   }
@@ -270,7 +284,6 @@ function updateSelectedShipsInfo() {
     container.appendChild(div);
   });
 
-  // Tylko jeśli są 2 statki, liczymy CPA/TCPA
   if(selectedShips.length===2) {
     const mmsi_a = selectedShips[0];
     const mmsi_b = selectedShips[1];
@@ -290,7 +303,6 @@ function updateSelectedShipsInfo() {
       });
   }
 
-  // Rysujemy wektory i historię tylko dla zaznaczonych statków
   selectedShips.forEach(mmsi=>{
     showHistory(mmsi);
     drawVector(mmsi);
@@ -318,25 +330,24 @@ function reloadAllShipIcons() {
     }
 
     const rotation = ship.cog||0;
-    const baseSize = 20*scale;
-    const xAnchor = 10*scale;
-    const yAnchor = 15*scale;
+    const width = 20*scale;
+    const height = 30*scale;
 
     const shape = `<polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
     let highlightRect='';
     if(selectedShips.includes(ship.mmsi)) {
-      highlightRect = `<rect x="-14" y="-19" width="28" height="38" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
+      highlightRect = `<rect x="-20" y="-20" width="40" height="40" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
     const icon = L.divIcon({
       className:'',
-      html:`<svg width="${baseSize}" height="${baseSize}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
+      html:`<svg width="${width}" height="${height}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
         ${highlightRect}
         ${shape}
       </svg>`,
-      iconSize:[baseSize,baseSize],
-      iconAnchor:[xAnchor,yAnchor]
+      iconSize:[width,height],
+      iconAnchor:[width/2,height/2]
     });
     shipMarkers[m].setIcon(icon);
   }
@@ -368,16 +379,15 @@ function showHistory(mmsi) {
           fillColor='none';scale=1.0;
         }
 
-        const baseSize = 20*scale;
-        const xAnchor = 10*scale;
-        const yAnchor = 15*scale;
+        const width = 20*scale;
+        const height = 30*scale;
         const icon = L.divIcon({
           className:'',
-          html:`<svg width="${baseSize}" height="${baseSize}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);opacity:${opacity}">
+          html:`<svg width="${width}" height="${height}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);opacity:${opacity}">
             <polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>
           </svg>`,
-          iconSize:[baseSize,baseSize],
-          iconAnchor:[xAnchor,yAnchor]
+          iconSize:[width,height],
+          iconAnchor:[width/2,height/2]
         });
 
         const marker=L.marker([pos.latitude,pos.longitude],{icon});
@@ -389,7 +399,6 @@ function showHistory(mmsi) {
         const diffMin = Math.floor(diffSec/60);
         const diffS = diffSec%60;
 
-        // Używamy tooltip jak wyżej, bez migania
         const content = `${pos.ship_name}<br>History pos: ${diffMin} min ${diffS} s ago`;
         marker.bindTooltip(content,{direction:'top',sticky:true});
       });
