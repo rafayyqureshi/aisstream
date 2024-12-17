@@ -8,8 +8,8 @@ body, html {
 #map {
   position: absolute;
   top: 0;
-  left: 300px; /* miejsce na lewy panel */
-  right: 300px; /* miejsce na prawy panel */
+  left: 300px; 
+  right: 300px; 
   bottom: 0;
 }
 
@@ -38,6 +38,10 @@ body, html {
 }
 
 #risk-filters {
+  margin-bottom: 10px;
+}
+
+#collision-filters {
   margin-bottom: 10px;
 }
 
@@ -71,11 +75,7 @@ body, html {
   margin-bottom: 10px;
 }
 
-#vector-lengthSlider {
-  width: 100%;
-}
-
-#collision-list button.zoom-button, #collision-list button.toggle-details {
+#collision-list button.zoom-button {
   background: none;
   border: none;
   cursor: pointer;
@@ -86,13 +86,6 @@ body, html {
   display: none;
 }
 
-/* Statek: trójkąt, niebieski, obrót wg COG */
-.ship-icon {
-  width: 20px;
-  height: 20px;
-  background: transparent;
-  border: none;
+#cpaFilter, #tcpaFilter {
+  width: 80%;
 }
-
-/* Przykładowy styl: użyjemy CSS transform na ikonie statku (SVG) jeśli
-   generujemy ikony przez JS. Jeśli to marker z iconUrl, to ikona w JS */
