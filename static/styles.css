@@ -3,6 +3,7 @@ html, body {
   margin: 0;
   padding: 0;
   font-family: sans-serif;
+  font-size: 12px;
 }
 
 #map {
@@ -53,31 +54,24 @@ html, body {
   stroke-width: 2px;
 }
 
-/* Podgląd historii pozycji statku: mniejsze ikony, stopniowo zmniejszaj opacity */
-.history-position {
-  opacity: 0.8;
+.ship-history-icon {
+  /* already handled in JS with inline styles for opacity */
 }
 
-/* Dostosowanie rozmiarów paneli, suwaków itp. */
-#vector-length-container,
-#collision-filters {
-  margin-bottom: 8px;
+/* minimal cluster style adjustments */
+.marker-cluster-small {
+  background: rgba(255,0,0,0.5);
+  border: 1px solid #a00;
 }
 
-#collision-filters label, #vector-length-container label {
-  display: inline-block;
-  margin-right: 5px;
-}
-
-#cpaFilter, #tcpaFilter, #vectorLengthSlider {
-  vertical-align: middle;
-  margin-right: 5px;
-}
-
-/* Zapewnienie, że tooltip statków jest czytelny */
 .leaflet-tooltip {
   font-size: 12px;
   background: white;
   border: 1px solid #ccc;
   padding: 4px;
+}
+
+/* Adjust panels and inputs */
+label {
+  font-size: 12px;
 }
