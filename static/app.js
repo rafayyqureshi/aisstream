@@ -11,12 +11,10 @@ let markerClusterGroup;
 function initMap() {
   map = L.map('map').setView([50.0, 0.0], 6);
 
-  // Podkład OSM
   const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 18
   });
 
-  // OpenSeaMap layer
   const openSeaMapLayer = L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
     maxZoom: 18,
     attribution: 'Map data © OpenSeaMap contributors'
@@ -32,14 +30,12 @@ function initMap() {
   };
   L.control.layers(baseMaps, overlayMaps).addTo(map);
 
-  // Marker Cluster z niewielkim promieniem
   markerClusterGroup = L.markerClusterGroup({
-    maxClusterRadius:10, // bardzo mały zasięg klastrowania
+    maxClusterRadius:10,
     removeOutsideVisibleBounds: true
   });
   map.addLayer(markerClusterGroup);
 
-  console.log("Map initialized");
   fetchAndUpdateData();
   setInterval(fetchAndUpdateData, 60000);
 
@@ -84,7 +80,6 @@ function fetchAndUpdateData() {
 function updateShips(data) {
   let currentMmsiSet = new Set(data.map(d=>d.mmsi));
 
-  // Usuwamy statki, które zniknęły
   for (let m in shipMarkers) {
     if(!currentMmsiSet.has(parseInt(m))) {
       markerClusterGroup.removeLayer(shipMarkers[m]);
@@ -113,20 +108,31 @@ function updateShips(data) {
     }
 
     const rotation = ship.cog||0;
-    // Normalny statek: trójkąt
-    // Zaznaczony statek: kwadrat
-    let isSelected = selectedShips.includes(ship.mmsi);
-    let shape = isSelected ? 
-      `<rect x="-10" y="-10" width="20" height="20" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>` :
-      `<polygon points="0,-10 10,10 -10,10" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+    // Trójkąt wydłużony: viewBox: -10 -15 20 30, points: 0,-15 10,15 -10,15
+    // Środek symbolu to (0,0)
+    // iconAnchor ustawiamy w środku symbolu => (10,15) px od top-left viewBox
+    // scale wpływa także na anchor
+    const baseSize = 20*scale;
+    const xAnchor = 10*scale; 
+    const yAnchor = 15*scale;
+
+    // Zaznaczenie statku - sam symbol się nie zmienia
+    let highlightRect = '';
+    if (selectedShips.includes(ship.mmsi)) {
+      // Prostokąt większy: symbol -10..10 x, -15..15 y, dajmy -14..14, -19..19
+      highlightRect = `<rect x="-14" y="-19" width="28" height="38" fill="none" stroke="black" stroke-width="2" stroke-dasharray="5,5" />`;
+    }
+
+    const shape = `<polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
     const shipIcon = L.divIcon({
       className:'',
-      html:`<svg width="${20*scale}" height="${20*scale}" viewBox="-10 -10 20 20" style="transform:rotate(${rotation}deg);">
+      html:`<svg width="${baseSize}" height="${baseSize}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
+        ${highlightRect}
         ${shape}
       </svg>`,
-      iconSize:[20*scale,20*scale],
-      iconAnchor:[0,0]
+      iconSize:[baseSize,baseSize],
+      iconAnchor:[xAnchor,yAnchor]
     });
 
     let marker = shipMarkers[ship.mmsi];
@@ -138,7 +144,9 @@ function updateShips(data) {
         const now=Date.now();
         const updatedAt=new Date(ship.timestamp).getTime();
         const diffSec=Math.round((now-updatedAt)/1000);
-        const diffStr= diffSec<60?`${diffSec}s ago`:`${Math.floor(diffSec/60)}m ago`;
+        let diffMin = Math.floor(diffSec/60);
+        let diffS = diffSec%60;
+        const diffStr= `${diffMin} min ${diffS} s ago`;
         const content=`
           <b>${ship.ship_name}</b><br>
           MMSI: ${ship.mmsi}<br>
@@ -189,6 +197,8 @@ function updateCollisionsList() {
       const lon = (c.longitude_a+c.longitude_b)/2;
       map.setView([lat,lon],10);
 
+      // Zaznaczenie tych dwóch statków
+      // Po zaznaczeniu 2, kolejne kliknięcie usuwa pierwsze - mamy logikę w selectShip
       clearSelectedShips();
       selectShip(c.mmsi_a);
       selectShip(c.mmsi_b);
@@ -205,8 +215,9 @@ function updateCollisionsList() {
 }
 
 function selectShip(mmsi) {
-  if(selectedShips.length>=2) {
-    clearSelectedShips();
+  // Jeśli już są 2 statki, usuwamy pierwszy
+  if(selectedShips.length===2) {
+    selectedShips.shift();
   }
   if(!selectedShips.includes(mmsi)) {
     selectedShips.push(mmsi);
@@ -224,13 +235,14 @@ function updateSelectedShipsInfo() {
   container.innerHTML = '';
   document.getElementById('pair-info').innerHTML='';
 
-  // Usuwamy history markers i vector lines
   for(let m in historyMarkers) {
     historyMarkers[m].forEach(h=>map.removeLayer(h));
   }
   historyMarkers={};
 
   if(selectedShips.length===0) {
+    // Przeładowujemy ikony bez highlightRect
+    reloadAllShipIcons();
     return;
   }
 
@@ -271,10 +283,13 @@ function updateSelectedShipsInfo() {
     drawVector(mmsi);
   });
 
-  // Przeładowujemy ikony, aby zaznaczyć wybrane statki kwadratem
+  // Przeładowujemy ikony z highlightRect
+  reloadAllShipIcons();
+}
+
+function reloadAllShipIcons() {
   for (let m in shipMarkers) {
     const ship = shipMarkers[m].shipData;
-    const isSelected = selectedShips.includes(ship.mmsi);
     const length = ship.ship_length;
     let fillColor = 'none';
     let scale = 1.0;
@@ -291,25 +306,31 @@ function updateSelectedShipsInfo() {
     }
 
     const rotation = ship.cog||0;
-    let shape = isSelected ? 
-      `<rect x="-10" y="-10" width="20" height="20" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>` :
-      `<polygon points="0,-10 10,10 -10,10" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+    const baseSize = 20*scale;
+    const xAnchor = 10*scale;
+    const yAnchor = 15*scale;
+
+    const shape = `<polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+
+    let highlightRect='';
+    if(selectedShips.includes(ship.mmsi)) {
+      highlightRect = `<rect x="-14" y="-19" width="28" height="38" fill="none" stroke="black" stroke-width="2" stroke-dasharray="5,5" />`;
+    }
 
     const icon = L.divIcon({
       className:'',
-      html:`<svg width="${20*scale}" height="${20*scale}" viewBox="-10 -10 20 20" style="transform:rotate(${rotation}deg);">
+      html:`<svg width="${baseSize}" height="${baseSize}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
+        ${highlightRect}
         ${shape}
       </svg>`,
-      iconSize:[20*scale,20*scale],
-      iconAnchor:[0,0]
+      iconSize:[baseSize,baseSize],
+      iconAnchor:[xAnchor,yAnchor]
     });
     shipMarkers[m].setIcon(icon);
   }
 }
 
 function showHistory(mmsi) {
-  // Poniższy kod pozostał głównie niezmieniony, jedynie dopasowany do nowych symboli
-  // Wyświetlenie ostatnich 10 pozycji nie jest zmieniane w kwestii logiki
   fetch('/ships')
     .then(r=>r.json())
     .then(data=>{
@@ -319,9 +340,11 @@ function showHistory(mmsi) {
 
       historyMarkers[mmsi]=[];
       const now=Date.now();
+      // i=0 -> najnowsza historyczna pozycja, opacity=0.1
+      // i=9 -> najstarsza, opacity=1.0
+      // opacity = (i+1)*0.1
       shipPos.forEach((pos,i)=>{
-        let opacity=1.0-(i*0.1);
-        if(opacity<0.1) opacity=0.1;
+        let opacity=(i+1)*0.1;
         const rotation=pos.cog||0;
 
         let fillColor='none',strokeColor='#000',scale=1.0;
@@ -335,14 +358,16 @@ function showHistory(mmsi) {
           fillColor='none';scale=1.0;
         }
 
-        // History pozostaje trójkątem
+        const baseSize = 20*scale;
+        const xAnchor = 10*scale;
+        const yAnchor = 15*scale;
         const icon = L.divIcon({
           className:'',
-          html:`<svg width="${20*scale}" height="${20*scale}" viewBox="-10 -10 20 20" style="transform:rotate(${rotation}deg);opacity:${opacity}">
-            <polygon points="0,-10 10,10 -10,10" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>
+          html:`<svg width="${baseSize}" height="${baseSize}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);opacity:${opacity}">
+            <polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>
           </svg>`,
-          iconSize:[20*scale,20*scale],
-          iconAnchor:[0,0]
+          iconSize:[baseSize,baseSize],
+          iconAnchor:[xAnchor,yAnchor]
         });
 
         const marker=L.marker([pos.latitude,pos.longitude],{icon});
@@ -351,12 +376,13 @@ function showHistory(mmsi) {
 
         const updatedAt=new Date(pos.timestamp).getTime();
         const diffSec=Math.round((now-updatedAt)/1000);
-        const diffStr=diffSec<60?`${diffSec}s ago`:`${Math.floor(diffSec/60)}m ago`;
+        const diffMin = Math.floor(diffSec/60);
+        const diffS = diffSec%60;
 
         marker.on('mouseover',()=>{
           L.popup()
            .setLatLng([pos.latitude,pos.longitude])
-           .setContent(`${pos.ship_name}<br>History pos: ${diffStr}`)
+           .setContent(`${pos.ship_name}<br>History pos: ${diffMin} min ${diffS} s ago`)
            .openOn(map);
         });
         marker.on('mouseout',()=>map.closePopup());
@@ -366,23 +392,18 @@ function showHistory(mmsi) {
 }
 
 function drawVector(mmsi){
-  // Rysowanie wektora ruchu dla zaznaczonych statków
   const ship = shipMarkers[mmsi]? shipMarkers[mmsi].shipData : null;
   if(!ship || !ship.sog || !ship.cog) return;
 
-  // SOG w węzłach, 1 węzeł = 1 nm/h. WektorLength w minutach
-  // Dystans = sog [nm/h] * (vectorLength/60 [h]) = sog*(vectorLength/60)
+  // Dystans w Nm
   const distanceNm = ship.sog*(vectorLength/60);
   const lat = ship.latitude;
   const lon = ship.longitude;
   const cogRad = (ship.cog*Math.PI)/180;
 
-  // Przybliżenie przesunięcia (prosty approks, nie uwzględniamy krzywizny na małych odległościach)
-  // 1 nm ~= 1/60 stopnia w szerokości geogr. (111km/60nm ~1 stopień)
-  // W przybliżeniu: deltaLat = distanceNm/60
-  // deltaLon = (distanceNm/60)/cos(lat)
-  const deltaLat = (distanceNm/60)*Math.cos(cogRad)
-  const deltaLon = (distanceNm/60)*Math.sin(cogRad)/Math.cos(lat*Math.PI/180)
+  // Przybliżenie konwersji na stopnie
+  const deltaLat = (distanceNm/60)*Math.cos(cogRad);
+  const deltaLon = (distanceNm/60)*Math.sin(cogRad)/Math.cos(lat*Math.PI/180);
 
   const endLat = lat+deltaLat;
   const endLon = lon+deltaLon;
