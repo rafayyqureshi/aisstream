@@ -7,7 +7,10 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" crossorigin="" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-<link rel="stylesheet" href="styles.css"/>
+
+<!-- Używamy url_for do odwołania do plików statycznych -->
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}"/>
+
 <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 </head>
@@ -40,6 +43,7 @@
   <div id="collision-list"></div>
 </div>
 
-<script src="static/app.js"></script>
+<!-- Używamy url_for do pliku app.js -->
+<script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>
