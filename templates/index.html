@@ -4,12 +4,12 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>AIS Collision Detection</title>
+
 <!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" crossorigin=""/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 
-<!-- Nasze style -->
 <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}"/>
 
 <!-- Leaflet JS -->
@@ -19,23 +19,23 @@
 </head>
 <body>
 <div id="left-panel">
-    <h2 style="display:flex;justify-content:space-between;align-items:center;font-size:14px;">
-      Selected Ships <button id="clearSelectedShips" style="font-size:12px;">Clear</button>
+    <h2 style="display:flex;justify-content:space-between;align-items:center;">
+      Selected Ships <button id="clearSelectedShips">Clear</button>
     </h2>
-    <div id="vector-length-container" style="margin-bottom:8px;">
-      <label for="vectorLengthSlider" style="font-size:12px;">Vector length (min):</label>
+    <div id="vector-length-container">
+      <label for="vectorLengthSlider">Vector length (min):</label>
       <input type="range" id="vectorLengthSlider" min="1" max="120" value="15">
-      <span id="vectorLengthValue" style="font-size:12px;">15</span>
+      <span id="vectorLengthValue">15</span>
     </div>
-    <div id="selected-ships-info" style="font-size:12px;"></div>
-    <div id="pair-info" style="font-size:12px;"></div>
+    <div id="selected-ships-info"></div>
+    <div id="pair-info"></div>
 </div>
 
 <div id="map"></div>
 
 <div id="right-panel">
-  <h2 style="font-size:14px;">Collisions</h2>
-  <div id="collision-filters" style="font-size:12px;margin-bottom:8px;">
+  <h2>Collisions</h2>
+  <div id="collision-filters">
     <label for="cpaFilter">Max CPA (Nm):</label>
     <input type="range" id="cpaFilter" min="0" max="0.5" step="0.01" value="0.5">
     <span id="cpaValue">0.50</span><br>
@@ -43,7 +43,7 @@
     <input type="range" id="tcpaFilter" min="1" max="10" step="0.1" value="10">
     <span id="tcpaValue">10</span>
   </div>
-  <div id="collision-list" style="font-size:12px;"></div>
+  <div id="collision-list"></div>
 </div>
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>

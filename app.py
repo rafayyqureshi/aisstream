@@ -45,8 +45,6 @@ def ships():
 
 @app.route('/collisions')
 def collisions():
-    # W tej wersji zakładamy, że w latest_positions zawsze jest co najmniej jeden wpis.
-    # Jeśli nie, ship_name może być NULL, wtedy fallback do MMSI w kodzie poniżej.
     query = """
     WITH latest_positions AS (
       SELECT mmsi, ship_name, timestamp,
@@ -79,12 +77,8 @@ def collisions():
     for r in rows:
         ship1_name = r.ship1_name if r.ship1_name else str(r.mmsi_a)
         ship2_name = r.ship2_name if r.ship2_name else str(r.mmsi_b)
-
-        # Jeśli obie nazwy są takie same i mmsi różne, dopisz mmsi do drugiego
         if ship1_name == ship2_name and r.mmsi_a != r.mmsi_b:
             ship2_name = f"{ship2_name} ({r.mmsi_b})"
-        
-        # Jeśli mmsi_a == mmsi_b (co nie powinno mieć miejsca), pomiń ten wpis
         if r.mmsi_a == r.mmsi_b:
             continue
 

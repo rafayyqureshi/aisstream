@@ -14,7 +14,7 @@ body,html {
 
 #left-panel {
   position:absolute;
-  top:50px; /* obniżamy panel, aby nie kolidował z przyciskami zoom */
+  top:50px; /* obniżamy panel, aby przyciski zoom mapy były widoczne powyżej panelu */
   left:0;
   width:300px;
   background-color:rgba(255,255,255,0.9);
