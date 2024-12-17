@@ -1,87 +1,58 @@
-body, html {
-  margin: 0;
-  padding: 0;
-  height: 100%;
+body {
+  margin:0;
+  padding:0;
   font-family: Arial, sans-serif;
-  font-size: 14px;
+  font-size:14px;
 }
-
 #map {
-  position: absolute;
-  top: 0;
-  left: 300px;
-  right: 300px;
-  bottom: 0;
+  height:100vh;
+  width:100%;
+}
+#left-panel, #right-panel {
+  position:absolute;
+  top:0;
+  background:#fff;
+  z-index:999;
+  overflow:auto;
+  white-space: normal;
+  padding:10px;
+  border-radius:4px;
+  box-shadow:0 2px 6px rgba(0,0,0,0.3);
+  font-size:14px;
 }
 
 #left-panel {
-  position: absolute;
-  top: 0;
   left:0;
-  width: 300px;
-  height: 100%;
-  background-color: #f8f8f8;
-  overflow: auto;
-  box-shadow: 2px 0 5px rgba(0,0,0,0.3);
-  padding: 10px;
-  font-size:14px;
-  line-height:1.2em;
-  z-index:1000;
+  width:250px;
+  max-height:100vh;
 }
-
 #right-panel {
-  position:absolute;
-  top:0;
   right:0;
-  width:300px;
-  height:100%;
-  background-color:#f8f8f8;
-  overflow:auto;
-  box-shadow:-2px 0 5px rgba(0,0,0,0.3);
-  padding:10px;
-  font-size:14px;
-  line-height:1.2em;
-  z-index:1000;
-  white-space: normal;
-}
-
-h2 {
-  font-size:16px;
-  margin:0 0 10px 0;
-}
-
-label {
-  font-size:14px;
-}
-
-#selected-ships-info .ship-info {
-  border-bottom: 1px solid #ccc;
-  margin-bottom: 10px;
-  padding-bottom: 10px;
+  width:250px;
+  max-height:100vh;
 }
 
 #vector-length-container {
-  margin-bottom: 10px;
+  margin-bottom:10px;
+}
+.collision-item {
+  border-bottom:1px solid #ccc;
+  padding:5px 0;
+}
+.collision-item button.zoom-button {
+  background:none;
+  border:none;
+  cursor:pointer;
+  font-size:16px;
 }
 
-#collision-list .collision-item {
-  border-bottom: 1px solid #ccc;
-  padding: 10px 0;
-  cursor: pointer;
-  font-size:14px;
-  overflow:hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+#selected-ships-info {
+  margin-top:10px;
 }
-
-#collision-list .collision-item:hover {
-  background-color: #eee;
+#pair-info {
+  margin-top:10px;
+  font-weight:bold;
 }
-
-.zoom-button {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  margin-left:5px;
+#collision-filters {
+  margin-bottom:10px;
 }

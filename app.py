@@ -47,51 +47,34 @@ def ships():
 
 @app.route('/collisions')
 def collisions():
-    # Pobiera kolizje z ostatnich 5 minut i dołącza nazwy statków (o ile istnieją)
-    query = """
-    WITH ship_names AS (
-      SELECT
-        mmsi,
-        ANY_VALUE(ship_name) AS ship_name
-      FROM `ais_dataset.ships_positions`
-      WHERE ship_name IS NOT NULL
-      GROUP BY mmsi
-    )
-    SELECT
-      c.mmsi_a,
-      c.mmsi_b,
-      COALESCE(s1.ship_name, CAST(c.mmsi_a AS STRING)) AS ship1_name,
-      COALESCE(s2.ship_name, CAST(c.mmsi_b AS STRING)) AS ship2_name,
-      c.timestamp,
-      c.cpa,
-      c.tcpa,
-      c.geohash,
-      c.latitude_a,
-      c.longitude_a,
-      c.latitude_b,
-      c.longitude_b
-    FROM `ais_dataset.collisions` c
-    LEFT JOIN ship_names s1 ON c.mmsi_a = s1.mmsi
-    LEFT JOIN ship_names s2 ON c.mmsi_b = s2.mmsi
-    WHERE c.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-    ORDER BY c.timestamp DESC
+    query = f"""
+    SELECT mmsi_a,mmsi_b, timestamp, cpa, tcpa, geohash,
+           latitude_a, longitude_a, latitude_b, longitude_b,
+           (SELECT ship_name FROM `ais_dataset.ships_positions` 
+            WHERE mmsi=mmsi_a ORDER BY timestamp DESC LIMIT 1) AS ship1_name,
+           (SELECT ship_name FROM `ais_dataset.ships_positions` 
+            WHERE mmsi=mmsi_b ORDER BY timestamp DESC LIMIT 1) AS ship2_name
+    FROM `ais_dataset.collisions`
+    WHERE tcpa>0 
+    ORDER BY timestamp DESC
+    LIMIT 1000
     """
     rows = list(client.query(query).result())
-    result = []
+    result=[]
     for r in rows:
         result.append({
-            'mmsi_a': r.mmsi_a,
-            'mmsi_b': r.mmsi_b,
-            'ship1_name': r.ship1_name,
-            'ship2_name': r.ship2_name,
-            'timestamp': r.timestamp.isoformat() if r.timestamp else None,
-            'cpa': r.cpa,
-            'tcpa': r.tcpa,
-            'geohash': r.geohash,
-            'latitude_a': r.latitude_a,
-            'longitude_a': r.longitude_a,
-            'latitude_b': r.latitude_b,
-            'longitude_b': r.longitude_b
+            'mmsi_a':r.mmsi_a,
+            'mmsi_b':r.mmsi_b,
+            'timestamp':r.timestamp.isoformat(),
+            'cpa':r.cpa,
+            'tcpa':r.tcpa,
+            'geohash':r.geohash,
+            'latitude_a':r.latitude_a,
+            'longitude_a':r.longitude_a,
+            'latitude_b':r.latitude_b,
+            'longitude_b':r.longitude_b,
+            'ship1_name':r.ship1_name,
+            'ship2_name':r.ship2_name
         })
     return jsonify(result)
 
