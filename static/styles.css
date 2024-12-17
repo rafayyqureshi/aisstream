@@ -55,10 +55,9 @@ html, body {
 }
 
 .ship-history-icon {
-  /* already handled in JS with inline styles for opacity */
+  /* dynamically styled in JS */
 }
 
-/* minimal cluster style adjustments */
 .marker-cluster-small {
   background: rgba(255,0,0,0.5);
   border: 1px solid #a00;
@@ -71,7 +70,6 @@ html, body {
   padding: 4px;
 }
 
-/* Adjust panels and inputs */
 label {
   font-size: 12px;
 }
