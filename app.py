@@ -210,3 +210,5 @@ def calculate_cpa_tcpa():
 
     cpa,tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
