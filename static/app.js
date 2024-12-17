@@ -9,6 +9,10 @@ let tcpaFilter = 10;
 let markerClusterGroup; 
 let collisionMarkers = [];
 
+// Cache CPA/TCPA
+let lastSelectedPair = null;
+let lastCpaTcpa = null; // {cpa:..., tcpa:...} albo null
+
 function initMap() {
   map = L.map('map').setView([50.0, 0.0], 6);
 
@@ -33,7 +37,7 @@ function initMap() {
   L.control.layers(baseMaps, overlayMaps, {collapsed:false}).addTo(map);
 
   markerClusterGroup = L.markerClusterGroup({
-    maxClusterRadius:1, // jeszcze rzadsze klastrowanie
+    maxClusterRadius:1, // ekstremalnie rzadkie klastrowanie
     removeOutsideVisibleBounds: true
   });
   map.addLayer(markerClusterGroup);
@@ -44,17 +48,19 @@ function initMap() {
   document.getElementById('vectorLengthSlider').addEventListener('input', e => {
     vectorLength = parseInt(e.target.value);
     document.getElementById('vectorLengthValue').textContent = vectorLength;
-    updateSelectedShipsInfo();
+    // Zmieniamy długość wektora ale nie zmieniamy zaznaczenia statków.
+    // Nie będziemy ponownie pobierać cpa/tcpa jeśli para się nie zmieniła.
+    updateSelectedShipsInfo(false); 
   });
   document.getElementById('cpaFilter').addEventListener('input', e=>{
     cpaFilter = parseFloat(e.target.value);
     document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
-    fetchAndUpdateData(); // odśwież kolizje
+    fetchAndUpdateData(); 
   });
   document.getElementById('tcpaFilter').addEventListener('input', e=>{
     tcpaFilter = parseFloat(e.target.value);
     document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
-    fetchAndUpdateData(); // odśwież kolizje
+    fetchAndUpdateData();
   });
 
   document.getElementById('clearSelectedShips').addEventListener('click', ()=>{
@@ -102,35 +108,37 @@ function updateShips(data) {
     if (length != null) {
       if (length < 50) {fillColor='green'; scale=1.0;}
       else if (length<150) {fillColor='yellow'; scale=1.0;}
-      else if (length<250) {fillColor='orange'; scale=1.1;}
-      else {fillColor='red'; scale=1.2;}
+      else if (length<250) {fillColor='orange'; scale=1.0;} // zachowajmy 1.0 scale żeby były małe
+      else {fillColor='red'; scale=1.0;} 
     } else {
       fillColor='none';
       scale=1.0;
     }
 
+    // Mniejsze symbole: half size
+    // Oryginalnie: viewBox="-10 -15 20 30"
+    // Teraz: viewBox="-5 -7.5 10 15"
+    // Trójkąt: "0,-7.5 5,7.5 -5,7.5"
+    // Kwadrat zaznaczenia: wcześniej 40x40, teraz 20x20
     const rotation = ship.cog||0;
-    // Dopasowujemy iconSize do viewBoxa
-    // viewBox: -10 -15 20 30
-    // iconSize = [20*scale,30*scale], iconAnchor=(10*scale,15*scale)
-    const width = 20*scale;
-    const height = 30*scale;
+    const width = 10*scale; 
+    const height = 15*scale; 
 
     let highlightRect = '';
     if(selectedShips.includes(ship.mmsi)) {
-      highlightRect = `<rect x="-20" y="-20" width="40" height="40" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
+      highlightRect = `<rect x="-10" y="-10" width="20" height="20" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
-    const shape = `<polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+    const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
     const shipIcon = L.divIcon({
       className:'',
-      html:`<svg width="${width}" height="${height}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
+      html:`<svg width="${width}" height="${height}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);">
         ${highlightRect}
         ${shape}
       </svg>`,
       iconSize:[width,height],
-      iconAnchor:[width/2,height/2] // środek symbolu to pozycja statku
+      iconAnchor:[width/2,height/2]
     });
 
     let marker = shipMarkers[ship.mmsi];
@@ -166,21 +174,18 @@ function updateShips(data) {
     }
   });
 
-  // Po zaktualizowaniu statków, aktualizujemy panel zaznaczonych
-  updateSelectedShipsInfo();
+  // Po zaktualizowaniu statków, odśwież panel
+  updateSelectedShipsInfo(true);
 }
 
 function updateCollisionsList() {
   const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML = '';
 
-  // Usuwamy stare markery kolizji
   collisionMarkers.forEach(m=>map.removeLayer(m));
   collisionMarkers=[];
 
-  // Załóżmy, że wynik już jest najnowszy na parę statków
   let filtered = collisionsData.filter(c=>c.tcpa>0);
-
   filtered.sort((a,b)=>a.tcpa - b.tcpa);
 
   filtered.forEach(c=>{
@@ -201,17 +206,17 @@ function updateCollisionsList() {
 
     collisionList.appendChild(item);
 
-    // Dodajemy marker kolizji na mapę
+    // Marker kolizji
     const collisionLat = (c.latitude_a+c.latitude_b)/2;
     const collisionLon = (c.longitude_a+c.longitude_b)/2;
     const collisionIcon = L.divIcon({
       className:'',
-      html:`<svg width="30" height="30" viewBox="-15 -15 30 30">
-        <polygon points="0,-10 10,10 -10,10" fill="yellow" stroke="red" stroke-width="2"/>
-        <text x="0" y="4" text-anchor="middle" font-size="12" font-weight="bold" fill="red">!</text>
+      html:`<svg width="15" height="15" viewBox="-7.5 -7.5 15 15">
+        <polygon points="0,-5 5,5 -5,5" fill="yellow" stroke="red" stroke-width="2"/>
+        <text x="0" y="2" text-anchor="middle" font-size="8" font-weight="bold" fill="red">!</text>
       </svg>`,
-      iconSize:[30,30],
-      iconAnchor:[15,15]
+      iconSize:[15,15],
+      iconAnchor:[7.5,7.5]
     });
 
     const collisionMarker = L.marker([collisionLat, collisionLon], {icon: collisionIcon});
@@ -226,7 +231,8 @@ function updateCollisionsList() {
 function zoomToCollision(c) {
   const lat = (c.latitude_a+c.latitude_b)/2;
   const lon = (c.longitude_a+c.longitude_b)/2;
-  map.setView([lat,lon],10);
+  // Zoom ~14, aby pokazać obszar ~800-900m
+  map.setView([lat,lon],14);
 
   clearSelectedShips();
   selectShip(c.mmsi_a);
@@ -236,27 +242,31 @@ function zoomToCollision(c) {
   if(vectorLength<1) vectorLength=1;
   document.getElementById('vectorLengthSlider').value=vectorLength;
   document.getElementById('vectorLengthValue').textContent=vectorLength;
-  updateSelectedShipsInfo();
+  updateSelectedShipsInfo(true);
 }
 
 function selectShip(mmsi) {
   if(selectedShips.includes(mmsi)) {
-    return; // już zaznaczony
+    return;
   }
-  // jeśli mamy już 2 statki, to odznaczamy pierwszy
   if(selectedShips.length===2) {
     selectedShips.shift();
   }
   selectedShips.push(mmsi);
-  updateSelectedShipsInfo();
+  updateSelectedShipsInfo(true);
 }
 
 function clearSelectedShips() {
   selectedShips=[];
-  updateSelectedShipsInfo();
+  lastSelectedPair = null;
+  lastCpaTcpa = null;
+  updateSelectedShipsInfo(true);
 }
 
-function updateSelectedShipsInfo() {
+function updateSelectedShipsInfo(selectionChanged) {
+  // selectionChanged == true, jeśli zmieniła się lista zaznaczonych statków
+  // jeśli false, to nie zmieniamy pary statków (np. zmiana vectorLength)
+  
   const container = document.getElementById('selected-ships-info');
   container.innerHTML = '';
   document.getElementById('pair-info').innerHTML='';
@@ -284,23 +294,47 @@ function updateSelectedShipsInfo() {
     container.appendChild(div);
   });
 
+  let currentPair = null;
   if(selectedShips.length===2) {
-    const mmsi_a = selectedShips[0];
-    const mmsi_b = selectedShips[1];
+    // Sortujemy żeby para była deterministyczna
+    currentPair = [...selectedShips].sort((a,b)=>a-b);
+  } else {
+    currentPair = null;
+  }
+
+  // Pobierz cpa/tcpa tylko jeśli mamy dwie zaznaczone jednostki
+  // i jeśli para się zmieniła (selectionChanged oraz para inna niż lastSelectedPair)
+  if(currentPair && (selectionChanged || JSON.stringify(currentPair)!=JSON.stringify(lastSelectedPair))) {
+    lastSelectedPair = currentPair;
+    lastCpaTcpa = null; 
+    const mmsi_a = currentPair[0];
+    const mmsi_b = currentPair[1];
 
     fetch(`/calculate_cpa_tcpa?mmsi_a=${mmsi_a}&mmsi_b=${mmsi_b}`)
       .then(r=>r.json())
       .then(data=>{
-        if(data.cpa && data.tcpa){
-          document.getElementById('pair-info').innerHTML=`<b>CPA/TCPA:</b> ${data.cpa.toFixed(2)} nm / ${data.tcpa.toFixed(2)} min`;
-        } else {
+        let cpa = data.cpa;
+        let tcpa = data.tcpa;
+        if(!cpa || !tcpa || cpa>20 || tcpa>180 || cpa<0 || tcpa<0) {
           document.getElementById('pair-info').innerHTML='<b>CPA/TCPA:</b> N/A';
+          lastCpaTcpa = {cpa:null, tcpa:null};
+        } else {
+          document.getElementById('pair-info').innerHTML=`<b>CPA/TCPA:</b> ${cpa.toFixed(2)} nm / ${tcpa.toFixed(2)} min`;
+          lastCpaTcpa = {cpa, tcpa};
         }
       })
       .catch(err=>{
         console.error("Error fetching CPA/TCPA:", err);
-        document.getElementById('pair-info').innerHTML='<b>CPA/TCPA:</b> Error';
+        document.getElementById('pair-info').innerHTML='<b>CPA/TCPA:</b> N/A';
+        lastCpaTcpa = {cpa:null, tcpa:null};
       });
+  } else if(currentPair && lastCpaTcpa) {
+    // Jeśli para się nie zmieniła, używamy poprzedniego wyniku
+    if(!lastCpaTcpa.cpa || !lastCpaTcpa.tcpa) {
+      document.getElementById('pair-info').innerHTML='<b>CPA/TCPA:</b> N/A';
+    } else {
+      document.getElementById('pair-info').innerHTML=`<b>CPA/TCPA:</b> ${lastCpaTcpa.cpa.toFixed(2)} nm / ${lastCpaTcpa.tcpa.toFixed(2)} min`;
+    }
   }
 
   selectedShips.forEach(mmsi=>{
@@ -322,27 +356,26 @@ function reloadAllShipIcons() {
     if (length != null) {
       if (length < 50) {fillColor='green'; scale=1.0;}
       else if (length<150) {fillColor='yellow'; scale=1.0;}
-      else if (length<250) {fillColor='orange'; scale=1.1;}
-      else {fillColor='red'; scale=1.2;}
+      else if (length<250) {fillColor='orange'; scale=1.0;}
+      else {fillColor='red'; scale=1.0;}
     } else {
-      fillColor='none';
-      scale=1.0;
+      fillColor='none';scale=1.0;
     }
 
     const rotation = ship.cog||0;
-    const width = 20*scale;
-    const height = 30*scale;
+    const width = 10*scale;
+    const height = 15*scale;
 
-    const shape = `<polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+    const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
     let highlightRect='';
     if(selectedShips.includes(ship.mmsi)) {
-      highlightRect = `<rect x="-20" y="-20" width="40" height="40" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
+      highlightRect = `<rect x="-10" y="-10" width="20" height="20" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
     const icon = L.divIcon({
       className:'',
-      html:`<svg width="${width}" height="${height}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);">
+      html:`<svg width="${width}" height="${height}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);">
         ${highlightRect}
         ${shape}
       </svg>`,
@@ -354,6 +387,9 @@ function reloadAllShipIcons() {
 }
 
 function showHistory(mmsi) {
+  // Past positions tylko dla zaznaczonych statków.
+  if(!selectedShips.includes(mmsi)) return; 
+
   fetch('/ships')
     .then(r=>r.json())
     .then(data=>{
@@ -363,9 +399,10 @@ function showHistory(mmsi) {
 
       historyMarkers[mmsi]=[];
       const now=Date.now();
-      // i=0 -> najnowsza historia (0.1 opacity), i=9 -> najstarsza (1.0 opacity)
+      // i=0 -> najnowsza historia (opacity=1.0), i=9 -> najstarsza (0.1)
+      // opacity = 1.0 - i*0.1
       shipPos.forEach((pos,i)=>{
-        let opacity=(i+1)*0.1;
+        let opacity=1.0 - i*0.1;
         const rotation=pos.cog||0;
 
         let fillColor='none',strokeColor='#000',scale=1.0;
@@ -373,18 +410,18 @@ function showHistory(mmsi) {
         if(length!=null){
           if(length<50){fillColor='green';scale=1.0;}
           else if(length<150){fillColor='yellow';scale=1.0;}
-          else if(length<250){fillColor='orange';scale=1.1;}
-          else{fillColor='red';scale=1.2;}
+          else if(length<250){fillColor='orange';scale=1.0;}
+          else{fillColor='red';scale=1.0;}
         } else {
           fillColor='none';scale=1.0;
         }
 
-        const width = 20*scale;
-        const height = 30*scale;
+        const width = 10*scale;
+        const height = 15*scale;
         const icon = L.divIcon({
           className:'',
-          html:`<svg width="${width}" height="${height}" viewBox="-10 -15 20 30" style="transform:rotate(${rotation}deg);opacity:${opacity}">
-            <polygon points="0,-15 10,15 -10,15" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>
+          html:`<svg width="${width}" height="${height}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);opacity:${opacity}">
+            <polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>
           </svg>`,
           iconSize:[width,height],
           iconAnchor:[width/2,height/2]
