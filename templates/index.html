@@ -1,63 +1,51 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>AIS Collision Detection</title>
+  <meta charset="UTF-8" />
+  <title>AIS Collision Detection</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" integrity="" crossorigin="" />
+  <!-- OpenSeaMap layer -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"/>
+  <link rel="stylesheet" href="static/styles.css">
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+  <!-- MarkerCluster CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <!-- JavaScript libs -->
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" integrity="" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 
-<style>
-body {
-  margin:0;
-  padding:0;
-  overflow:hidden;
-}
-#left-panel {
-  position:absolute;
-  top:0;
-  bottom:0;
-  left:0;
-  width:200px;
-  background:#fff;
-  z-index:9999;
-  overflow:auto;
-  padding:10px;
-}
-#map {
-  position:absolute;
-  top:0;
-  bottom:0;
-  left:200px;
-  right:300px;
-}
-#right-panel {
-  position:absolute;
-  top:0;
-  bottom:0;
-  right:0;
-  width:300px;
-  background:#fff;
-  z-index:9999;
-  overflow:auto;
-  padding:10px;
-}
-
-</style>
 </head>
 <body>
-<div id="left-panel">
-  <div id="left-panel-content"></div>
-</div>
-<div id="map"></div>
-<div id="right-panel">
-  <h2>Collisions</h2>
-  <div id="collision-list"></div>
-</div>
-<script src="{{ url_for('static', filename='app.js') }}"></script>
+  <div id="left-panel">
+    <h2>Statki zaznaczone</h2>
+    <div id="vector-length-container">
+      <label for="vectorLengthSlider">Długość wektora (min):</label>
+      <input type="range" id="vectorLengthSlider" min="1" max="120" value="15">
+      <span id="vectorLengthValue">15</span>
+    </div>
+    <div id="selected-ships-info">
+      <!-- Tu dynamicznie pojawią się informacje o zaznaczonych statkach -->
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <div id="right-panel">
+    <h2>Kolizje</h2>
+    <div id="risk-filters">
+      <label><input type="checkbox" value="High" checked onchange="filterCollisions()"> High</label><br>
+      <label><input type="checkbox" value="Medium" checked onchange="filterCollisions()"> Medium</label><br>
+      <label><input type="checkbox" value="Low" checked onchange="filterCollisions()"> Low</label>
+    </div>
+    <div id="collision-list">
+      <!-- Lista kolizji pojawi się tutaj -->
+    </div>
+  </div>
+
+  <script src="static/app.js"></script>
 </body>
 </html>
