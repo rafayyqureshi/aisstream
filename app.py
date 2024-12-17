@@ -11,12 +11,10 @@ client = bigquery.Client()
 
 @app.route('/')
 def index():
-    # Renderuje index.html jako stronę główną
     return render_template('index.html')
 
 @app.route('/ships')
 def ships():
-    # Pobiera ostatnie dane pozycji statków np. z ostatnich 2 minut
     query = """
     SELECT
       mmsi,
@@ -47,15 +45,12 @@ def ships():
 
 @app.route('/collisions')
 def collisions():
-    # Usuwamy skorelowane subqueries i zastępujemy je JOINami
-    # Najpierw tworzymy CTE latest_positions do pobrania najnowszej nazwy statku dla każdego MMSI:
+    # W tej wersji zakładamy, że w latest_positions zawsze jest co najmniej jeden wpis.
+    # Jeśli nie, ship_name może być NULL, wtedy fallback do MMSI w kodzie poniżej.
     query = """
     WITH latest_positions AS (
-      SELECT
-        mmsi,
-        ship_name,
-        timestamp,
-        ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) AS rn
+      SELECT mmsi, ship_name, timestamp,
+      ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rn
       FROM `ais_dataset.ships_positions`
     )
     SELECT 
@@ -72,17 +67,27 @@ def collisions():
       la.ship_name AS ship1_name,
       lb.ship_name AS ship2_name
     FROM `ais_dataset.collisions` c
-    LEFT JOIN latest_positions la
-      ON la.mmsi = c.mmsi_a AND la.rn = 1
-    LEFT JOIN latest_positions lb
-      ON lb.mmsi = c.mmsi_b AND lb.rn = 1
+    LEFT JOIN latest_positions la ON la.mmsi = c.mmsi_a AND la.rn = 1
+    LEFT JOIN latest_positions lb ON lb.mmsi = c.mmsi_b AND lb.rn = 1
     WHERE c.tcpa > 0
     ORDER BY c.timestamp DESC
     LIMIT 1000
     """
+
     rows = list(client.query(query).result())
     result=[]
     for r in rows:
+        ship1_name = r.ship1_name if r.ship1_name else str(r.mmsi_a)
+        ship2_name = r.ship2_name if r.ship2_name else str(r.mmsi_b)
+
+        # Jeśli obie nazwy są takie same i mmsi różne, dopisz mmsi do drugiego
+        if ship1_name == ship2_name and r.mmsi_a != r.mmsi_b:
+            ship2_name = f"{ship2_name} ({r.mmsi_b})"
+        
+        # Jeśli mmsi_a == mmsi_b (co nie powinno mieć miejsca), pomiń ten wpis
+        if r.mmsi_a == r.mmsi_b:
+            continue
+
         result.append({
             'mmsi_a': r.mmsi_a,
             'mmsi_b': r.mmsi_b,
@@ -94,8 +99,8 @@ def collisions():
             'longitude_a': r.longitude_a,
             'latitude_b': r.latitude_b,
             'longitude_b': r.longitude_b,
-            'ship1_name': r.ship1_name,
-            'ship2_name': r.ship2_name
+            'ship1_name': ship1_name,
+            'ship2_name': ship2_name
         })
     return jsonify(result)
 
