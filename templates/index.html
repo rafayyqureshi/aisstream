@@ -16,9 +16,9 @@
 </head>
 <body>
   <div id="left-panel">
-    <h2>Statki zaznaczone</h2>
+    <h2>Selected Ships</h2>
     <div id="vector-length-container">
-      <label for="vectorLengthSlider">Długość wektora (min):</label>
+      <label for="vectorLengthSlider">Vector length (min):</label>
       <input type="range" id="vectorLengthSlider" min="1" max="120" value="15">
       <span id="vectorLengthValue">15</span>
     </div>
@@ -28,16 +28,11 @@
   <div id="map"></div>
 
   <div id="right-panel">
-    <h2>Kolizje</h2>
-    <div id="risk-filters">
-      <label><input type="checkbox" value="High" checked onchange="filterCollisions()"> High</label><br>
-      <label><input type="checkbox" value="Medium" checked onchange="filterCollisions()"> Medium</label><br>
-      <label><input type="checkbox" value="Low" checked onchange="filterCollisions()"> Low</label>
-    </div>
+    <h2>Collisions</h2>
     <div id="collision-filters">
-      <label>CPA max (Nm): <input type="range" id="cpaFilter" min="0" max="0.5" step="0.01" value="0.5"></label>
+      <label>Max CPA (Nm): <input type="range" id="cpaFilter" min="0" max="0.5" step="0.01" value="0.5"></label>
       <span id="cpaValue">0.5</span><br>
-      <label>TCPA max (min): <input type="range" id="tcpaFilter" min="1" max="10" step="1" value="10"></label>
+      <label>Max TCPA (min): <input type="range" id="tcpaFilter" min="1" max="10" step="1" value="10"></label>
       <span id="tcpaValue">10</span>
     </div>
     <div id="collision-list"></div>
