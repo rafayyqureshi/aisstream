@@ -8,11 +8,9 @@ let tcpaFilterVal=10;
 let vectorLength=15;
 let collisionTimer=null;
 let shipsTimer=null;
+let collisionMarkers=[]; // ADDED - przechowujemy markery kolizji
 
-// Icon definitions
-// Base ship symbol as a triangle path
 function getShipIcon(ship) {
-  // color scaling by length:
   let fillColor='white';
   let scale=1.0;
   if(!ship.ship_length){
@@ -45,12 +43,26 @@ function getShipIcon(ship) {
 }
 
 function getSelectedShipBoxIcon(){
-  // a black dashed square slightly bigger than ship (let's say 40x40)
   return L.divIcon({
     className:'selection-icon',
     html:`<div style="width:40px;height:40px;border:2px dashed black;position:absolute;left:-20px;top:-20px;"></div>`,
     iconSize:[40,40],
     iconAnchor:[20,20]
+  });
+}
+
+// ADDED: Ikona kolizji - czerwony trójkąt z wykrzyknikiem
+function getCollisionIcon(){
+  return L.divIcon({
+    className:'collision-icon',
+    html:`<div style="width:30px;height:30px;position:absolute;left:-15px;top:-15px;">
+          <svg width="30" height="30" viewBox="0 0 20 20">
+            <polygon points="10,0 20,20 0,20" fill="red" stroke="black" stroke-width="1"/>
+            <text x="10" y="15" font-size="10" text-anchor="middle" fill="white" font-weight="bold">!</text>
+          </svg>
+          </div>`,
+    iconSize:[30,30],
+    iconAnchor:[15,15]
   });
 }
 
@@ -111,9 +123,7 @@ function fetchAndUpdateCollisions(){
 }
 
 function updateShipsOnMap(ships){
-  // update or create markers
   let currentMMSIs=ships.map(s=>s.mmsi);
-  // remove markers not in current list
   for(let mmsi in shipMarkers){
     if(!currentMMSIs.includes(parseInt(mmsi))){
       map.removeLayer(shipMarkers[mmsi].marker);
@@ -131,11 +141,9 @@ function updateShipsOnMap(ships){
         .addTo(map);
       shipMarkers[ship.mmsi].marker=marker;
     } else {
-      //update position
       shipMarkers[ship.mmsi].marker.setLatLng([ship.latitude,ship.longitude]);
       shipMarkers[ship.mmsi].marker.setIcon(getShipIcon(ship));
     }
-    // tooltip: name,cog,sog,length,last update age
     let diff=humanTimeDiff(ship.timestamp);
     let nm=ship.ship_name||'Unknown';
     let sogtxt=ship.sog?ship.sog.toFixed(1)+' kn':'N/A';
@@ -144,7 +152,6 @@ function updateShipsOnMap(ships){
     let ttip=`${nm}\nMMSI: ${ship.mmsi}\nSOG: ${sogtxt}\nCOG: ${cogtxt}\nLength: ${lentxt}\nLast update: ${diff} ago`;
     shipMarkers[ship.mmsi].marker.bindTooltip(ttip,{permanent:false});
 
-    // if selected, show vector and selection box
     if(selectedShips.find(s=>s.mmsi===ship.mmsi)){
       updateShipVector(ship);
       updateShipSelectionBox(ship);
@@ -158,20 +165,16 @@ function updateShipsOnMap(ships){
 function toggleSelectShip(ship){
   let idx=selectedShips.findIndex(s=>s.mmsi===ship.mmsi);
   if(idx>=0){
-    // remove from selected
     selectedShips.splice(idx,1);
     clearShipHistoryMarkers();
   } else {
-    // if already 2 selected, clear them
     if(selectedShips.length===2){
       selectedShips=[];
       clearShipHistoryMarkers();
     }
     selectedShips.push(ship);
-    // fetch history for this ship:
     fetchShipHistory(ship.mmsi);
     if(selectedShips.length===2){
-      // second ship also show its history
       fetchShipHistory(selectedShips[0].mmsi);
       fetchShipHistory(selectedShips[1].mmsi);
     }
@@ -180,17 +183,7 @@ function toggleSelectShip(ship){
 }
 
 function fetchShipHistory(mmsi){
-  // If no backend for history, we skip or mock data
-  // For now mock empty or skip:
-  // TODO: implement history if needed
-  // Just clear history to avoid errors
-  // If implemented:
-  /*
-  fetch('/ship_history?mmsi='+mmsi)
-    .then(r=>r.json())
-    .then(data=>updateShipHistoryMarkers(mmsi,data))
-    .catch(e=>console.error("Hist error:",e));
-  */
+  // TODO: implement if needed
   clearShipHistoryMarkers();
 }
 
@@ -199,29 +192,13 @@ function clearShipHistoryMarkers(){
   shipHistoryMarkers=[];
 }
 
-function updateShipHistoryMarkers(mmsi,historyData){
-  clearShipHistoryMarkers();
-  historyData.forEach((pos,i)=>{
-    if(i>9)return;
-    let opacity=1-(i*0.1);
-    let marker=L.circleMarker([pos.lat,pos.lon],{
-      radius:4,
-      fillColor:'blue',fillOpacity:opacity,
-      color:'black',weight:1,opacity:opacity
-    }).addTo(map);
-    let diff=humanTimeDiff(pos.timestamp);
-    marker.bindTooltip(`History pos: ${diff} ago`,{permanent:false});
-    shipHistoryMarkers.push(marker);
-  });
-}
-
 function updateSelectedShipsInfo(){
   const cont=document.getElementById('selected-ships-info');
   cont.innerHTML='';
-  if(selectedShips.length===0){
-    return; 
-  }
-  const vecSpan=vectorLength;
+  const pairInfo=document.getElementById('pair-info');
+  pairInfo.innerHTML='';
+
+  if(selectedShips.length===0)return; 
 
   selectedShips.forEach(s=>{
     let sogtxt=s.sog? s.sog.toFixed(1)+' kn':'N/A';
@@ -237,9 +214,7 @@ function updateSelectedShipsInfo(){
     Length: ${lentxt}`;
     cont.appendChild(div);
   });
-  // If we have 2 ships selected, show CPA/TCPA
-  const pairInfo=document.getElementById('pair-info');
-  pairInfo.innerHTML='';
+  
   if(selectedShips.length===2){
     let c=computeCPA(selectedShips[0],selectedShips[1]);
     if(c){
@@ -250,35 +225,29 @@ function updateSelectedShipsInfo(){
 
 function computeCPA(shipA, shipB){
   if(!shipA.sog||!shipA.cog||!shipB.sog||!shipB.cog)return null;
-  // Simple CPA calculation...
   let latA=shipA.latitude;let lonA=shipA.longitude;
   let latB=shipB.latitude;let lonB=shipB.longitude;
-  // convert sog(knots)->m/s: sog*0.51444
   let va=shipA.sog*0.51444;let vb=shipB.sog*0.51444;
   let ca=deg2rad(shipA.cog);let cb=deg2rad(shipB.cog);
   let vxA=va*Math.sin(ca);let vyA=va*Math.cos(ca);
   let vxB=vb*Math.sin(cb);let vyB=vb*Math.cos(cb);
 
-  //convert lat/lon to simple XY:
-  let scaleLat=111000; 
   let latRef=50.0;
+  let scaleLat=111000; 
   let scaleLon=111000*Math.cos(deg2rad(latRef));
   let xA=(lonA*scaleLon);let yA=(latA*scaleLat);
   let xB=(lonB*scaleLon);let yB=(latB*scaleLat);
-
   let dx=xA-xB;let dy=yA-yB;
   let dvx=vxA-vxB;let dvy=vyA-vyB;
   let VV=dvx*dvx+dvy*dvy;
   if(VV===0){
-    // same speed vector or no movement
-    var dist=Math.sqrt(dx*dx+dy*dy);
+    let dist=Math.sqrt(dx*dx+dy*dy);
     let distNm=dist/1852;
     return {cpa:distNm,tcpa:0};
   }
   let PV=dx*dvx+dy*dvy;
   let tcpa=-PV/VV;
   if(tcpa<0) tcpa=0;
-  // positions at tcpa
   let xA2=xA+vxA*tcpa;let yA2=yA+vyA*tcpa;
   let xB2=xB+vxB*tcpa;let yB2=yB+vyB*tcpa;
   let dist=Math.sqrt((xA2 - xB2)**2+(yA2 - yB2)**2);
@@ -292,7 +261,7 @@ function deg2rad(deg){return deg*Math.PI/180;}
 
 function humanTimeDiff(ts){
   let now=Date.now();
-  let diff=(now-(new Date(ts)).getTime())/1000; // sec
+  let diff=(now-(new Date(ts)).getTime())/1000;
   if(diff<60) return diff.toFixed(0)+'s';
   let min=diff/60;
   return min.toFixed(0)+' min';
@@ -334,7 +303,6 @@ function updateShipVector(ship){
 
 function updateShipSelectionBox(ship){
   removeShipSelectionBox(ship.mmsi);
-  // place selection box at ship pos
   let boxMarker=L.marker([ship.latitude,ship.longitude],{icon:getSelectedShipBoxIcon()}).addTo(map);
   shipMarkers[ship.mmsi].selectionBox=boxMarker;
 }
@@ -342,11 +310,13 @@ function updateShipSelectionBox(ship){
 function updateCollisionsList(){
   const list=document.getElementById('collision-list');
   list.innerHTML='';
+  collisionMarkers.forEach(m=>map.removeLayer(m)); // remove old markers
+  collisionMarkers=[];
 
-  // Filter collisions:
-  // Remove duplicates, same ship pairs, TCPA=0 (server side no tcp=0), cpa>cpaFilterVal, tcpa>tcpaFilterVal done client side:
   let uniqueKeys=new Set();
   let filtered=collisionsData.filter(c=>{
+    // odrzucamy kolizje z tcpa=0
+    if(c.tcpa<=0)return false;
     if(c.mmsi_a===c.mmsi_b)return false;
     if(c.cpa>cpaFilterVal)return false;
     if(c.tcpa>tcpaFilterVal)return false;
@@ -369,24 +339,43 @@ function updateCollisionsList(){
       <button class="zoom-button">🔍</button></div>
     `;
     item.querySelector('.zoom-button').addEventListener('click',()=>{
-      map.setView([(col.latitude_a+col.latitude_b)/2,(col.longitude_a+col.longitude_b)/2],12);
-      // fetch ships to find these two
-      fetch('/ships')
-        .then(r=>r.json())
-        .then(data=>{
-          let sA=data.find(s=>s.mmsi===col.mmsi_a);
-          let sB=data.find(s=>s.mmsi===col.mmsi_b);
-          selectedShips=[];
-          clearShipHistoryMarkers();
-          if(sA) selectedShips.push(sA);
-          if(sB) selectedShips.push(sB);
-          if(sA)fetchShipHistory(sA.mmsi);
-          if(sB)fetchShipHistory(sB.mmsi);
-          updateSelectedShipsInfo();
-        });
+      handleCollisionAction(col);
     });
+
+    // ADDED: Dodajemy marker kolizji na mapie
+    let collisionMarker=L.marker([(col.latitude_a+col.latitude_b)/2,(col.longitude_a+col.longitude_b)/2],{icon:getCollisionIcon()})
+      .on('click',()=>{
+        handleCollisionAction(col);
+      }).addTo(map);
+    collisionMarkers.push(collisionMarker);
+
     list.appendChild(item);
   });
+}
+
+// ADDED: funkcja obsługi kolizji (po kliknięciu lupy lub ikony kolizji)
+function handleCollisionAction(col){
+  map.setView([(col.latitude_a+col.latitude_b)/2,(col.longitude_a+col.longitude_b)/2],12);
+  fetch('/ships')
+    .then(r=>r.json())
+    .then(data=>{
+      let sA=data.find(s=>s.mmsi===col.mmsi_a);
+      let sB=data.find(s=>s.mmsi===col.mmsi_b);
+      selectedShips=[];
+      clearShipHistoryMarkers();
+      if(sA) selectedShips.push(sA);
+      if(sB) selectedShips.push(sB);
+      // Ustaw vectorLength = TCPA z kolizji (zaokrąglij jeśli trzeba)
+      let newVectorLength=Math.floor(col.tcpa);
+      if(newVectorLength<1)newVectorLength=1;
+      if(newVectorLength>120)newVectorLength=120;
+      vectorLength=newVectorLength;
+      document.getElementById('vectorLengthSlider').value=vectorLength;
+      document.getElementById('vectorLengthValue').textContent=vectorLength;
+      if(sA)fetchShipHistory(sA.mmsi);
+      if(sB)fetchShipHistory(sB.mmsi);
+      updateSelectedShipsInfo();
+    });
 }
 
 document.addEventListener('DOMContentLoaded',initMap);
