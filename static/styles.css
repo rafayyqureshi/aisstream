@@ -14,9 +14,10 @@ body, html {
   bottom: 0;
 }
 
-#left-panel, #right-panel {
+#left-panel {
   position: absolute;
   top: 0;
+  left:0;
   width: 300px;
   height: 100%;
   background-color: #f8f8f8;
@@ -25,11 +26,23 @@ body, html {
   padding: 10px;
   font-size:14px;
   line-height:1.2em;
+  z-index:1000;
 }
 
 #right-panel {
+  position:absolute;
+  top:0;
   right:0;
+  width:300px;
+  height:100%;
+  background-color:#f8f8f8;
+  overflow:auto;
   box-shadow:-2px 0 5px rgba(0,0,0,0.3);
+  padding:10px;
+  font-size:14px;
+  line-height:1.2em;
+  z-index:1000;
+  white-space: normal;
 }
 
 h2 {
@@ -56,6 +69,9 @@ label {
   padding: 10px 0;
   cursor: pointer;
   font-size:14px;
+  overflow:hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #collision-list .collision-item:hover {
@@ -68,8 +84,4 @@ label {
   cursor: pointer;
   font-size: 14px;
   margin-left:5px;
-}
-
-#cpaFilter, #tcpaFilter {
-  width:80%;
 }

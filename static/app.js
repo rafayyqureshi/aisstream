@@ -1,5 +1,5 @@
 let map;
-let shipMarkers = {}; // key: mmsi
+let shipMarkers = {}; // {mmsi:{marker,boxMarker,vectorLine}}
 let selectedShips = [];
 let vectorLength = 15;
 let collisionsData = [];
@@ -58,6 +58,18 @@ function getShipStyle(ship) {
   return {fillColor,scale};
 }
 
+function humanTimeDiff(ts) {
+  if(!ts)return '';
+  let now=Date.now();
+  let t=new Date(ts).getTime();
+  let diffSec=(now - t)/1000;
+  if(diffSec<60) return diffSec.toFixed(0)+'s ago';
+  else {
+    let diffMin=diffSec/60;
+    return diffMin.toFixed(1)+'m ago';
+  }
+}
+
 function updateShips(data) {
   let seen=new Set();
   data.forEach(ship=>{
@@ -68,20 +80,23 @@ function updateShips(data) {
       let marker=L.marker([ship.latitude,ship.longitude],{icon}).addTo(map);
       marker.shipData=ship;
       marker.on('click',()=>toggleSelectShip(ship));
-      marker.bindTooltip(`${ship.ship_name||('MMSI:'+ship.mmsi)}`,{permanent:false,className:'ship-tooltip'});
-      shipMarkers[ship.mmsi]={marker:marker,box:null,vectorLine:null};
+      let tooltipContent=`${ship.ship_name||("MMSI:"+ship.mmsi)}<br>SOG:${ship.sog||'N/A'}kn<br>COG:${ship.cog||'N/A'}°<br>${ship.ship_length?'Len:'+ship.ship_length+'m<br>':''}${humanTimeDiff(ship.timestamp)}`;
+      marker.bindTooltip(tooltipContent,{permanent:false,className:'ship-tooltip'});
+      shipMarkers[ship.mmsi]={marker:marker,boxMarker:null,vectorLine:null};
     } else {
       const obj=shipMarkers[ship.mmsi];
       obj.marker.setLatLng([ship.latitude,ship.longitude]);
       obj.marker.shipData=ship;
       obj.marker.setIcon(icon);
+      let tooltipContent=`${ship.ship_name||("MMSI:"+ship.mmsi)}<br>SOG:${ship.sog||'N/A'}kn<br>COG:${ship.cog||'N/A'}°<br>${ship.ship_length?'Len:'+ship.ship_length+'m<br>':''}${humanTimeDiff(ship.timestamp)}`;
+      obj.marker.bindTooltip(tooltipContent,{permanent:false,className:'ship-tooltip'});
     }
   });
 
   for(let mmsi in shipMarkers) {
     if(!seen.has(parseInt(mmsi))) {
       let obj=shipMarkers[mmsi];
-      if(obj.box) map.removeLayer(obj.box);
+      if(obj.boxMarker) map.removeLayer(obj.boxMarker);
       if(obj.vectorLine) map.removeLayer(obj.vectorLine);
       map.removeLayer(obj.marker);
       delete shipMarkers[mmsi];
@@ -106,6 +121,17 @@ function createShipIcon(cog,fillColor,scale) {
   });
 }
 
+function createBoxIcon(scale){
+  // Slightly bigger than ship icon: if ship ~20x20, box ~30x30:
+  let size=30*scale;
+  return L.divIcon({
+    className:'',
+    html:`<div style="width:${size}px;height:${size}px;border:2px dashed black;"></div>`,
+    iconSize:[size,size],
+    iconAnchor:[size/2,size/2]
+  });
+}
+
 function toggleSelectShip(ship) {
   const idx=selectedShips.findIndex(s=>s.mmsi===ship.mmsi);
   if(idx>=0) {
@@ -127,10 +153,10 @@ function updateSelectedShipsInfo() {
     let div=document.createElement('div');
     div.classList.add('ship-info');
     div.innerHTML=`
-      <strong>${ship.ship_name||("MMSI:"+ship.mmsi)}</strong>
+      <strong>${ship.ship_name||("MMSI:"+ship.mmsi)}</strong><br>
       MMSI: ${ship.mmsi}<br>
       SOG: ${ship.sog||'N/A'} kn<br>
-      COG: ${ship.cog||'N/A'}°
+      COG: ${ship.cog||'N/A'}°<br>
       ${ship.ship_length?'Length: '+ship.ship_length+' m':''}
     `;
     container.appendChild(div);
@@ -142,7 +168,7 @@ function updateSelectedShipsInfo() {
       let div=document.createElement('div');
       div.classList.add('ship-info');
       div.innerHTML=`
-        <strong>CPA/TCPA for selected pair:</strong>
+        <strong>CPA/TCPA for selected pair:</strong><br>
         CPA: ${cpaData.cpa.toFixed(2)} nm<br>
         TCPA: ${cpaData.tcpa.toFixed(2)} min
       `;
@@ -156,7 +182,7 @@ function updateSelectedShipsInfo() {
 function drawSelectionHighlights() {
   for(let mmsi in shipMarkers) {
     let obj=shipMarkers[mmsi];
-    if(obj.box){map.removeLayer(obj.box);obj.box=null;}
+    if(obj.boxMarker){map.removeLayer(obj.boxMarker);obj.boxMarker=null;}
     if(obj.vectorLine){map.removeLayer(obj.vectorLine);obj.vectorLine=null;}
   }
 
@@ -165,15 +191,16 @@ function drawSelectionHighlights() {
     if(!m)return;
     const pos=m.marker.getLatLng();
 
-    // Black dashed square
-    let delta=0.0008;
-    let boxBounds=[[pos.lat-delta,pos.lng-delta],[pos.lat+delta,pos.lng+delta]];
-    m.box=L.rectangle(boxBounds,{color:'black',weight:3,dashArray:'5,5',fill:false}).addTo(map);
+    // create box marker icon
+    let {scale}=getShipStyle(ship);
+    let boxIcon=createBoxIcon(scale);
+    m.boxMarker=L.marker(pos,{icon:boxIcon,interactive:false}).addTo(map);
 
     // Vector line: black dashed line
     const cpaData=computeCPAData(ship,pos);
     if(cpaData){
-      m.vectorLine=L.polyline([pos,[cpaData.endLat,cpaData.endLng]],{color:'black',weight:2,dashArray:'5,5'}).addTo(map);
+      let lineOpts={color:'black',weight:2,dashArray:'5,5'};
+      m.vectorLine=L.polyline([pos,[cpaData.endLat,cpaData.endLng]],lineOpts).addTo(map);
     }
   });
 }
@@ -183,6 +210,9 @@ function computeCPAData(ship,pos) {
   let distanceNm=ship.sog*(vectorLength/60);
   let distanceDeg=distanceNm*(1/60);
   let cogRad=ship.cog*(Math.PI/180);
+
+  // Approx: latDist = distanceDeg * cos, lngDist = distanceDeg * sin
+  // This is approximate, but good enough for short distances
   let endLat=pos.lat + distanceDeg*Math.cos(cogRad);
   let endLng=pos.lng + distanceDeg*Math.sin(cogRad);
   return {endLat,endLng};
@@ -230,19 +260,33 @@ function updateCollisionsList() {
     return true;
   });
 
-  filtered.sort((a,b)=>a.cpa-b.cpa);
+  // sort by TCPA ascending
+  filtered.sort((a,b)=>a.tcpa - b.tcpa);
 
   filtered.forEach(col=>{
     const item=document.createElement('div');
     item.classList.add('collision-item');
+    let shipA=col.ship1_name||('Unknown');
+    let shipB=col.ship2_name||('Unknown');
     item.innerHTML=`
-      <div><strong>${col.ship1_name||col.ship1_mmsi} - ${col.ship2_name||col.ship2_mmsi}</strong><br>
+      <div><strong>${shipA} - ${shipB}</strong><br>
       CPA: ${col.cpa.toFixed(2)} nm, TCPA: ${col.tcpa.toFixed(2)} min
       <button class="zoom-button">🔍</button>
       </div>
     `;
     item.querySelector('.zoom-button').addEventListener('click',()=>{
       map.setView([(col.latitude_a+col.latitude_b)/2,(col.longitude_a+col.longitude_b)/2],12);
+      // After zoom, select these ships
+      fetch('/ships')
+        .then(r=>r.json())
+        .then(data=>{
+          let sA=data.find(s=>s.mmsi===col.mmsi_a);
+          let sB=data.find(s=>s.mmsi===col.mmsi_b);
+          selectedShips=[];
+          if(sA) selectedShips.push(sA);
+          if(sB) selectedShips.push(sB);
+          updateSelectedShipsInfo();
+        });
     });
     list.appendChild(item);
   });
