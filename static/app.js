@@ -374,10 +374,10 @@ function reloadAllShipIcons() {
     let strokeColor = '#000000';
 
     if (length != null) {
-      if (length < 50) {fillColor='green'; scale=0.9;}
+      if (length < 50) {fillColor='green'; scale=1.0;}
       else if (length<150) {fillColor='yellow'; scale=1.0;}
-      else if (length<250) {fillColor='orange'; scale=1.1;}
-      else {fillColor='red'; scale=1.2;}
+      else if (length<250) {fillColor='orange'; scale=1.0;}
+      else {fillColor='red'; scale=1.0;}
     } else {
       fillColor='none';scale=1.0;
     }
@@ -396,6 +396,8 @@ function reloadAllShipIcons() {
       // Czarny, wyraźny kwadrat, linia przerywana, gruba
       highlightRect = `<rect x="-10" y="-10" width="20" height="20" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
+
+    const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
     const icon = L.divIcon({
       className:'',
