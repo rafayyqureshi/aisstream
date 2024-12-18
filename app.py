@@ -107,89 +107,6 @@ def ships():
         })
     return jsonify(result)
 
-@app.route('/collisions')
-def collisions():
-    max_cpa = request.args.get('max_cpa', 0.5, type=float)
-    max_tcpa = request.args.get('max_tcpa', 10.0, type=float)
-
-    query = f"""
-    WITH filtered AS (
-      SELECT
-        c.mmsi_a,
-        c.mmsi_b,
-        c.timestamp AS coll_ts,
-        c.cpa,
-        c.tcpa,
-        c.latitude_a,
-        c.longitude_a,
-        c.latitude_b,
-        c.longitude_b
-      FROM `ais_dataset.collisions` c
-      WHERE c.tcpa > 0
-        AND c.tcpa <= {max_tcpa}
-        AND c.cpa <= {max_cpa}
-        AND c.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-    ),
-    ranked AS (
-      SELECT f.*,
-        ROW_NUMBER() OVER(
-          PARTITION BY
-            IF(f.mmsi_a < f.mmsi_b, f.mmsi_a, f.mmsi_b),
-            IF(f.mmsi_a < f.mmsi_b, f.mmsi_b, f.mmsi_a)
-          ORDER BY f.coll_ts DESC
-        ) AS rn
-      FROM filtered f
-    ),
-    latest AS (
-      SELECT * FROM ranked WHERE rn=1
-    ),
-    latest_positions AS (
-      SELECT mmsi, ship_name, timestamp AS sp_timestamp,
-      ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
-      FROM `ais_dataset.ships_positions`
-    )
-    SELECT 
-      l.mmsi_a,
-      l.mmsi_b,
-      l.coll_ts AS timestamp,
-      l.cpa,
-      l.tcpa,
-      l.latitude_a,
-      l.longitude_a,
-      l.latitude_b,
-      l.longitude_b,
-      la.ship_name AS ship1_name,
-      lb.ship_name AS ship2_name
-    FROM latest l
-    LEFT JOIN latest_positions la ON la.mmsi = l.mmsi_a AND la.rpos = 1
-    LEFT JOIN latest_positions lb ON lb.mmsi = l.mmsi_b AND lb.rpos = 1
-    ORDER BY l.timestamp DESC
-    LIMIT 1000
-    """
-
-    rows = list(client.query(query).result())
-    result=[]
-    for r in rows:
-        ship1_name = r.ship1_name if r.ship1_name else str(r.mmsi_a)
-        ship2_name = r.ship2_name if r.ship2_name else str(r.mmsi_b)
-        if r.mmsi_a == r.mmsi_b:
-            continue
-
-        result.append({
-            'mmsi_a': r.mmsi_a,
-            'mmsi_b': r.mmsi_b,
-            'timestamp': r.timestamp.isoformat() if r.timestamp else None,
-            'cpa': r.cpa,
-            'tcpa': r.tcpa,
-            'latitude_a': r.latitude_a,
-            'longitude_a': r.longitude_a,
-            'latitude_b': r.latitude_b,
-            'longitude_b': r.longitude_b,
-            'ship1_name': ship1_name,
-            'ship2_name': ship2_name
-        })
-    return jsonify(result)
-
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
     mmsi_a = request.args.get('mmsi_a', type=int)
@@ -234,6 +151,10 @@ def history_collisions():
     max_cpa = request.args.get('max_cpa', 0.5, type=float)
     max_tcpa = request.args.get('max_tcpa', 10.0, type=float)
 
+    # Logika:
+    # 1. Pobieramy kolizje z wybranego dnia, filtrujemy po cpa/tcpa
+    # 2. Grupujemy pary statków (m_a,m_b) i wybieramy minimalne CPA dla każdej pary
+    #    aby uniknąć duplikatów.
     query = f"""
     WITH base AS (
       SELECT 
@@ -244,23 +165,39 @@ def history_collisions():
         AND c.cpa <= {max_cpa}
         AND c.tcpa <= {max_tcpa}
     ),
+    pairs AS (
+      SELECT *,
+      IF(mmsi_a<mmsi_b,mmsi_a,mmsi_b) as m_a,
+      IF(mmsi_a<mmsi_b,mmsi_b,mmsi_a) as m_b
+      FROM base
+    ),
+    minimal AS (
+      SELECT m_a,m_b, MIN(cpa) as min_cpa
+      FROM pairs
+      GROUP BY m_a,m_b
+    ),
+    filtered AS (
+      SELECT p.*
+      FROM pairs p
+      JOIN minimal on minimal.m_a=p.m_a AND minimal.m_b=p.m_b AND minimal.min_cpa=p.cpa
+    ),
     latest_positions AS (
       SELECT mmsi, ship_name, timestamp AS sp_timestamp,
       ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
       FROM `ais_dataset.ships_positions`
     )
     SELECT 
-      CONCAT(CAST(m.mmsi_a AS STRING),'_',CAST(m.mmsi_b AS STRING),'_',FORMAT_TIMESTAMP('%Y%m%d%H%M%S', m.coll_ts)) as collision_id,
-      m.mmsi_a, m.mmsi_b,
-      m.coll_ts as timestamp,
-      m.cpa, m.tcpa,
-      m.latitude_a, m.longitude_a, m.latitude_b, m.longitude_b,
+      CONCAT(CAST(f.mmsi_a AS STRING),'_',CAST(f.mmsi_b AS STRING),'_',FORMAT_TIMESTAMP('%Y%m%d%H%M%S', f.coll_ts)) as collision_id,
+      f.mmsi_a, f.mmsi_b,
+      f.coll_ts as timestamp,
+      f.cpa, f.tcpa,
+      f.latitude_a, f.longitude_a, f.latitude_b, f.longitude_b,
       la.ship_name AS ship1_name,
       lb.ship_name AS ship2_name
-    FROM base m
-    LEFT JOIN latest_positions la ON la.mmsi = m.mmsi_a AND la.rpos=1
-    LEFT JOIN latest_positions lb ON lb.mmsi = m.mmsi_b AND lb.rpos=1
-    ORDER BY m.cpa ASC
+    FROM filtered f
+    LEFT JOIN latest_positions la ON la.mmsi = f.mmsi_a AND la.rpos=1
+    LEFT JOIN latest_positions lb ON lb.mmsi = f.mmsi_b AND lb.rpos=1
+    ORDER BY f.cpa ASC
     LIMIT 1000
     """
 
@@ -269,6 +206,13 @@ def history_collisions():
     for r in rows:
         ship1_name = r.ship1_name if r.ship1_name else str(r.mmsi_a)
         ship2_name = r.ship2_name if r.ship2_name else str(r.mmsi_b)
+
+        # Nie wyświetlaj, jeśli mmsi_a == mmsi_b lub nazwy statków takie same
+        if r.mmsi_a == r.mmsi_b:
+            continue
+        if ship1_name == ship2_name:
+            continue
+
         result.append({
             'collision_id': r.collision_id,
             'mmsi_a': r.mmsi_a,
