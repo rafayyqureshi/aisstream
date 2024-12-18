@@ -69,10 +69,15 @@ function setupUI() {
 }
 
 function updateDayLabel() {
-  let label = "Day: "+currentDay;
-  if(currentDay===0) label+=" (Today)";
-  document.getElementById('currentDayLabel').textContent = label;
-}
+    const now = new Date(); 
+    // day = 0 oznacza dzisiaj
+    // day = -1 oznacza wczoraj (dziś - 1 dzień)
+    // day = 2 oznacza pojutrze (dziś + 2 dni) – jeśli chcesz tylko wstecz, to i tak zadziała.
+    const realDate = new Date(now);
+    realDate.setDate(now.getDate() + currentDay);
+    const dateStr = realDate.toISOString().slice(0,10); // format YYYY-MM-DD
+    document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
+  }
 
 function fetchCollisionsData() {
   clearCollisions();

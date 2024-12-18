@@ -227,10 +227,6 @@ def calculate_cpa_tcpa():
 
 ### Nowe endpointy dla historii ###
 
-@app.route('/history')
-def history():
-    return render_template('history.html')
-
 @app.route('/history_collisions')
 def history_collisions():
     day = request.args.get('day', 0, type=int)
@@ -240,29 +236,30 @@ def history_collisions():
     query = f"""
     WITH base AS (
       SELECT 
-        c.mmsi_a, c.mmsi_b, c.timestamp, c.cpa, c.tcpa,
+        c.mmsi_a, c.mmsi_b, c.timestamp AS coll_ts, c.cpa, c.tcpa,
         c.latitude_a, c.longitude_a, c.latitude_b, c.longitude_b
       FROM `ais_dataset.collisions` c
       WHERE DATE(c.timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {abs(day)} DAY)
         AND c.cpa <= {max_cpa}
         AND c.tcpa <= {max_tcpa}
     ),
-    -- Najnowsze nazwy statków:
     latest_positions AS (
-      SELECT mmsi, ship_name, timestamp,
+      SELECT mmsi, ship_name, timestamp as sp_timestamp,
       ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
       FROM `ais_dataset.ships_positions`
     )
-    SELECT
-      CONCAT(CAST(mmsi_a AS STRING),'_',CAST(mmsi_b AS STRING),'_',FORMAT_TIMESTAMP('%Y%m%d%H%M%S', timestamp)) as collision_id,
-      b.mmsi_a, b.mmsi_b, b.timestamp, b.cpa, b.tcpa,
-      b.latitude_a, b.longitude_a, b.latitude_b, b.longitude_b,
+    SELECT 
+      CONCAT(CAST(m.mmsi_a AS STRING),'_',CAST(m.mmsi_b AS STRING),'_',FORMAT_TIMESTAMP('%Y%m%d%H%M%S', m.coll_ts)) as collision_id,
+      m.mmsi_a, m.mmsi_b,
+      m.coll_ts as timestamp,
+      m.cpa, m.tcpa,
+      m.latitude_a, m.longitude_a, m.latitude_b, m.longitude_b,
       la.ship_name AS ship1_name,
       lb.ship_name AS ship2_name
-    FROM base b
-    LEFT JOIN latest_positions la ON la.mmsi = b.mmsi_a AND la.rpos=1
-    LEFT JOIN latest_positions lb ON lb.mmsi = b.mmsi_b AND lb.rpos=1
-    ORDER BY b.cpa ASC
+    FROM base m
+    LEFT JOIN latest_positions la ON la.mmsi = m.mmsi_a AND la.rpos=1
+    LEFT JOIN latest_positions lb ON lb.mmsi = m.mmsi_b AND lb.rpos=1
+    ORDER BY m.cpa ASC
     LIMIT 1000
     """
 
