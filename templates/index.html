@@ -69,9 +69,18 @@
     <p>
       <strong>How to Use It:</strong><br>
       In the right-hand panel, you'll find a list of currently detected potential collision scenarios. 
-      Only the most critical cases are shown, where CPA (Closest Point of Approach) is less than 0.5 Nm 
-      and TCPA (Time to CPA) is less than 10 minutes. You can also select two ships on the map to 
-      visualize their movement vectors and review their CPA/TCPA estimates.
+      Only the most critical cases are shown, where:
+      <ul>
+        <li><strong>CPA (Closest Point of Approach)</strong>: The minimum distance at which two ships 
+        will approach each other if they maintain their current speeds and courses.</li>
+        <li><strong>TCPA (Time to Closest Point of Approach)</strong>: The time remaining until the 
+        ships reach that closest approach point.</li>
+      </ul>
+      Both values are estimated based on the ships' current AIS data.
+      <br><br>
+      We display situations where CPA &lt; 0.5 Nm and TCPA &lt; 10 minutes as these are considered 
+      more critical. You can also select two ships on the map to visualize their movement vectors 
+      and review their CPA/TCPA estimates for those specific vessels.
     </p>
     <p>
       If the calculated CPA exceeds 20 Nm or the TCPA surpasses 180 minutes, no values are displayed 
@@ -80,8 +89,8 @@
     <p>
       <strong>Color Coding of Ships:</strong><br>
       - Transparent: Incomplete data, unknown length<br>
-      - Green (<50 m): Small craft (pilots, fishing boats, yachts), ignored in collision calculations 
-        to prevent unnecessary computational overhead<br>
+      - Green (<50 m): Small craft (pilots, fishing boats, yachts), excluded from collision calculations 
+        to reduce unnecessary computation<br>
       - Yellow (50-150 m)<br>
       - Orange (150-250 m)<br>
       - Red (>250 m)
@@ -98,7 +107,6 @@
     </p>
   </div>
 </div>
-
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>
