@@ -34,7 +34,10 @@
 <div id="map"></div>
 
 <div id="right-panel">
-  <h2>Collisions</h2>
+  <h2 style="display:flex;justify-content:space-between;align-items:center;">
+    Collisions
+    <button id="infoButton" style="font-size:14px;cursor:pointer;">Info</button>
+  </h2>
   <div id="collision-filters">
     <label for="cpaFilter">Max CPA (Nm):</label>
     <input type="range" id="cpaFilter" min="0" max="0.5" step="0.01" value="0.5">
@@ -44,6 +47,56 @@
     <span id="tcpaValue">10</span>
   </div>
   <div id="collision-list"></div>
+</div>
+<!-- Modal -->
+<div id="infoModal" class="modal">
+  <div class="modal-content">
+    <span id="modalClose" class="modal-close">&times;</span>
+    <h2>About This Project</h2>
+    <p>
+      This is a non-professional, experimental project designed to monitor and detect 
+      potential ship collisions at sea using AIS (Automatic Identification System) position 
+      reports broadcast by various vessels.
+    </p>
+    <p>
+      <strong>Limitations & Nature of the Project:</strong><br>
+      The AIS data source is free and may sometimes be incomplete or inaccurate. Consequently, 
+      the information presented here should be considered approximate and not reliable for 
+      critical navigation or safety decisions. This project primarily serves as a proof-of-concept 
+      and is continuously evolving. Many simplifications and constraints have been implemented 
+      to reduce computational costs.
+    </p>
+    <p>
+      <strong>How to Use It:</strong><br>
+      In the right-hand panel, you'll find a list of currently detected potential collision scenarios. 
+      Only the most critical cases are shown, where CPA (Closest Point of Approach) is less than 0.5 Nm 
+      and TCPA (Time to CPA) is less than 10 minutes. You can also select two ships on the map to 
+      visualize their movement vectors and review their CPA/TCPA estimates.
+    </p>
+    <p>
+      If the calculated CPA exceeds 20 Nm or the TCPA surpasses 180 minutes, no values are displayed 
+      to avoid showing irrelevant results.
+    </p>
+    <p>
+      <strong>Color Coding of Ships:</strong><br>
+      - Transparent: Incomplete data, unknown length<br>
+      - Green (<50 m): Small craft (pilots, fishing boats, yachts), ignored in collision calculations 
+        to prevent unnecessary computational overhead<br>
+      - Yellow (50-150 m)<br>
+      - Orange (150-250 m)<br>
+      - Red (>250 m)
+    </p>
+    <p>
+      <strong>Scope & Future Development:</strong><br>
+      Currently, the detection area focuses on a portion of the English Channel. 
+      While it's theoretically possible to expand coverage globally, that would greatly increase 
+      complexity and costs.
+    </p>
+    <p>
+      Enjoy exploring the data! Just remember: this is a demonstration and does not replace 
+      professional maritime navigation tools or collision avoidance systems.
+    </p>
+  </div>
 </div>
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>

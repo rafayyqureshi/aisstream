@@ -2,17 +2,13 @@ let map;
 let shipMarkers = {};
 let collisionsData = [];
 let selectedShips = [];
-let vectorLength = 15; // in minutes
+let vectorLength = 15; 
 let cpaFilter = 0.5;
 let tcpaFilter = 10;
 let markerClusterGroup; 
 let collisionMarkers = [];
-
-// Cache CPA/TCPA
 let lastSelectedPair = null;
 let lastCpaTcpa = null; 
-
-// Przechowujemy wektory (overlay) dla zaznaczonych statków
 let overlayMarkers = {};
 
 function initMap() {
@@ -44,15 +40,13 @@ function initMap() {
   });
   map.addLayer(markerClusterGroup);
 
-  // Ustawienie widoku na given bounding box
+  // Ustaw widok na Kanał Angielski
   map.fitBounds([[49.0, -2.0], [51.0, 2.0]]);
 
   fetchShips();
   fetchCollisions();
 
-  // co 60s statki
   setInterval(fetchShips, 60000);
-  // co 30s kolizje
   setInterval(fetchCollisions, 30000);
 
   document.getElementById('vectorLengthSlider').addEventListener('input', e => {
@@ -73,6 +67,25 @@ function initMap() {
 
   document.getElementById('clearSelectedShips').addEventListener('click', ()=>{
     clearSelectedShips();
+  });
+
+  // Obsługa modala "Info"
+  const infoButton = document.getElementById('infoButton');
+  const infoModal = document.getElementById('infoModal');
+  const modalClose = document.getElementById('modalClose');
+
+  infoButton.addEventListener('click', ()=>{
+    infoModal.style.display = 'block';
+  });
+
+  modalClose.addEventListener('click', ()=>{
+    infoModal.style.display = 'none';
+  });
+
+  window.addEventListener('click', (e)=>{
+    if(e.target == infoModal) {
+      infoModal.style.display = 'none';
+    }
   });
 }
 
@@ -125,9 +138,6 @@ function updateShips(data) {
       scale=1.0;
     }
 
-    // Symbol: bazowo 12x18
-    // viewBox = -5 -7.5 10 15, symbol w środku
-    // Zaznaczenie kwadratem: -8 -8 16x16, gruba czarna przerywana linia
     const width = 12*scale;
     const height = 18*scale;
     const rotation = ship.cog||0;
