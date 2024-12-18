@@ -4,44 +4,26 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>AIS Collision History</title>
-
-<!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" crossorigin=""/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-
 <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}"/>
-
-<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-
 </head>
 <body>
-<div id="left-panel">
-    <h2>Historical Mode</h2>
-    <div id="day-controls">
-      <button id="prevDay">Day -</button>
-      <span id="currentDayLabel">Day: 0 (Today)</span>
-      <button id="nextDay">Day +</button>
-    </div>
 
-    <div id="vector-length-container">
-      <label for="playbackSpeed">Playback speed:</label>
-      <select id="playbackSpeed">
-        <option value="1">x1</option>
-        <option value="2">x2</option>
-        <option value="5">x5</option>
-        <option value="10">x10</option>
-      </select>
-    </div>
+<!-- Górny pasek centrowany -->
+<div id="top-center-bar">
+  <h2>Historical Mode</h2>
+  <div id="day-controls">
+    <button id="prevDay">Day -</button>
+    <span id="currentDayLabel">Day: 0 (Today)</span>
+    <button id="nextDay">Day +</button>
+  </div>
+</div>
 
-    <div id="playback-controls">
-      <button id="stepBack">&lt;</button>
-      <button id="playPause">Play</button>
-      <button id="stepForward">&gt;</button>
-    </div>
-
+<div id="left-panel" style="display:none;">
     <div id="selected-ships-info"></div>
     <div id="pair-info"></div>
 </div>
@@ -60,6 +42,20 @@
     <span id="tcpaValue">10</span>
   </div>
   <div id="collision-list"></div>
+</div>
+
+<!-- Dolny pasek z kontrolkami odtwarzania, ukryty do czasu wyboru kolizji -->
+<div id="bottom-center-bar" style="display:none;">
+  <label for="playbackSpeed">Playback speed:</label>
+  <select id="playbackSpeed">
+    <option value="1">x1</option>
+    <option value="2">x2</option>
+    <option value="5">x5</option>
+    <option value="10">x10</option>
+  </select>
+  <button id="stepBack">&lt;</button>
+  <button id="playPause">Play</button>
+  <button id="stepForward">&gt;</button>
 </div>
 
 <script src="{{ url_for('static', filename='history_app.js') }}"></script>
