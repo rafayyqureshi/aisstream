@@ -12,12 +12,11 @@ let collisionMarkers = [];
 let lastSelectedPair = null;
 let lastCpaTcpa = null; 
 
-// Przechowujemy wektory (linijki) dla zaznaczonych statków, aby móc je usunąć
-// Format: overlayMarkers[mmsi] = [L.layer, L.layer,...]
+// Przechowujemy wektory (overlay) dla zaznaczonych statków
 let overlayMarkers = {};
 
 function initMap() {
-  map = L.map('map').setView([50.0, 0.0], 6);
+  map = L.map('map');
 
   const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 18
@@ -44,6 +43,9 @@ function initMap() {
     removeOutsideVisibleBounds: true
   });
   map.addLayer(markerClusterGroup);
+
+  // Ustawienie widoku na given bounding box
+  map.fitBounds([[49.0, -2.0], [51.0, 2.0]]);
 
   fetchShips();
   fetchCollisions();
@@ -123,19 +125,20 @@ function updateShips(data) {
       scale=1.0;
     }
 
-    // Nowy rozmiar: bazowo 12x18, scale=1.0 dla domyślnego.
+    // Symbol: bazowo 12x18
+    // viewBox = -5 -7.5 10 15, symbol w środku
+    // Zaznaczenie kwadratem: -8 -8 16x16, gruba czarna przerywana linia
     const width = 12*scale;
     const height = 18*scale;
     const rotation = ship.cog||0;
 
     let highlightRect = '';
     if(selectedShips.includes(ship.mmsi)) {
-      highlightRect = `<rect x="-6" y="-6" width="12" height="12" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
+      highlightRect = `<rect x="-8" y="-8" width="16" height="16" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
     const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
 
-    // Uwaga: viewBox pozostaje "-5 -7.5 10 15", co daje proporcje.
     const shipIcon = L.divIcon({
       className:'',
       html:`<svg width="${width}" height="${height}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);">
@@ -192,6 +195,14 @@ function updateCollisionsList() {
   let filtered = collisionsData.filter(c=>c.tcpa>0);
   filtered.sort((a,b)=>a.tcpa - b.tcpa);
 
+  if(filtered.length===0) {
+    const noColl = document.createElement('div');
+    noColl.classList.add('collision-item');
+    noColl.innerHTML = `<div style="padding:10px; font-style:italic;">Fortunately, I have detected no collisions at the moment. Enjoy the calm seas!</div>`;
+    collisionList.appendChild(noColl);
+    return;
+  }
+
   filtered.forEach(c=>{
     const item = document.createElement('div');
     item.classList.add('collision-item');
@@ -232,7 +243,6 @@ function updateCollisionsList() {
 }
 
 function zoomToCollision(c) {
-  // Dopasowujemy widok aby oba statki były widoczne + margines
   const bounds = L.latLngBounds([[c.latitude_a,c.longitude_a],[c.latitude_b,c.longitude_b]]);
   map.fitBounds(bounds, {padding:[50,50]});
 
@@ -263,7 +273,6 @@ function clearSelectedShips() {
   lastSelectedPair = null;
   lastCpaTcpa = null;
 
-  // Usuń wektory
   for (let m in overlayMarkers) {
     overlayMarkers[m].forEach(h=>map.removeLayer(h));
   }
@@ -276,9 +285,6 @@ function updateSelectedShipsInfo(selectionChanged) {
   const container = document.getElementById('selected-ships-info');
   container.innerHTML = '';
   document.getElementById('pair-info').innerHTML='';
-
-  // Nie mamy historii, więc nic do usuwania oprócz wektorów (już usuwamy w clear)
-  // Tutaj tylko jeśli zmienia się zaznaczenie.
 
   if(selectedShips.length===0) {
     reloadAllShipIcons();
@@ -337,8 +343,6 @@ function updateSelectedShipsInfo(selectionChanged) {
     }
   }
 
-  // Rysujemy wektory dla zaznaczonych statków
-  // Najpierw usuwamy stare wektory
   for (let m in overlayMarkers) {
     overlayMarkers[m].forEach(h=>map.removeLayer(h));
   }
@@ -376,7 +380,7 @@ function reloadAllShipIcons() {
 
     let highlightRect='';
     if(selectedShips.includes(ship.mmsi)) {
-      highlightRect = `<rect x="-6" y="-6" width="12" height="12" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
+      highlightRect = `<rect x="-8" y="-8" width="16" height="16" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
     const icon = L.divIcon({
