@@ -46,6 +46,7 @@ body,html {
   padding:10px;
   z-index:1100;
   border-radius:5px;
+  text-align:center;
 }
 
 #bottom-center-bar {

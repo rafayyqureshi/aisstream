@@ -18,6 +18,7 @@ function initMap() {
   const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:18});
   osmLayer.addTo(map);
 
+  updateDayLabel();
   fetchCollisionsData();
   setupUI();
 }
@@ -69,13 +70,12 @@ function setupUI() {
 }
 
 function updateDayLabel() {
-    const now = new Date(); 
-    const realDate = new Date(now);
-    realDate.setDate(now.getDate() + currentDay);
-    const dateStr = realDate.toISOString().slice(0,10); // YYYY-MM-DD
-    document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
-  }
-  
+  const now = new Date(); 
+  const realDate = new Date(now);
+  realDate.setDate(now.getDate() + currentDay);
+  const dateStr = realDate.toISOString().slice(0,10); // YYYY-MM-DD
+  document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
+}
 
 function fetchCollisionsData() {
   clearCollisions();
@@ -158,7 +158,6 @@ function loadCollisionData(collision_id, collisionData) {
       animationData = data;
       animationIndex = 0;
       stopAnimation();
-      // Pokaż panel po lewej i dolny pasek
       document.getElementById('left-panel').style.display='block';
       document.getElementById('bottom-center-bar').style.display='block';
       currentCollisionInfo = collisionData; 
@@ -195,7 +194,6 @@ function updateMapFrame() {
   if(animationData.length===0) return;
   let frame = animationData[animationIndex];
 
-  // Usuwamy poprzednie statki
   if(shipMarkersOnMap) {
     shipMarkersOnMap.forEach(m=>map.removeLayer(m));
   }
@@ -203,32 +201,30 @@ function updateMapFrame() {
 
   let ships = frame.shipPositions;
   if(ships.length===2) {
-    // Zakładamy ship_length np. 200 m dla uproszczenia (ew. można pobrać z collision_info)
+    // Zakładamy na sztywno długość 200m (można poprawić)
     let ship_a = {
       latitude: ships[0].lat,
       longitude: ships[0].lon,
       sog: ships[0].sog,
       cog: ships[0].cog,
-      ship_length: 200
+      ship_length:200
     };
     let ship_b = {
       latitude: ships[1].lat,
       longitude: ships[1].lon,
       sog: ships[1].sog,
       cog: ships[1].cog,
-      ship_length: 200
+      ship_length:200
     };
     let {cpa, tcpa} = compute_cpa_tcpa_js(ship_a, ship_b);
 
-    // Rysujemy statki
     ships.forEach(s=>{
       let marker = L.marker([s.lat,s.lon], {icon:createShipIcon(s)});
       marker.addTo(map);
       shipMarkersOnMap.push(marker);
     });
 
-    // Aktualizujemy panel po lewej
-    const nowTime = frame.time; // czas klatki
+    const nowTime = frame.time;
     let shipAName = currentCollisionInfo.ship1_name || currentCollisionInfo.mmsi_a;
     let shipBName = currentCollisionInfo.ship2_name || currentCollisionInfo.mmsi_b;
 
@@ -245,8 +241,8 @@ function updateMapFrame() {
       Time: ${nowTime}<br>
       CPA: ${cpa.toFixed(2)} nm, TCPA: ${tcpa.toFixed(2)} min
     `;
+
   } else {
-    // Gdy brakuje danych o statkach, czy tylko jeden statek - można dodać fallback
     let container = document.getElementById('selected-ships-info');
     container.innerHTML='No data for both ships.';
     document.getElementById('pair-info').innerHTML='';
@@ -254,7 +250,6 @@ function updateMapFrame() {
 }
 
 function createShipIcon(shipData) {
-  // Prosty kod do tworzenia ikon, zawsze żółty statek.
   let fillColor='yellow';
   let rotation=shipData.cog||0;
   let width=12, height=18;
@@ -269,9 +264,6 @@ function createShipIcon(shipData) {
 }
 
 function compute_cpa_tcpa_js(a, b) {
-  // Prosta implementacja CPA/TCPA (uproszczona)
-  // Bazując na logice z Python:
-  
   if (a.ship_length===null || b.ship_length===null) return {cpa:9999,tcpa:-1};
   if (a.ship_length<50 || b.ship_length<50) return {cpa:9999,tcpa:-1};
 

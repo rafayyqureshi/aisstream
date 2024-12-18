@@ -4,21 +4,24 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>AIS Collision History</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}"/>
+<!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" crossorigin=""/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}"/>
+
+<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
 </head>
 <body>
 
-<!-- Górny pasek centrowany -->
 <div id="top-center-bar">
   <h2>Historical Mode</h2>
   <div id="day-controls">
     <button id="prevDay">Day -</button>
-    <span id="currentDayLabel">Day: 0 (Today)</span>
+    <span id="currentDayLabel">Date: ...</span>
     <button id="nextDay">Day +</button>
   </div>
 </div>
@@ -44,7 +47,6 @@
   <div id="collision-list"></div>
 </div>
 
-<!-- Dolny pasek z kontrolkami odtwarzania, ukryty do czasu wyboru kolizji -->
 <div id="bottom-center-bar" style="display:none;">
   <label for="playbackSpeed">Playback speed:</label>
   <select id="playbackSpeed">

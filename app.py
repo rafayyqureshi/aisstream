@@ -117,7 +117,7 @@ def collisions():
       SELECT
         c.mmsi_a,
         c.mmsi_b,
-        c.timestamp,
+        c.timestamp AS coll_ts,
         c.cpa,
         c.tcpa,
         c.latitude_a,
@@ -136,7 +136,7 @@ def collisions():
           PARTITION BY
             IF(f.mmsi_a < f.mmsi_b, f.mmsi_a, f.mmsi_b),
             IF(f.mmsi_a < f.mmsi_b, f.mmsi_b, f.mmsi_a)
-          ORDER BY f.timestamp DESC
+          ORDER BY f.coll_ts DESC
         ) AS rn
       FROM filtered f
     ),
@@ -144,14 +144,14 @@ def collisions():
       SELECT * FROM ranked WHERE rn=1
     ),
     latest_positions AS (
-      SELECT mmsi, ship_name, timestamp,
+      SELECT mmsi, ship_name, timestamp AS sp_timestamp,
       ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
       FROM `ais_dataset.ships_positions`
     )
     SELECT 
       l.mmsi_a,
       l.mmsi_b,
-      l.timestamp,
+      l.coll_ts AS timestamp,
       l.cpa,
       l.tcpa,
       l.latitude_a,
@@ -224,8 +224,9 @@ def calculate_cpa_tcpa():
     cpa,tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
-
-### Nowe endpointy dla historii ###
+@app.route('/history')
+def history():
+    return render_template('history.html')
 
 @app.route('/history_collisions')
 def history_collisions():
@@ -244,7 +245,7 @@ def history_collisions():
         AND c.tcpa <= {max_tcpa}
     ),
     latest_positions AS (
-      SELECT mmsi, ship_name, timestamp as sp_timestamp,
+      SELECT mmsi, ship_name, timestamp AS sp_timestamp,
       ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
       FROM `ais_dataset.ships_positions`
     )
@@ -290,7 +291,6 @@ def history_data():
     if not collision_id:
         return jsonify({'error':'Missing collision_id'}),400
 
-    # Parsujemy collision_id: mmsi_a_mmsi_b_YYYYMMDDHHMMSS
     parts = collision_id.split('_')
     if len(parts)<3:
         return jsonify([])
@@ -298,12 +298,8 @@ def history_data():
     mmsi_a = int(parts[0])
     mmsi_b = int(parts[1])
     ts_str = parts[2]
-    # Konwersja na datetime:
-    # Zakładamy format %Y%m%d%H%M%S
     collision_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
 
-    # Zakres czasu: T-7min do T+3min
-    # W BigQuery: TIMESTAMP_ADD, TIMESTAMP_SUB
     q_data = f"""
     SELECT mmsi, latitude, longitude, sog, cog, timestamp
     FROM `ais_dataset.ships_positions`
@@ -335,7 +331,6 @@ def history_data():
         })
 
     return jsonify(result_data)
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
