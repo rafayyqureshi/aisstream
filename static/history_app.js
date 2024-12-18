@@ -70,14 +70,12 @@ function setupUI() {
 
 function updateDayLabel() {
     const now = new Date(); 
-    // day = 0 oznacza dzisiaj
-    // day = -1 oznacza wczoraj (dziś - 1 dzień)
-    // day = 2 oznacza pojutrze (dziś + 2 dni) – jeśli chcesz tylko wstecz, to i tak zadziała.
     const realDate = new Date(now);
     realDate.setDate(now.getDate() + currentDay);
-    const dateStr = realDate.toISOString().slice(0,10); // format YYYY-MM-DD
+    const dateStr = realDate.toISOString().slice(0,10); // YYYY-MM-DD
     document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
   }
+  
 
 function fetchCollisionsData() {
   clearCollisions();
