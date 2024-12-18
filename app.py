@@ -224,5 +224,109 @@ def calculate_cpa_tcpa():
     cpa,tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
+
+### Nowe endpointy dla historii ###
+
+@app.route('/history')
+def history():
+    return render_template('history.html')
+
+@app.route('/history_collisions')
+def history_collisions():
+    day = request.args.get('day', 0, type=int)
+    max_cpa = request.args.get('max_cpa', 0.5, type=float)
+    max_tcpa = request.args.get('max_tcpa', 10.0, type=float)
+
+    # Zakładamy, że day <=0 oznacza wstecz. day=0 dzisiaj, -1 wczoraj, itp.
+    # Używamy DATE_SUB(CURRENT_DATE(), INTERVAL ABS(day) DAY)
+    query = f"""
+    SELECT 
+      CONCAT(CAST(mmsi_a AS STRING),'_',CAST(mmsi_b AS STRING),'_',FORMAT_TIMESTAMP('%Y%m%d%H%M%S', timestamp)) as collision_id,
+      mmsi_a, mmsi_b,
+      timestamp, cpa, tcpa,
+      latitude_a, longitude_a,
+      latitude_b, longitude_b,
+      NULL as ship1_name, -- Możesz dodać join do ships_positions by uzyskać nazwy
+      NULL as ship2_name
+    FROM `ais_dataset.collisions`
+    WHERE DATE(timestamp) = DATE_SUB(CURRENT_DATE(), INTERVAL {abs(day)} DAY)
+      AND cpa <= {max_cpa}
+      AND tcpa <= {max_tcpa}
+    ORDER BY cpa ASC
+    LIMIT 1000
+    """
+
+    rows = list(client.query(query).result())
+    result=[]
+    for r in rows:
+        result.append({
+            'collision_id': r.collision_id,
+            'mmsi_a': r.mmsi_a,
+            'mmsi_b': r.mmsi_b,
+            'timestamp': r.timestamp.isoformat() if r.timestamp else None,
+            'cpa': r.cpa,
+            'tcpa': r.tcpa,
+            'latitude_a': r.latitude_a,
+            'longitude_a': r.longitude_a,
+            'latitude_b': r.latitude_b,
+            'longitude_b': r.longitude_b,
+            'ship1_name': r.ship1_name,
+            'ship2_name': r.ship2_name
+        })
+    return jsonify(result)
+
+@app.route('/history_data')
+def history_data():
+    collision_id = request.args.get('collision_id', type=str)
+    if not collision_id:
+        return jsonify({'error':'Missing collision_id'}),400
+
+    # Parsujemy collision_id: mmsi_a_mmsi_b_YYYYMMDDHHMMSS
+    parts = collision_id.split('_')
+    if len(parts)<3:
+        return jsonify([])
+
+    mmsi_a = int(parts[0])
+    mmsi_b = int(parts[1])
+    ts_str = parts[2]
+    # Konwersja na datetime:
+    # Zakładamy format %Y%m%d%H%M%S
+    collision_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
+
+    # Zakres czasu: T-7min do T+3min
+    # W BigQuery: TIMESTAMP_ADD, TIMESTAMP_SUB
+    q_data = f"""
+    SELECT mmsi, latitude, longitude, sog, cog, timestamp
+    FROM `ais_dataset.ships_positions`
+    WHERE mmsi IN ({mmsi_a},{mmsi_b})
+      AND timestamp BETWEEN TIMESTAMP_SUB(TIMESTAMP('{collision_time.isoformat()}'), INTERVAL 7 MINUTE)
+                       AND TIMESTAMP_ADD(TIMESTAMP('{collision_time.isoformat()}'), INTERVAL 3 MINUTE)
+    ORDER BY timestamp
+    """
+
+    positions = list(client.query(q_data).result())
+    from collections import defaultdict
+    frames = defaultdict(list)
+    for p in positions:
+        t_min = p.timestamp.replace(second=0,microsecond=0)
+        frames[t_min].append({
+            'mmsi': p.mmsi,
+            'lat': p.latitude,
+            'lon': p.longitude,
+            'sog': p.sog,
+            'cog': p.cog
+        })
+
+    sorted_frames = sorted(frames.items(), key=lambda x: x[0])
+    result_data=[]
+    for t, ships in sorted_frames:
+        result_data.append({
+            'time': t.isoformat(),
+            'shipPositions': ships
+        })
+
+    return jsonify(result_data)
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
