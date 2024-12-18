@@ -375,21 +375,25 @@ function reloadAllShipIcons() {
 
     if (length != null) {
       if (length < 50) {fillColor='green'; scale=0.9;}
-      else if (length<150) {fillColor='yellow'; scale=1.1;}
-      else if (length<250) {fillColor='orange'; scale=1.2;}
-      else {fillColor='red'; scale=1.0;}
+      else if (length<150) {fillColor='yellow'; scale=1.0;}
+      else if (length<250) {fillColor='orange'; scale=1.1;}
+      else {fillColor='red'; scale=1.2;}
     } else {
       fillColor='none';scale=1.0;
     }
 
     const rotation = ship.cog||0;
-    const width = 12*scale;
-    const height = 18*scale;
-
-    const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+    // Podstawowy rozmiar symbolu statku:
+    // viewBox: -5 -7.5 10 15 (szerokość 10, wysokość 15)
+    // Statek: polygon 0,-7.5 do (±5,7.5)
+    // Aby kwadrat był wyraźny, dodamy go większy: 20x20 punktów w tych samych współrzędnych.
+    // Kwadrat od -10,-10 do 10,10 zapewni duży, czytelny margines wokół symbolu.
+    const width = 12*scale;  // szerokość ikony po skalowaniu
+    const height = 18*scale; // wysokość ikony po skalowaniu
 
     let highlightRect='';
     if(selectedShips.includes(ship.mmsi)) {
+      // Czarny, wyraźny kwadrat, linia przerywana, gruba
       highlightRect = `<rect x="-10" y="-10" width="20" height="20" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
