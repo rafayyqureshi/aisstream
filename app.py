@@ -112,7 +112,6 @@ def collisions():
     max_cpa = request.args.get('max_cpa', 0.5, type=float)
     max_tcpa = request.args.get('max_tcpa', 10.0, type=float)
 
-    # Wybieramy najnowsze kolizje dla każdej pary statków
     query = f"""
     WITH filtered AS (
       SELECT
