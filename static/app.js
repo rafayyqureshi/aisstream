@@ -374,10 +374,10 @@ function reloadAllShipIcons() {
     let strokeColor = '#000000';
 
     if (length != null) {
-      if (length < 50) {fillColor='green'; scale=1.0;}
+      if (length < 50) {fillColor='green'; scale=0.9;}
       else if (length<150) {fillColor='yellow'; scale=1.0;}
-      else if (length<250) {fillColor='orange'; scale=1.0;}
-      else {fillColor='red'; scale=1.0;}
+      else if (length<250) {fillColor='orange'; scale=1.1;}
+      else {fillColor='red'; scale=1.2;}
     } else {
       fillColor='none';scale=1.0;
     }
