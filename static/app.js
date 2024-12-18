@@ -382,32 +382,39 @@ function reloadAllShipIcons() {
       fillColor='none';scale=1.0;
     }
 
-    const rotation = ship.cog||0;
-    // Podstawowy rozmiar symbolu statku:
-    // viewBox: -5 -7.5 10 15 (szerokość 10, wysokość 15)
-    // Statek: polygon 0,-7.5 do (±5,7.5)
-    // Aby kwadrat był wyraźny, dodamy go większy: 20x20 punktów w tych samych współrzędnych.
-    // Kwadrat od -10,-10 do 10,10 zapewni duży, czytelny margines wokół symbolu.
-    const width = 12*scale;  // szerokość ikony po skalowaniu
-    const height = 18*scale; // wysokość ikony po skalowaniu
+    // Nowy, większy viewBox
+    // Mamy kwadrat 24x24 jednostki (od -12 do +12 w osi x i y).
+    // Statek jest mały (polygon o szerokości 10 i wysokości 15 z poprzednich koordynatów),
+    // więc będzie mały w tym dużym boxie, ale to pozwoli na duży kwadrat wokół.
+    const rotation = ship.cog || 0;
+    const width = 24 * scale;
+    const height = 24 * scale;
 
-    let highlightRect='';
-    if(selectedShips.includes(ship.mmsi)) {
-      // Czarny, wyraźny kwadrat, linia przerywana, gruba
+    // Polygon statku (ten sam co wcześniej):
+    // Oryginalne punkty: 0,-7.5  5,7.5  -5,7.5
+    // Pozostawiamy je bez zmian - będą małe w środku viewBox, ale to w niczym nie przeszkadza.
+    const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
+
+    let highlightRect = '';
+    if (selectedShips.includes(ship.mmsi)) {
+      // Duży kwadrat obejmujący znacznie większy obszar niż statek,
+      // dzięki czemu jest wyraźny, czarny, przerywany i skalowalny.
+      // Kwadrat 20x20 w środku viewBox 24x24, co daje spory margines:
       highlightRect = `<rect x="-10" y="-10" width="20" height="20" fill="none" stroke="black" stroke-width="3" stroke-dasharray="5,5" />`;
     }
 
-    const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="${strokeColor}" stroke-width="1"/>`;
-
     const icon = L.divIcon({
-      className:'',
-      html:`<svg width="${width}" height="${height}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);">
-        ${highlightRect}
-        ${shape}
-      </svg>`,
-      iconSize:[width,height],
-      iconAnchor:[width/2,height/2]
+      className: '',
+      html: `
+        <svg width="${width}" height="${height}" viewBox="-12 -12 24 24" style="transform:rotate(${rotation}deg);">
+          ${highlightRect}
+          ${shape}
+        </svg>
+      `,
+      iconSize: [width, height],
+      iconAnchor: [width/2, height/2]
     });
+
     shipMarkers[m].setIcon(icon);
   }
 }
