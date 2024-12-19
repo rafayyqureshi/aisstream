@@ -2,12 +2,10 @@ let map;
 let collisionMarkers = [];
 let selectedShips = [];
 let currentDay = 0; 
-// Blokada: minDay = -7, maxDay = 0
 const minDay = -7;
 const maxDay = 0;
 
 let cpaFilter = 0.5;
-let tcpaFilter = 10;
 let isPlaying = false;
 let animationData = [];
 let animationIndex = 0;
@@ -57,11 +55,6 @@ function setupUI() {
     document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
     fetchCollisionsData();
   });
-  document.getElementById('tcpaFilter').addEventListener('input', (e)=>{
-    tcpaFilter = parseFloat(e.target.value);
-    document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
-    fetchCollisionsData();
-  });
 
   document.getElementById('playPause').addEventListener('click', ()=>{
     if(isPlaying) {
@@ -95,22 +88,13 @@ function updateDayButtons() {
   prevBtn.disabled = (currentDay<=minDay);
   nextBtn.disabled = (currentDay>=maxDay);
 
-  if(prevBtn.disabled){
-    prevBtn.style.opacity=0.5;
-  } else {
-    prevBtn.style.opacity=1.0;
-  }
-
-  if(nextBtn.disabled){
-    nextBtn.style.opacity=0.5;
-  } else {
-    nextBtn.style.opacity=1.0;
-  }
+  prevBtn.style.opacity=prevBtn.disabled?0.5:1.0;
+  nextBtn.style.opacity=nextBtn.disabled?0.5:1.0;
 }
 
 function fetchCollisionsData() {
   clearCollisions();
-  fetch(`/history_collisions?day=${currentDay}&max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
+  fetch(`/history_collisions?day=${currentDay}&max_cpa=${cpaFilter}`)
     .then(r=>r.json())
     .then(data=>{
       displayCollisions(data);
@@ -165,7 +149,6 @@ function displayCollisions(collisions) {
         <button class="zoom-button">🔍</button>
       </div>
     `;
-    // Usuwamy item.addEventListener('click') - tylko lupa
     item.querySelector('.zoom-button').addEventListener('click', ()=>{
       zoomToCollision(c);
     });
@@ -196,7 +179,8 @@ function displayCollisions(collisions) {
 
 function zoomToCollision(c) {
   const bounds = L.latLngBounds([[c.latitude_a,c.longitude_a],[c.latitude_b,c.longitude_b]]);
-  map.fitBounds(bounds,{padding:[60,60]});
+  // bigger zoom = less padding, previously was [60,60], now [20,20]
+  map.fitBounds(bounds,{padding:[20,20]});
   loadCollisionData(c.collision_id, c);
 }
 
@@ -222,7 +206,7 @@ function loadCollisionData(collision_id, collisionData) {
         let sA=animationData[9].shipPositions[0];
         let sB=animationData[9].shipPositions[1];
         const bounds = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
-        map.fitBounds(bounds,{padding:[60,60]});
+        map.fitBounds(bounds,{padding:[20,20]});
       }
 
     })
@@ -269,16 +253,23 @@ function updateMapFrame() {
 
   let ships = frame.shipPositions;
   if(ships.length===2) {
-    // Rozpoznaj który statek jest który
     let shipAName = currentCollisionInfo.ship1_name || currentCollisionInfo.mmsi_a;
     let shipBName = currentCollisionInfo.ship2_name || currentCollisionInfo.mmsi_b;
 
     function fmtCOG(c){return Math.round(c);}
     function fmtSOG(s){return s.toFixed(1);}
 
-    // Przypisujemy długości zarejestrowane w collisionInfo
     let A_len = shipA_length;
     let B_len = shipB_length;
+
+    // Skalowanie długości
+    function lengthScale(len){
+      if(len===null || len<20) return 0.7;
+      let val=(len/250)+0.5; 
+      if(val<0.7) val=0.7; 
+      if(val>1.5) val=1.5;
+      return val;
+    }
 
     let shipA = {latitude: ships[0].lat, longitude: ships[0].lon, sog:ships[0].sog||0, cog:ships[0].cog||0, ship_length:A_len};
     let shipB = {latitude: ships[1].lat, longitude: ships[1].lon, sog:ships[1].sog||0, cog:ships[1].cog||0, ship_length:B_len};
@@ -289,18 +280,20 @@ function updateMapFrame() {
       let isA = (s.mmsi===currentCollisionInfo.mmsi_a);
       let length = isA?A_len:B_len;
       let fillColor = getShipColor(length);
-      let marker = L.marker([s.lat,s.lon], {icon:createShipIcon(s,fillColor)});
+      let scale = lengthScale(length);
+
+      let marker = L.marker([s.lat,s.lon], {icon:createShipIcon(s,fillColor,scale)});
       let name = isA?shipAName:shipBName;
       let cogTxt = fmtCOG(s.cog||0);
       let sogTxt = fmtSOG(s.sog||0);
-      let tt = `${name}<br>COG:${cogTxt}°, SOG:${sogTxt} kn<br>Length:${length===null?'Unknown':length+'m'}`;
+      let lenTxt = length===null?'Unknown':length+'m';
+      let tt = `${name}<br>COG:${cogTxt}°, SOG:${sogTxt} kn<br>Length:${lenTxt}`;
       marker.bindTooltip(tt,{direction:'top',sticky:true});
       marker.addTo(map);
       shipMarkersOnMap.push(marker);
     });
 
     const nowTime = frame.time;
-    // Pokazujemy tylko HH:MM:SS
     let timeObj = new Date(nowTime);
     let hh=timeObj.getHours().toString().padStart(2,'0');
     let mm=timeObj.getMinutes().toString().padStart(2,'0');
@@ -316,12 +309,11 @@ function updateMapFrame() {
     `;
 
     let pairInfo = document.getElementById('pair-info');
-
     if(animationIndex>6) {
-      // Po klatce 7 statki się rozminęły
+      // English message: "Vessels are moving apart"
       pairInfo.innerHTML=`
         Time: ${timeStr}<br>
-        Statki się rozminęły
+        Vessels are moving apart
       `;
     } else {
       pairInfo.innerHTML=`
@@ -349,17 +341,21 @@ function exitSituationView() {
   animationData=[];
   animationIndex=0;
   currentCollisionInfo=null;
+  shipA_length=null;
+  shipB_length=null;
 }
 
-function createShipIcon(shipData, fillColor='yellow') {
+function createShipIcon(shipData, fillColor='yellow', scale=1.0) {
   let rotation=shipData.cog||0;
-  let width=12, height=18;
+  let baseW=12, baseH=18;
+  let w=baseW*scale, h=baseH*scale;
   const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="#000" stroke-width="1"/>`;
+  // Adjust viewBox accordingly
   let icon = L.divIcon({
     className:'',
-    html:`<svg width="${width}" height="${height}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);">${shape}</svg>`,
-    iconSize:[width,height],
-    iconAnchor:[width/2,height/2]
+    html:`<svg width="${w}" height="${h}" viewBox="-5 -7.5 10 15" style="transform:rotate(${rotation}deg);">${shape}</svg>`,
+    iconSize:[w,h],
+    iconAnchor:[w/2,h/2]
   });
   return icon;
 }
