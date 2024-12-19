@@ -2,6 +2,10 @@ let map;
 let collisionMarkers = [];
 let selectedShips = [];
 let currentDay = 0; 
+// Blokada: minDay = -7, maxDay = 0
+const minDay = -7;
+const maxDay = 0;
+
 let cpaFilter = 0.5;
 let tcpaFilter = 10;
 let isPlaying = false;
@@ -12,6 +16,9 @@ let currentCollisionId = null;
 let currentCollisionInfo = null;
 let shipMarkersOnMap = [];
 let inSituationView = false;
+
+let shipA_length = null;
+let shipB_length = null;
 
 function initMap() {
   map = L.map('map').setView([50.0, 0.0], 6);
@@ -31,14 +38,18 @@ function initMap() {
 
 function setupUI() {
   document.getElementById('prevDay').addEventListener('click', ()=>{
-    currentDay -= 1;
-    updateDayLabel();
-    fetchCollisionsData();
+    if(currentDay>minDay) {
+      currentDay -= 1;
+      updateDayLabel();
+      fetchCollisionsData();
+    }
   });
   document.getElementById('nextDay').addEventListener('click', ()=>{
-    currentDay += 1;
-    updateDayLabel();
-    fetchCollisionsData();
+    if(currentDay<maxDay) {
+      currentDay += 1;
+      updateDayLabel();
+      fetchCollisionsData();
+    }
   });
 
   document.getElementById('cpaFilter').addEventListener('input', (e)=>{
@@ -65,6 +76,8 @@ function setupUI() {
   document.getElementById('stepBack').addEventListener('click', ()=>{
     stepAnimation(-1);
   });
+
+  updateDayButtons();
 }
 
 function updateDayLabel() {
@@ -73,6 +86,26 @@ function updateDayLabel() {
   realDate.setDate(now.getDate() + currentDay);
   const dateStr = realDate.toISOString().slice(0,10); 
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
+  updateDayButtons();
+}
+
+function updateDayButtons() {
+  const prevBtn = document.getElementById('prevDay');
+  const nextBtn = document.getElementById('nextDay');
+  prevBtn.disabled = (currentDay<=minDay);
+  nextBtn.disabled = (currentDay>=maxDay);
+
+  if(prevBtn.disabled){
+    prevBtn.style.opacity=0.5;
+  } else {
+    prevBtn.style.opacity=1.0;
+  }
+
+  if(nextBtn.disabled){
+    nextBtn.style.opacity=0.5;
+  } else {
+    nextBtn.style.opacity=1.0;
+  }
 }
 
 function fetchCollisionsData() {
@@ -86,7 +119,7 @@ function fetchCollisionsData() {
 }
 
 function getShipColor(length){
-  if(length===null) return 'none';
+  if(length===null) return 'gray';
   if(length<50) return 'green';
   if(length<150) return 'yellow';
   if(length<250) return 'orange';
@@ -117,7 +150,6 @@ function displayCollisions(collisions) {
 
     let colorA = getShipColor(c.ship1_length);
     let colorB = getShipColor(c.ship2_length);
-    // Wróćmy do poprzedniego rozwiązania koła bez obramowania
     let sizeIcon = `
       <svg width="20" height="20" viewBox="-10 -10 20 20" style="margin-right:5px; vertical-align:middle;">
         <path d="M0,-10 A10,10 0 0,1 10,0 L0,0 Z" fill="${colorB}"/>
@@ -133,7 +165,7 @@ function displayCollisions(collisions) {
         <button class="zoom-button">🔍</button>
       </div>
     `;
-    // Usuwamy item.addEventListener('click',...) - tylko lupa uruchamia prezentację
+    // Usuwamy item.addEventListener('click') - tylko lupa
     item.querySelector('.zoom-button').addEventListener('click', ()=>{
       zoomToCollision(c);
     });
@@ -164,7 +196,7 @@ function displayCollisions(collisions) {
 
 function zoomToCollision(c) {
   const bounds = L.latLngBounds([[c.latitude_a,c.longitude_a],[c.latitude_b,c.longitude_b]]);
-  map.fitBounds(bounds,{padding:[60,60]}); // zoom out about 20% by increasing padding
+  map.fitBounds(bounds,{padding:[60,60]});
   loadCollisionData(c.collision_id, c);
 }
 
@@ -178,6 +210,9 @@ function loadCollisionData(collision_id, collisionData) {
       stopAnimation();
       currentCollisionInfo = collisionData; 
       inSituationView = true;
+      shipA_length = currentCollisionInfo.ship1_length;
+      shipB_length = currentCollisionInfo.ship2_length;
+
       document.getElementById('left-panel').style.display='block';
       document.getElementById('bottom-center-bar').style.display='block';
       updateMapFrame();
@@ -234,29 +269,44 @@ function updateMapFrame() {
 
   let ships = frame.shipPositions;
   if(ships.length===2) {
+    // Rozpoznaj który statek jest który
     let shipAName = currentCollisionInfo.ship1_name || currentCollisionInfo.mmsi_a;
     let shipBName = currentCollisionInfo.ship2_name || currentCollisionInfo.mmsi_b;
 
     function fmtCOG(c){return Math.round(c);}
     function fmtSOG(s){return s.toFixed(1);}
 
-    let shipA = {latitude: ships[0].lat, longitude: ships[0].lon, sog:ships[0].sog||0, cog:ships[0].cog||0, ship_length:200};
-    let shipB = {latitude: ships[1].lat, longitude: ships[1].lon, sog:ships[1].sog||0, cog:ships[1].cog||0, ship_length:200};
+    // Przypisujemy długości zarejestrowane w collisionInfo
+    let A_len = shipA_length;
+    let B_len = shipB_length;
+
+    let shipA = {latitude: ships[0].lat, longitude: ships[0].lon, sog:ships[0].sog||0, cog:ships[0].cog||0, ship_length:A_len};
+    let shipB = {latitude: ships[1].lat, longitude: ships[1].lon, sog:ships[1].sog||0, cog:ships[1].cog||0, ship_length:B_len};
 
     let {cpa, tcpa} = compute_cpa_tcpa_js(shipA,shipB);
 
     ships.forEach(s=>{
-      let marker = L.marker([s.lat,s.lon], {icon:createShipIcon(s)});
-      let name = s.mmsi===currentCollisionInfo.mmsi_a?shipAName:shipBName;
+      let isA = (s.mmsi===currentCollisionInfo.mmsi_a);
+      let length = isA?A_len:B_len;
+      let fillColor = getShipColor(length);
+      let marker = L.marker([s.lat,s.lon], {icon:createShipIcon(s,fillColor)});
+      let name = isA?shipAName:shipBName;
       let cogTxt = fmtCOG(s.cog||0);
       let sogTxt = fmtSOG(s.sog||0);
-      let tt = `${name}<br>COG:${cogTxt}°, SOG:${sogTxt} kn<br>Length:200m`;
+      let tt = `${name}<br>COG:${cogTxt}°, SOG:${sogTxt} kn<br>Length:${length===null?'Unknown':length+'m'}`;
       marker.bindTooltip(tt,{direction:'top',sticky:true});
       marker.addTo(map);
       shipMarkersOnMap.push(marker);
     });
 
     const nowTime = frame.time;
+    // Pokazujemy tylko HH:MM:SS
+    let timeObj = new Date(nowTime);
+    let hh=timeObj.getHours().toString().padStart(2,'0');
+    let mm=timeObj.getMinutes().toString().padStart(2,'0');
+    let ss=timeObj.getSeconds().toString().padStart(2,'0');
+    let timeStr=`${hh}:${mm}:${ss}`;
+
     let container = document.getElementById('selected-ships-info');
     container.innerHTML=`
       <b>${shipAName}</b><br>
@@ -266,10 +316,20 @@ function updateMapFrame() {
     `;
 
     let pairInfo = document.getElementById('pair-info');
-    pairInfo.innerHTML=`
-      Time: ${nowTime}<br>
-      CPA: ${cpa.toFixed(2)} nm, TCPA: ${tcpa.toFixed(2)} min
-    `;
+
+    if(animationIndex>6) {
+      // Po klatce 7 statki się rozminęły
+      pairInfo.innerHTML=`
+        Time: ${timeStr}<br>
+        Statki się rozminęły
+      `;
+    } else {
+      pairInfo.innerHTML=`
+        Time: ${timeStr}<br>
+        CPA: ${cpa.toFixed(2)} nm, TCPA: ${tcpa.toFixed(2)} min
+      `;
+    }
+
   } else {
     let container = document.getElementById('selected-ships-info');
     container.innerHTML='No data for both ships.';
@@ -291,8 +351,7 @@ function exitSituationView() {
   currentCollisionInfo=null;
 }
 
-function createShipIcon(shipData) {
-  let fillColor='yellow';
+function createShipIcon(shipData, fillColor='yellow') {
   let rotation=shipData.cog||0;
   let width=12, height=18;
   const shape = `<polygon points="0,-7.5 5,7.5 -5,7.5" fill="${fillColor}" stroke="#000" stroke-width="1"/>`;
