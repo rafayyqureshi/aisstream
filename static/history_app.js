@@ -23,7 +23,6 @@ function initMap() {
   fetchCollisionsData();
   setupUI();
 
-  // Kliknięcie na mapę wychodzi z sytuacji
   map.on('click',()=>{
     if(inSituationView) {
       exitSituationView();
@@ -95,6 +94,14 @@ function fetchCollisionsData() {
     .catch(err=>console.error("Error fetching history collisions:", err));
 }
 
+function getShipColor(length){
+  if(length===null) return 'none';
+  if(length<50) return 'green';
+  if(length<150) return 'yellow';
+  if(length<250) return 'orange';
+  return 'red';
+}
+
 function displayCollisions(collisions) {
   const list = document.getElementById('collision-list');
   list.innerHTML = '';
@@ -117,15 +124,17 @@ function displayCollisions(collisions) {
 
     let timeStr = c.timestamp?new Date(c.timestamp).toLocaleTimeString('en-GB'):'unknown';
 
-    // Ikona wskaźnika wielkości: koło podzielone na pół
     let colorA = getShipColor(c.ship1_length);
     let colorB = getShipColor(c.ship2_length);
+    // Kółko z czarną obwódką i linią dzielącą na pół
     let sizeIcon = `
       <svg width="20" height="20" viewBox="-10 -10 20 20" style="margin-right:5px; vertical-align:middle;">
-        <path d="M0,0 L0,-10 A10,10 0 0,1 10,0 L0,0 Z" fill="${colorB}"/>
-        <path d="M0,0 L0,-10 A10,10 0 0,0 -10,0 L0,0 Z" fill="${colorA}"/>
-        <path d="M0,0 L0,10 A10,10 0 0,1 -10,0 L0,0 Z" fill="${colorA}"/>
-        <path d="M0,0 L0,10 A10,10 0 0,0 10,0 L0,0 Z" fill="${colorB}"/>
+        <circle cx="0" cy="0" r="10" fill="none" stroke="black" stroke-width="1"/>
+        <line x1="0" y1="-10" x2="0" y2="10" stroke="black" stroke-width="1"/>
+        <path d="M0,-10 A10,10 0 0,1 10,0 L0,0 Z" fill="${colorB}"/>
+        <path d="M0,-10 A10,10 0 0,0 -10,0 L0,0 Z" fill="${colorA}"/>
+        <path d="M0,0 A10,10 0 0,1 -10,0 L0,0 Z" fill="${colorA}"/>
+        <path d="M0,0 A10,10 0 0,0 10,0 L0,0 Z" fill="${colorB}"/>
       </svg>`;
 
     item.innerHTML=`
@@ -166,53 +175,37 @@ function displayCollisions(collisions) {
 
 function zoomToCollision(c) {
   const bounds = L.latLngBounds([[c.latitude_a,c.longitude_a],[c.latitude_b,c.longitude_b]]);
-  // Tymczasowo tylko zoom do kolizji, dane do animacji po loadCollisionData
   map.fitBounds(bounds,{padding:[50,50]});
   loadCollisionData(c.collision_id, c);
 }
 
-
 function loadCollisionData(collision_id, collisionData) {
-    currentCollisionId = collision_id;
-    fetch(`/history_data?collision_id=${collision_id}`)
-      .then(r=>r.json())
-      .then(data=>{
-        animationData = data;
-        animationIndex = 0;
-        stopAnimation();
-        currentCollisionInfo = collisionData; 
-        inSituationView = true;
-        document.getElementById('left-panel').style.display='block';
-        document.getElementById('bottom-center-bar').style.display='block';
-        updateMapFrame();
-  
-        // Po wczytaniu animacji dopasuj widok do klatki nr 10 (index 9)
-        if(animationData.length===10 && animationData[9].shipPositions.length===2) {
-          let sA=animationData[9].shipPositions[0];
-          let sB=animationData[9].shipPositions[1];
-          const bounds = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
-          map.fitBounds(bounds,{padding:[50,50]});
-        }
-  
-      })
-      .catch(err=>{
-        console.error("Error fetching collision data:", err);
-      });
-  }
-  
-  function exitSituationView() {
-    inSituationView=false;
-    document.getElementById('left-panel').style.display='none';
-    document.getElementById('bottom-center-bar').style.display='none';
-    stopAnimation();
-    if(shipMarkersOnMap) {
-      shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-    }
-    shipMarkersOnMap=[];
-    animationData=[];
-    animationIndex=0;
-    currentCollisionInfo=null;
-  }
+  currentCollisionId = collision_id;
+  fetch(`/history_data?collision_id=${collision_id}`)
+    .then(r=>r.json())
+    .then(data=>{
+      animationData = data;
+      animationIndex = 0;
+      stopAnimation();
+      currentCollisionInfo = collisionData; 
+      inSituationView = true;
+      document.getElementById('left-panel').style.display='block';
+      document.getElementById('bottom-center-bar').style.display='block';
+      updateMapFrame();
+
+      // Fit do klatki nr 10 (index 9)
+      if(animationData.length===10 && animationData[9].shipPositions.length===2) {
+        let sA=animationData[9].shipPositions[0];
+        let sB=animationData[9].shipPositions[1];
+        const bounds = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
+        map.fitBounds(bounds,{padding:[50,50]});
+      }
+
+    })
+    .catch(err=>{
+      console.error("Error fetching collision data:", err);
+    });
+}
 
 function startAnimation() {
   if(animationData.length===0) return;
@@ -242,6 +235,9 @@ function updateMapFrame() {
   if(animationData.length===0) return;
   let frame = animationData[animationIndex];
 
+  // Aktualizujemy wskaźnik klatki
+  document.getElementById('frameIndicator').textContent = `${animationIndex+1}/10`;
+
   if(shipMarkersOnMap) {
     shipMarkersOnMap.forEach(m=>map.removeLayer(m));
   }
@@ -252,16 +248,22 @@ function updateMapFrame() {
     let shipAName = currentCollisionInfo.ship1_name || currentCollisionInfo.mmsi_a;
     let shipBName = currentCollisionInfo.ship2_name || currentCollisionInfo.mmsi_b;
 
-    // Zakładamy długości (brak tu, ale do cpa/tcpa można pominąć)
-    let shipA = {latitude: ships[0].lat, longitude: ships[0].lon, sog: ships[0].sog, cog: ships[0].cog, ship_length:200};
-    let shipB = {latitude: ships[1].lat, longitude: ships[1].lon, sog: ships[1].sog, cog: ships[1].cog, ship_length:200};
+    // Zaokrąglanie COG, SOG
+    // SOG do jednego miejsca po przecinku, COG do pełnych stopni
+    function fmtCOG(c){return Math.round(c);}
+    function fmtSOG(s){return s.toFixed(1);}
+
+    let shipA = {latitude: ships[0].lat, longitude: ships[0].lon, sog:ships[0].sog||0, cog:ships[0].cog||0, ship_length:200};
+    let shipB = {latitude: ships[1].lat, longitude: ships[1].lon, sog:ships[1].sog||0, cog:ships[1].cog||0, ship_length:200};
 
     let {cpa, tcpa} = compute_cpa_tcpa_js(shipA,shipB);
 
     ships.forEach(s=>{
       let marker = L.marker([s.lat,s.lon], {icon:createShipIcon(s)});
-      // tooltip z nazwą, cog, sog, length=200
-      let tt = `${s.mmsi===currentCollisionInfo.mmsi_a?shipAName:shipBName}<br>COG:${s.cog||'N/A'} SOG:${s.sog||'N/A'} kn<br>Length:200m`;
+      let name = s.mmsi===currentCollisionInfo.mmsi_a?shipAName:shipBName;
+      let cogTxt = fmtCOG(s.cog||0);
+      let sogTxt = fmtSOG(s.sog||0);
+      let tt = `${name}<br>COG:${cogTxt}°, SOG:${sogTxt} kn<br>Length:200m`;
       marker.bindTooltip(tt,{direction:'top',sticky:true});
       marker.addTo(map);
       shipMarkersOnMap.push(marker);
@@ -271,9 +273,9 @@ function updateMapFrame() {
     let container = document.getElementById('selected-ships-info');
     container.innerHTML=`
       <b>${shipAName}</b><br>
-      SOG:${shipA.sog||'N/A'} kn, COG:${shipA.cog||'N/A'} deg<br><br>
+      SOG:${fmtSOG(shipA.sog)} kn, COG:${fmtCOG(shipA.cog)}°<br><br>
       <b>${shipBName}</b><br>
-      SOG:${shipB.sog||'N/A'} kn, COG:${shipB.cog||'N/A'} deg
+      SOG:${fmtSOG(shipB.sog)} kn, COG:${fmtCOG(shipB.cog)}°
     `;
 
     let pairInfo = document.getElementById('pair-info');
@@ -300,14 +302,6 @@ function exitSituationView() {
   animationData=[];
   animationIndex=0;
   currentCollisionInfo=null;
-}
-
-function getShipColor(length){
-  if(length===null) return 'none';
-  if(length<50) return 'green';
-  if(length<150) return 'yellow';
-  if(length<250) return 'orange';
-  return 'red';
 }
 
 function createShipIcon(shipData) {
