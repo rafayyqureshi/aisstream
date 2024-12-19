@@ -3,7 +3,7 @@ import json
 import math
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__,
             static_folder='static',
@@ -151,10 +151,6 @@ def history_collisions():
     max_cpa = request.args.get('max_cpa', 0.5, type=float)
     max_tcpa = request.args.get('max_tcpa', 10.0, type=float)
 
-    # Logika:
-    # 1. Pobieramy kolizje z wybranego dnia, filtrujemy po cpa/tcpa
-    # 2. Grupujemy pary statków (m_a,m_b) i wybieramy minimalne CPA dla każdej pary
-    #    aby uniknąć duplikatów.
     query = f"""
     WITH base AS (
       SELECT 
@@ -182,7 +178,7 @@ def history_collisions():
       JOIN minimal on minimal.m_a=p.m_a AND minimal.m_b=p.m_b AND minimal.min_cpa=p.cpa
     ),
     latest_positions AS (
-      SELECT mmsi, ship_name, timestamp AS sp_timestamp,
+      SELECT mmsi, ship_name, ship_length, timestamp AS sp_timestamp,
       ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) as rpos
       FROM `ais_dataset.ships_positions`
     )
@@ -193,7 +189,9 @@ def history_collisions():
       f.cpa, f.tcpa,
       f.latitude_a, f.longitude_a, f.latitude_b, f.longitude_b,
       la.ship_name AS ship1_name,
-      lb.ship_name AS ship2_name
+      la.ship_length AS ship1_length,
+      lb.ship_name AS ship2_name,
+      lb.ship_length AS ship2_length
     FROM filtered f
     LEFT JOIN latest_positions la ON la.mmsi = f.mmsi_a AND la.rpos=1
     LEFT JOIN latest_positions lb ON lb.mmsi = f.mmsi_b AND lb.rpos=1
@@ -207,7 +205,6 @@ def history_collisions():
         ship1_name = r.ship1_name if r.ship1_name else str(r.mmsi_a)
         ship2_name = r.ship2_name if r.ship2_name else str(r.mmsi_b)
 
-        # Nie wyświetlaj, jeśli mmsi_a == mmsi_b lub nazwy statków takie same
         if r.mmsi_a == r.mmsi_b:
             continue
         if ship1_name == ship2_name:
@@ -225,7 +222,9 @@ def history_collisions():
             'latitude_b': r.latitude_b,
             'longitude_b': r.longitude_b,
             'ship1_name': ship1_name,
-            'ship2_name': ship2_name
+            'ship2_name': ship2_name,
+            'ship1_length': r.ship1_length,
+            'ship2_length': r.ship2_length
         })
     return jsonify(result)
 
@@ -244,6 +243,10 @@ def history_data():
     ts_str = parts[2]
     collision_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
 
+    # Chcemy dokładnie 10 klatek:
+    # -6,-5,-4,-3,-2,-1,0,+1,+2,+3 min relative to collision_time (T=0 minimal approach)
+    frame_times = [collision_time + timedelta(minutes=offset) for offset in [-6,-5,-4,-3,-2,-1,0,1,2,3]]
+
     q_data = f"""
     SELECT mmsi, latitude, longitude, sog, cog, timestamp
     FROM `ais_dataset.ships_positions`
@@ -254,23 +257,50 @@ def history_data():
     """
 
     positions = list(client.query(q_data).result())
-    from collections import defaultdict
-    frames = defaultdict(list)
-    for p in positions:
-        t_min = p.timestamp.replace(second=0,microsecond=0)
-        frames[t_min].append({
-            'mmsi': p.mmsi,
-            'lat': p.latitude,
-            'lon': p.longitude,
-            'sog': p.sog,
-            'cog': p.cog
-        })
+    # positions posortowane po timestamp
+    # Musimy zinterpolować do frame_times
+    # Rozdzielamy dane na dwa statki
+    data_a = [(p.timestamp,p.latitude,p.longitude,p.sog,p.cog) for p in positions if p.mmsi==mmsi_a]
+    data_b = [(p.timestamp,p.latitude,p.longitude,p.sog,p.cog) for p in positions if p.mmsi==mmsi_b]
 
-    sorted_frames = sorted(frames.items(), key=lambda x: x[0])
+    def interpolate(data, t):
+        # data sorted by timestamp
+        if not data:
+            return None
+        # jeśli t <= data[0].timestamp
+        if t<=data[0][0]:
+            return data[0]
+        # jeśli t>=data[-1].timestamp
+        if t>=data[-1][0]:
+            return data[-1]
+        # w innym wypadku szukamy przedziału
+        for i in range(len(data)-1):
+            t1=data[i][0]
+            t2=data[i+1][0]
+            if t1<=t<=t2:
+                # linear interpolate lat,lon,sog,cog
+                dt=(t2-t1).total_seconds()
+                if dt==0:
+                    return data[i]
+                ratio=(t-t1).total_seconds()/dt
+                lat=data[i][1]+(data[i+1][1]-data[i][1])*ratio
+                lon=data[i][2]+(data[i+1][2]-data[i][2])*ratio
+                sog=data[i][3]+(data[i+1][3]-data[i][3])*ratio
+                cog=data[i][4]+(data[i+1][4]-data[i][4])*ratio
+                return (t,lat,lon,sog,cog)
+        return data[-1]
+
     result_data=[]
-    for t, ships in sorted_frames:
+    for ft in frame_times:
+        pa=interpolate(data_a,ft)
+        pb=interpolate(data_b,ft)
+        ships=[]
+        if pa is not None:
+            ships.append({'mmsi':mmsi_a,'lat':pa[1],'lon':pa[2],'sog':pa[3],'cog':pa[4]})
+        if pb is not None:
+            ships.append({'mmsi':mmsi_b,'lat':pb[1],'lon':pb[2],'sog':pb[3],'cog':pb[4]})
         result_data.append({
-            'time': t.isoformat(),
+            'time': ft.isoformat(),
             'shipPositions': ships
         })
 
