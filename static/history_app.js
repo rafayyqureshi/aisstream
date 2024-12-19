@@ -171,31 +171,48 @@ function zoomToCollision(c) {
   loadCollisionData(c.collision_id, c);
 }
 
+
 function loadCollisionData(collision_id, collisionData) {
-  currentCollisionId = collision_id;
-  fetch(`/history_data?collision_id=${collision_id}`)
-    .then(r=>r.json())
-    .then(data=>{
-      animationData = data;
-      animationIndex = 0;
-      stopAnimation();
-      currentCollisionInfo = collisionData; 
-      inSituationView = true;
-      document.getElementById('left-panel').style.display='block';
-      document.getElementById('bottom-center-bar').style.display='block';
-      updateMapFrame();
-
-      // Po wczytaniu animacji dopasuj widok do pozycji statków w 1 klatce (frame 0)
-      if(animationData.length===10 && animationData[0].shipPositions.length===2) {
-        let sA=animationData[0].shipPositions[0];
-        let sB=animationData[0].shipPositions[1];
-        const bounds = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
-        map.fitBounds(bounds,{padding:[50,50]});
-      }
-
-    })
-    .catch(err=>console.error("Error fetching collision data:", err));
-}
+    currentCollisionId = collision_id;
+    fetch(`/history_data?collision_id=${collision_id}`)
+      .then(r=>r.json())
+      .then(data=>{
+        animationData = data;
+        animationIndex = 0;
+        stopAnimation();
+        currentCollisionInfo = collisionData; 
+        inSituationView = true;
+        document.getElementById('left-panel').style.display='block';
+        document.getElementById('bottom-center-bar').style.display='block';
+        updateMapFrame();
+  
+        // Po wczytaniu animacji dopasuj widok do klatki nr 10 (index 9)
+        if(animationData.length===10 && animationData[9].shipPositions.length===2) {
+          let sA=animationData[9].shipPositions[0];
+          let sB=animationData[9].shipPositions[1];
+          const bounds = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
+          map.fitBounds(bounds,{padding:[50,50]});
+        }
+  
+      })
+      .catch(err=>{
+        console.error("Error fetching collision data:", err);
+      });
+  }
+  
+  function exitSituationView() {
+    inSituationView=false;
+    document.getElementById('left-panel').style.display='none';
+    document.getElementById('bottom-center-bar').style.display='none';
+    stopAnimation();
+    if(shipMarkersOnMap) {
+      shipMarkersOnMap.forEach(m=>map.removeLayer(m));
+    }
+    shipMarkersOnMap=[];
+    animationData=[];
+    animationIndex=0;
+    currentCollisionInfo=null;
+  }
 
 function startAnimation() {
   if(animationData.length===0) return;

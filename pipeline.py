@@ -7,7 +7,7 @@ from datetime import datetime
 import pytz
 
 CPA_THRESHOLD = 0.5  # mile morskie
-TCPA_THRESHOLD = 15.0 # minuty
+TCPA_THRESHOLD = 10.0 # minuty
 
 def parse_message(message):
     try:

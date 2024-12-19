@@ -124,16 +124,16 @@ def calculate_cpa_tcpa():
     rows = list(client.query(query).result())
     data_by_mmsi = {}
     for r in rows:
-        if r.mmsi not in data_by_mmsi:
-            data_by_mmsi[r.mmsi]={
-                'mmsi':r.mmsi,
-                'latitude':r.latitude,
-                'longitude':r.longitude,
-                'cog':r.cog,
-                'sog':r.sog,
-                'timestamp':r.timestamp,
-                'ship_length':r.ship_length
-            }
+        ts = r.timestamp.replace(tzinfo=None)
+        data_by_mmsi[r.mmsi]={
+            'mmsi':r.mmsi,
+            'latitude':r.latitude,
+            'longitude':r.longitude,
+            'cog':r.cog,
+            'sog':r.sog,
+            'timestamp':ts,
+            'ship_length':r.ship_length
+        }
 
     if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
         return jsonify({'error':'No recent data for one or both ships'}),404
@@ -242,9 +242,8 @@ def history_data():
     mmsi_b = int(parts[1])
     ts_str = parts[2]
     collision_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
+    collision_time = collision_time.replace(tzinfo=None)  # ensure naive datetime
 
-    # Chcemy dokładnie 10 klatek:
-    # -6,-5,-4,-3,-2,-1,0,+1,+2,+3 min relative to collision_time (T=0 minimal approach)
     frame_times = [collision_time + timedelta(minutes=offset) for offset in [-6,-5,-4,-3,-2,-1,0,1,2,3]]
 
     q_data = f"""
@@ -257,28 +256,30 @@ def history_data():
     """
 
     positions = list(client.query(q_data).result())
-    # positions posortowane po timestamp
-    # Musimy zinterpolować do frame_times
-    # Rozdzielamy dane na dwa statki
-    data_a = [(p.timestamp,p.latitude,p.longitude,p.sog,p.cog) for p in positions if p.mmsi==mmsi_a]
-    data_b = [(p.timestamp,p.latitude,p.longitude,p.sog,p.cog) for p in positions if p.mmsi==mmsi_b]
+    data_a = []
+    data_b = []
+    for p in positions:
+        t = p.timestamp.replace(tzinfo=None)
+        if p.mmsi==mmsi_a:
+            data_a.append((t,p.latitude,p.longitude,p.sog,p.cog))
+        else:
+            data_b.append((t,p.latitude,p.longitude,p.sog,p.cog))
 
-    def interpolate(data, t):
-        # data sorted by timestamp
+    data_a.sort(key=lambda x:x[0])
+    data_b.sort(key=lambda x:x[0])
+
+    def interpolate(data,t):
+        # jeśli brak danych całkowicie
         if not data:
             return None
-        # jeśli t <= data[0].timestamp
         if t<=data[0][0]:
             return data[0]
-        # jeśli t>=data[-1].timestamp
         if t>=data[-1][0]:
             return data[-1]
-        # w innym wypadku szukamy przedziału
         for i in range(len(data)-1):
             t1=data[i][0]
             t2=data[i+1][0]
             if t1<=t<=t2:
-                # linear interpolate lat,lon,sog,cog
                 dt=(t2-t1).total_seconds()
                 if dt==0:
                     return data[i]
@@ -294,6 +295,12 @@ def history_data():
     for ft in frame_times:
         pa=interpolate(data_a,ft)
         pb=interpolate(data_b,ft)
+        # Jeśli któryś None, użyj najbliższych danych
+        if pa is None and data_a:
+            pa=data_a[0]
+        if pb is None and data_b:
+            pb=data_b[0]
+
         ships=[]
         if pa is not None:
             ships.append({'mmsi':mmsi_a,'lat':pa[1],'lon':pa[2],'sog':pa[3],'cog':pa[4]})
