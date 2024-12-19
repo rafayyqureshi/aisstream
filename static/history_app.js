@@ -4,7 +4,6 @@ let selectedShips = [];
 let currentDay = 0; 
 let cpaFilter = 0.5;
 let tcpaFilter = 10;
-let playbackSpeed = 1;
 let isPlaying = false;
 let animationData = [];
 let animationIndex = 0;
@@ -51,14 +50,6 @@ function setupUI() {
     tcpaFilter = parseFloat(e.target.value);
     document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
     fetchCollisionsData();
-  });
-
-  document.getElementById('playbackSpeed').addEventListener('change',(e)=>{
-    playbackSpeed = parseInt(e.target.value);
-    if(isPlaying) {
-      stopAnimation();
-      startAnimation();
-    }
   });
 
   document.getElementById('playPause').addEventListener('click', ()=>{
@@ -126,11 +117,9 @@ function displayCollisions(collisions) {
 
     let colorA = getShipColor(c.ship1_length);
     let colorB = getShipColor(c.ship2_length);
-    // Kółko z czarną obwódką i linią dzielącą na pół
+    // Wróćmy do poprzedniego rozwiązania koła bez obramowania
     let sizeIcon = `
       <svg width="20" height="20" viewBox="-10 -10 20 20" style="margin-right:5px; vertical-align:middle;">
-        <circle cx="0" cy="0" r="10" fill="none" stroke="black" stroke-width="1"/>
-        <line x1="0" y1="-10" x2="0" y2="10" stroke="black" stroke-width="1"/>
         <path d="M0,-10 A10,10 0 0,1 10,0 L0,0 Z" fill="${colorB}"/>
         <path d="M0,-10 A10,10 0 0,0 -10,0 L0,0 Z" fill="${colorA}"/>
         <path d="M0,0 A10,10 0 0,1 -10,0 L0,0 Z" fill="${colorA}"/>
@@ -144,10 +133,10 @@ function displayCollisions(collisions) {
         <button class="zoom-button">🔍</button>
       </div>
     `;
+    // Usuwamy item.addEventListener('click',...) - tylko lupa uruchamia prezentację
     item.querySelector('.zoom-button').addEventListener('click', ()=>{
       zoomToCollision(c);
     });
-    item.addEventListener('click', ()=>{zoomToCollision(c);});
 
     list.appendChild(item);
 
@@ -175,7 +164,7 @@ function displayCollisions(collisions) {
 
 function zoomToCollision(c) {
   const bounds = L.latLngBounds([[c.latitude_a,c.longitude_a],[c.latitude_b,c.longitude_b]]);
-  map.fitBounds(bounds,{padding:[50,50]});
+  map.fitBounds(bounds,{padding:[60,60]}); // zoom out about 20% by increasing padding
   loadCollisionData(c.collision_id, c);
 }
 
@@ -198,7 +187,7 @@ function loadCollisionData(collision_id, collisionData) {
         let sA=animationData[9].shipPositions[0];
         let sB=animationData[9].shipPositions[1];
         const bounds = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
-        map.fitBounds(bounds,{padding:[50,50]});
+        map.fitBounds(bounds,{padding:[60,60]});
       }
 
     })
@@ -212,9 +201,10 @@ function startAnimation() {
   isPlaying = true;
   document.getElementById('playPause').textContent="Pause";
 
+  // 1 klatka/sek
   animationInterval = setInterval(()=>{
     stepAnimation(1);
-  }, 1000/(playbackSpeed));
+  }, 1000);
 }
 
 function stopAnimation() {
@@ -235,7 +225,6 @@ function updateMapFrame() {
   if(animationData.length===0) return;
   let frame = animationData[animationIndex];
 
-  // Aktualizujemy wskaźnik klatki
   document.getElementById('frameIndicator').textContent = `${animationIndex+1}/10`;
 
   if(shipMarkersOnMap) {
@@ -248,8 +237,6 @@ function updateMapFrame() {
     let shipAName = currentCollisionInfo.ship1_name || currentCollisionInfo.mmsi_a;
     let shipBName = currentCollisionInfo.ship2_name || currentCollisionInfo.mmsi_b;
 
-    // Zaokrąglanie COG, SOG
-    // SOG do jednego miejsca po przecinku, COG do pełnych stopni
     function fmtCOG(c){return Math.round(c);}
     function fmtSOG(s){return s.toFixed(1);}
 

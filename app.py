@@ -107,7 +107,11 @@ def ships():
         })
     return jsonify(result)
 
-@app.route('/calculate_cpa_tcpa')
+@app.route('/history')
+def history():
+    return render_template('history.html')
+
+@app.route('/calculate_cpa_tcpa')  # Ten endpoint może pozostać bez zmian
 def calculate_cpa_tcpa():
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
@@ -140,10 +144,6 @@ def calculate_cpa_tcpa():
 
     cpa,tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
-
-@app.route('/history')
-def history():
-    return render_template('history.html')
 
 @app.route('/history_collisions')
 def history_collisions():
@@ -242,16 +242,17 @@ def history_data():
     mmsi_b = int(parts[1])
     ts_str = parts[2]
     collision_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
-    collision_time = collision_time.replace(tzinfo=None)  # ensure naive datetime
+    collision_time = collision_time.replace(tzinfo=None)
 
-    frame_times = [collision_time + timedelta(minutes=offset) for offset in [-6,-5,-4,-3,-2,-1,0,1,2,3]]
+    # Najpierw ładujemy ±30 minut
+    start_time = collision_time - timedelta(minutes=30)
+    end_time = collision_time + timedelta(minutes=30)
 
     q_data = f"""
     SELECT mmsi, latitude, longitude, sog, cog, timestamp
     FROM `ais_dataset.ships_positions`
     WHERE mmsi IN ({mmsi_a},{mmsi_b})
-      AND timestamp BETWEEN TIMESTAMP_SUB(TIMESTAMP('{collision_time.isoformat()}'), INTERVAL 7 MINUTE)
-                       AND TIMESTAMP_ADD(TIMESTAMP('{collision_time.isoformat()}'), INTERVAL 3 MINUTE)
+      AND timestamp BETWEEN TIMESTAMP('{start_time.isoformat()}') AND TIMESTAMP('{end_time.isoformat()}')
     ORDER BY timestamp
     """
 
@@ -269,7 +270,6 @@ def history_data():
     data_b.sort(key=lambda x:x[0])
 
     def interpolate(data,t):
-        # jeśli brak danych całkowicie
         if not data:
             return None
         if t<=data[0][0]:
@@ -291,11 +291,38 @@ def history_data():
                 return (t,lat,lon,sog,cog)
         return data[-1]
 
-    result_data=[]
-    for ft in frame_times:
+    # Znajdujemy minimalne podejście:
+    # Sprawdzamy każdy "t" co 1 min w tym ±30 min
+    # Zasymulujemy co minutę
+    minimal_dist=9999
+    minimal_t = collision_time
+    for offset in range(-30,31):
+        ft = collision_time + timedelta(minutes=offset)
         pa=interpolate(data_a,ft)
         pb=interpolate(data_b,ft)
-        # Jeśli któryś None, użyj najbliższych danych
+        if pa and pb:
+            dist = math.sqrt((pa[1]-pb[1])**2+(pa[2]-pb[2])**2)*60/1852 # mile morskie?
+            # Lepiej tak: lat-lon -> do NM konwersja prosta to trudne,
+            # Skoro w compute_cpa_tcpa konwersja jest skomplikowana, uprośćmy:
+            # Zastosujmy prostą aproximacje: 1 deg lat = 60 nm
+            # delta lat = pa[1]-pb[1], delta lon = pa[2]-pb[2]*cos(lat)
+            # Ale mamy tylko lat/lon. Dla uproszczenia:
+            latRef=(pa[1]+pb[1])/2
+            dLat=(pa[1]-pb[1])*60.0
+            dLon=(pa[2]-pb[2])*60.0*math.cos(latRef*math.pi/180)
+            d=math.sqrt(dLat*dLat+dLon*dLon)
+            if d<minimal_dist:
+                minimal_dist=d
+                minimal_t=ft
+
+    # minimal_t to minimalne podejście (0)
+    # Teraz generujemy finalne 10 klatek: offsety [-6,-5,-4,-3,-2,-1,0,1,2,3]
+    final_offsets = [-6,-5,-4,-3,-2,-1,0,1,2,3]
+    result_data=[]
+    for off in final_offsets:
+        ft = minimal_t + timedelta(minutes=off)
+        pa=interpolate(data_a,ft)
+        pb=interpolate(data_b,ft)
         if pa is None and data_a:
             pa=data_a[0]
         if pb is None and data_b:
