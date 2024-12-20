@@ -5,8 +5,6 @@ from apache_beam.transforms.window import FixedWindows
 from apache_beam.transforms.trigger import AfterProcessingTime, AccumulationMode
 import math
 import json
-import pytz
-import math
 from datetime import datetime
 
 CPA_THRESHOLD = 0.5  # mile morskie
@@ -146,14 +144,11 @@ class MyPipelineOptions(PipelineOptions):
         parser.add_argument('--input_subscription', type=str, required=True)
 
 def format_ships_csv(record):
-    # Zamieniamy record na linię CSV, np:
-    # mmsi,latitude,longitude,cog,sog,timestamp,ship_name,ship_length
     def safe_str(x):
         return '' if x is None else str(x)
     return f"{safe_str(record['mmsi'])},{safe_str(record['latitude'])},{safe_str(record['longitude'])},{safe_str(record['cog'])},{safe_str(record['sog'])},{safe_str(record['timestamp'])},{safe_str(record['ship_name'])},{safe_str(record['ship_length'])}"
 
 def format_collisions_csv(record):
-    # mmsi_a,mmsi_b,timestamp,cpa,tcpa,latitude_a,longitude_a,latitude_b,longitude_b
     def safe_str(x):
         return '' if x is None else str(x)
     return f"{safe_str(record['mmsi_a'])},{safe_str(record['mmsi_b'])},{safe_str(record['timestamp'])},{safe_str(record['cpa'])},{safe_str(record['tcpa'])},{safe_str(record['latitude_a'])},{safe_str(record['longitude_a'])},{safe_str(record['latitude_b'])},{safe_str(record['longitude_b'])}"
@@ -171,13 +166,6 @@ def run():
 
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
-    # Zamiast zapisywać do BQ, zapisujemy do GCS (CSV)
-    # Następnie używamy "bq load" poza pipeline, by co 1 min ładować dane do BQ.
-
-    # Tworzymy okna 1-minutowe dla ships i 5s dla collisions jak poprzednio:
-    # Możesz zmienić w razie potrzeby.
-    # Tutaj załóżmy 1-minutowe okno dla ships i 1-minutowe dla collisions, aby uprościć.
-
     with beam.Pipeline(options=pipeline_options) as p:
         parsed = (
             p
@@ -186,13 +174,16 @@ def run():
             | 'FilterValid' >> beam.Filter(lambda x: x is not None)
         )
 
-        # Okno 1-minutowe dla ships
+        # Ships: 1-min window, zapis do GCS
         ships_windowed = (
             parsed
-            | 'WindowForShips' >> beam.WindowInto(beam.window.FixedWindows(60))
+            | 'WindowForShips' >> beam.WindowInto(
+                FixedWindows(60),
+                allowed_lateness=0,
+                trigger=AfterProcessingTime(10),
+                accumulation_mode=AccumulationMode.DISCARDING)
         )
 
-        # Zapis ships do GCS w formacie CSV
         (ships_windowed
          | 'FormatShipsCSV' >> beam.Map(format_ships_csv)
          | 'WriteShipsToGCS' >> beam.io.WriteToText(
@@ -200,15 +191,13 @@ def run():
                 file_name_suffix='.csv',
                 shard_name_template='-SSSS-of-NNNN'))
 
-        # Okno 1-minutowe dla collisions
-        # Możesz zmienić na 5s, ale wtedy load będzie trudniejszy.
-        # Załóżmy też 1 min dla prostoty.
+        # Collisions: 1-min window, GroupByKey wymaga okna z triggerem
         collisions_windowed = (
             parsed
             | 'WindowForCollisions' >> beam.WindowInto(
                 FixedWindows(60),
                 allowed_lateness=0,
-                trigger=AfterProcessingTime(10), # wyzwolenie po 10s od nadejścia elementów
+                trigger=AfterProcessingTime(10),
                 accumulation_mode=AccumulationMode.DISCARDING)
             | 'KeyByGeohash' >> beam.Map(lambda r: (r['geohash'], r))
             | 'GroupByGeohash' >> beam.GroupByKey()
