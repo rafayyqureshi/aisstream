@@ -1,6 +1,8 @@
 import os
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions, GoogleCloudOptions, SetupOptions
+from apache_beam.transforms.window import FixedWindows
+from apache_beam.transforms.trigger import AfterProcessingTime, AccumulationMode
 import math
 import json
 import pytz
@@ -203,7 +205,11 @@ def run():
         # Załóżmy też 1 min dla prostoty.
         collisions_windowed = (
             parsed
-            | 'WindowForCollisions' >> beam.WindowInto(beam.window.FixedWindows(60))
+            | 'WindowForCollisions' >> beam.WindowInto(
+                FixedWindows(60),
+                allowed_lateness=0,
+                trigger=AfterProcessingTime(10), # wyzwolenie po 10s od nadejścia elementów
+                accumulation_mode=AccumulationMode.DISCARDING)
             | 'KeyByGeohash' >> beam.Map(lambda r: (r['geohash'], r))
             | 'GroupByGeohash' >> beam.GroupByKey()
             | 'FindCollisions' >> beam.FlatMap(find_collisions)
