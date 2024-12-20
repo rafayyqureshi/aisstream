@@ -3,8 +3,9 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions, GoogleCloudOptions, SetupOptions
 import math
 import json
-from datetime import datetime
 import pytz
+import math
+from datetime import datetime
 
 CPA_THRESHOLD = 0.5  # mile morskie
 TCPA_THRESHOLD = 10.0 # minuty
@@ -32,11 +33,7 @@ def parse_message(message):
             except:
                 sl = None
 
-        # Możemy zakładać SOG w węzłach, COG w stopniach
-        # Zamiana timestamp na ISO w UTC
         timestamp_str = record['timestamp']
-        # Zakładamy już jest w isoformacie
-        # Ewentualnie poprawka: usuwamy +00:00 i dodajemy Z
         if timestamp_str.endswith('+00:00'):
             timestamp_str = timestamp_str.replace('+00:00', 'Z')
 
@@ -55,13 +52,11 @@ def parse_message(message):
         return None
 
 def compute_cpa_tcpa(ship_a, ship_b):
-    # Sprawdzenie warunków na długość, brak None
     if ship_a['ship_length'] is None or ship_b['ship_length'] is None:
         return (9999, -1)
     if ship_a['ship_length'] < 50 or ship_b['ship_length'] < 50:
         return (9999, -1)
 
-    # Obliczenia jak wcześniej
     latRef = (ship_a['latitude']+ship_b['latitude'])/2
     scaleLat = 111000
     scaleLon = 111000*math.cos(latRef*math.pi/180)
@@ -72,7 +67,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
     xA,yA = toXY(ship_a['latitude'], ship_a['longitude'])
     xB,yB = toXY(ship_b['latitude'], ship_b['longitude'])
 
-    sogA = ship_a['sog']  # nm/h
+    sogA = ship_a['sog']
     sogB = ship_b['sog']
 
     def cogToVector(cogDeg, sogNmH):
@@ -89,9 +84,6 @@ def compute_cpa_tcpa(ship_a, ship_b):
     dvx = vxA - vxB
     dvy = vyA - vyB
 
-    # Konwersja prędkości na m/min
-    # 1 nm = 1852m, sog w nm/h
-    # nm/h -> m/min: sogNmH*(1852/60)
     speedScale = 1852/60
     dvx_mpm = dvx*speedScale
     dvy_mpm = dvy*speedScale
@@ -100,14 +92,13 @@ def compute_cpa_tcpa(ship_a, ship_b):
     PV_m = dx*dvx_mpm + dy*dvy_mpm
 
     if VV_m == 0:
-        # Statki poruszają się identycznie
         tcpa = 0.0
     else:
         tcpa = -PV_m/VV_m
+
     if tcpa < 0:
         return (9999, -1)
 
-    # Po tcpa minutach
     vxA_mpm = vxA*speedScale
     vyA_mpm = vyA*speedScale
     vxB_mpm = vxB*speedScale
@@ -124,15 +115,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
 
 def find_collisions(geohash_record):
     gh, records = geohash_record
-
-    # Zamiana na listę
     ships_in_cell = list(records)
-
-    # filtrujemy statki <50m i None z obliczen tutaj
-    # jednak do obliczeń cpa/tcpa trzeba sprawdzić w momencie parowania
-    # Ewentualnie można tu od razu filtrować ale wtedy pomijamy w ogóle te statki?
-    # Chcemy by w find_collisions też pominąć od razu?
-    # Lepiej pominąć od razu. Ale wtedy statki <50m w ogóle nie biorą udziału w obliczeniach.
     filtered_ships = [s for s in ships_in_cell if (s.get('ship_length') is not None and s['ship_length'] >= 50.0)]
 
     results = []
@@ -145,7 +128,7 @@ def find_collisions(geohash_record):
                 results.append({
                     'mmsi_a': ship_a['mmsi'],
                     'mmsi_b': ship_b['mmsi'],
-                    'timestamp': ship_a['timestamp'],  # może min(...) z dat ship_a,b
+                    'timestamp': ship_a['timestamp'],
                     'cpa': cpa,
                     'tcpa': tcpa,
                     'latitude_a': ship_a['latitude'],
@@ -160,6 +143,19 @@ class MyPipelineOptions(PipelineOptions):
     def _add_argparse_args(cls, parser):
         parser.add_argument('--input_subscription', type=str, required=True)
 
+def format_ships_csv(record):
+    # Zamieniamy record na linię CSV, np:
+    # mmsi,latitude,longitude,cog,sog,timestamp,ship_name,ship_length
+    def safe_str(x):
+        return '' if x is None else str(x)
+    return f"{safe_str(record['mmsi'])},{safe_str(record['latitude'])},{safe_str(record['longitude'])},{safe_str(record['cog'])},{safe_str(record['sog'])},{safe_str(record['timestamp'])},{safe_str(record['ship_name'])},{safe_str(record['ship_length'])}"
+
+def format_collisions_csv(record):
+    # mmsi_a,mmsi_b,timestamp,cpa,tcpa,latitude_a,longitude_a,latitude_b,longitude_b
+    def safe_str(x):
+        return '' if x is None else str(x)
+    return f"{safe_str(record['mmsi_a'])},{safe_str(record['mmsi_b'])},{safe_str(record['timestamp'])},{safe_str(record['cpa'])},{safe_str(record['tcpa'])},{safe_str(record['latitude_a'])},{safe_str(record['longitude_a'])},{safe_str(record['latitude_b'])},{safe_str(record['longitude_b'])}"
+
 def run():
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
     if not project_id:
@@ -173,30 +169,12 @@ def run():
 
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
-    # Tabele BQ
-    ships_table = f"{project_id}:ais_dataset.ships_positions"
-    collisions_table = f"{project_id}:ais_dataset.collisions"
-    ships_schema = (
-        'mmsi:INTEGER,'
-        'latitude:FLOAT,'
-        'longitude:FLOAT,'
-        'cog:FLOAT,'
-        'sog:FLOAT,'
-        'timestamp:TIMESTAMP,'
-        'ship_name:STRING,'
-        'ship_length:FLOAT'
-    )
-    collisions_schema = (
-        'mmsi_a:INTEGER,'
-        'mmsi_b:INTEGER,'
-        'timestamp:TIMESTAMP,'
-        'cpa:FLOAT,'
-        'tcpa:FLOAT,'
-        'latitude_a:FLOAT,'
-        'longitude_a:FLOAT,'
-        'latitude_b:FLOAT,'
-        'longitude_b:FLOAT'
-    )
+    # Zamiast zapisywać do BQ, zapisujemy do GCS (CSV)
+    # Następnie używamy "bq load" poza pipeline, by co 1 min ładować dane do BQ.
+
+    # Tworzymy okna 1-minutowe dla ships i 5s dla collisions jak poprzednio:
+    # Możesz zmienić w razie potrzeby.
+    # Tutaj załóżmy 1-minutowe okno dla ships i 1-minutowe dla collisions, aby uprościć.
 
     with beam.Pipeline(options=pipeline_options) as p:
         parsed = (
@@ -206,30 +184,37 @@ def run():
             | 'FilterValid' >> beam.Filter(lambda x: x is not None)
         )
 
-        # Zapis do ships_positions
-        parsed | 'WriteShips' >> beam.io.WriteToBigQuery(
-            table=ships_table,
-            schema=ships_schema,
-            create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
-            write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND
+        # Okno 1-minutowe dla ships
+        ships_windowed = (
+            parsed
+            | 'WindowForShips' >> beam.WindowInto(beam.window.FixedWindows(60))
         )
 
-        # Oblicz kolizje
-        # Okno 5s
-        windowed = (
+        # Zapis ships do GCS w formacie CSV
+        (ships_windowed
+         | 'FormatShipsCSV' >> beam.Map(format_ships_csv)
+         | 'WriteShipsToGCS' >> beam.io.WriteToText(
+                file_path_prefix='gs://ais-collision-detection-bucket/ais_data/ships/ships',
+                file_name_suffix='.csv',
+                shard_name_template='-SSSS-of-NNNN'))
+
+        # Okno 1-minutowe dla collisions
+        # Możesz zmienić na 5s, ale wtedy load będzie trudniejszy.
+        # Załóżmy też 1 min dla prostoty.
+        collisions_windowed = (
             parsed
-            | 'WindowForCollisions' >> beam.WindowInto(beam.window.FixedWindows(5))
+            | 'WindowForCollisions' >> beam.WindowInto(beam.window.FixedWindows(60))
             | 'KeyByGeohash' >> beam.Map(lambda r: (r['geohash'], r))
             | 'GroupByGeohash' >> beam.GroupByKey()
             | 'FindCollisions' >> beam.FlatMap(find_collisions)
         )
 
-        windowed | 'WriteCollisions' >> beam.io.WriteToBigQuery(
-            table=collisions_table,
-            schema=collisions_schema,
-            create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
-            write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND
-        )
+        (collisions_windowed
+         | 'FormatCollisionsCSV' >> beam.Map(format_collisions_csv)
+         | 'WriteCollisionsToGCS' >> beam.io.WriteToText(
+                file_path_prefix='gs://ais-collision-detection-bucket/ais_data/collisions/collisions',
+                file_name_suffix='.csv',
+                shard_name_template='-SSSS-of-NNNN'))
 
 if __name__ == '__main__':
     run()
