@@ -17,7 +17,7 @@ pipeline:
 	@echo "Uruchamianie potoku Dataflow..."
 	. venv/bin/activate && \
 	export $(shell sed 's/#.*//g' .env | xargs) && \
-	python pipeline.py \
+	python pipeline_minimal.py \
 		--runner=DataflowRunner \
 		--project=$$GOOGLE_CLOUD_PROJECT \
 		--region=$$REGION \

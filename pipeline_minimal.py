@@ -1,16 +1,12 @@
 import os
+import json
 import apache_beam as beam
-
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions, GoogleCloudOptions
 from apache_beam.transforms.window import FixedWindows
 from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 from apache_beam import window
-import json
 
 def parse_message(record):
-    """
-    Minimalne parsowanie danych AIS.
-    """
     try:
         data = json.loads(record.decode('utf-8'))
         required = ['mmsi','latitude','longitude','cog','sog','timestamp']
@@ -29,8 +25,6 @@ def format_ships_csv(r):
         f"{s(r.get('ship_name'))},{s(r.get('ship_length'))}"
     )
 
-from apache_beam.options.pipeline_options import PipelineOptions
-
 class MyPipelineOptions(PipelineOptions):
     @classmethod
     def _add_argparse_args(cls, parser):
@@ -47,26 +41,21 @@ def run():
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
     with beam.Pipeline(options=pipeline_options) as p:
-
-        # Czyli read z Pub/Sub w streaming
-        # UWAGA: jeśli nie masz publishTime w subie, usuń timestamp_attribute
         lines = (
             p
             | 'ReadPubSub' >> beam.io.ReadFromPubSub(
                 subscription=input_subscription,
                 with_attributes=False,
-                timestamp_attribute='publishTime'  # usuń, jeśli to generuje błędy
+                timestamp_attribute='publishTime'  
             )
         )
 
-        # Parsowanie
         parsed = (
             lines
-            | 'Parse' >> beam.Map(parse_message)
-            | 'FilterNone' >> beam.Filter(lambda r: r is not None)
+            | 'ParseMsg' >> beam.Map(parse_message)
+            | 'FilterNone' >> beam.Filter(lambda x: x is not None)
         )
 
-        # Okienkowanie 1-min
         ships_windowed = (
             parsed
             | 'WindowShips' >> beam.WindowInto(
@@ -77,7 +66,6 @@ def run():
             )
         )
 
-        # Zapis surowych danych AIS do GCS
         (
             ships_windowed
             | 'FormatShipsCSV' >> beam.Map(format_ships_csv)
