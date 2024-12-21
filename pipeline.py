@@ -5,23 +5,14 @@ from apache_beam.options.pipeline_options import PipelineOptions, StandardOption
 from apache_beam.transforms.window import FixedWindows
 from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 from apache_beam import window
-import math
 import json
-from datetime import datetime
-
-# Progi, jeśli chcesz ewentualnie użyć do filtracji w DoFn
-CPA_THRESHOLD = 0.5
-TCPA_THRESHOLD = 10.0
 
 def parse_message(record):
     """
-    Prosta funkcja parse. 
-    Zakładamy, że Beam przypisze event-time z PubSub (publishTime) 
-    jeśli w ReadFromPubSub użyjesz 'timestamp_attribute'.
+    Minimalne parsowanie danych AIS.
     """
     try:
         data = json.loads(record.decode('utf-8'))
-        # Minimalna weryfikacja kluczowych pól
         required = ['mmsi','latitude','longitude','cog','sog','timestamp']
         if not all(k in data for k in required):
             return None
@@ -30,12 +21,15 @@ def parse_message(record):
         return None
 
 def format_ships_csv(r):
-    # Formatowanie surowych danych AIS w CSV
     def s(x): return '' if x is None else str(x)
-    return (f"{s(r.get('mmsi'))},{s(r.get('latitude'))},"
-            f"{s(r.get('longitude'))},{s(r.get('cog'))},"
-            f"{s(r.get('sog'))},{s(r.get('timestamp'))},"
-            f"{s(r.get('ship_name'))},{s(r.get('ship_length'))}")
+    return (
+        f"{s(r.get('mmsi'))},{s(r.get('latitude'))},"
+        f"{s(r.get('longitude'))},{s(r.get('cog'))},"
+        f"{s(r.get('sog'))},{s(r.get('timestamp'))},"
+        f"{s(r.get('ship_name'))},{s(r.get('ship_length'))}"
+    )
+
+from apache_beam.options.pipeline_options import PipelineOptions
 
 class MyPipelineOptions(PipelineOptions):
     @classmethod
@@ -43,7 +37,6 @@ class MyPipelineOptions(PipelineOptions):
         parser.add_argument('--input_subscription', type=str, required=True)
 
 def run():
-    # 1) Ustawiamy parametry
     project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
     if not project_id:
         raise ValueError("GOOGLE_CLOUD_PROJECT not set")
@@ -53,29 +46,27 @@ def run():
 
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
-    # 2) Budujemy potok
     with beam.Pipeline(options=pipeline_options) as p:
 
-        # Odczyt z Pub/Sub w trybie streaming
-        # UWAGA: jeśli subskrypcja nie udostępnia publishTime, usuń 'timestamp_attribute'
+        # Czyli read z Pub/Sub w streaming
+        # UWAGA: jeśli nie masz publishTime w subie, usuń timestamp_attribute
         lines = (
             p
             | 'ReadPubSub' >> beam.io.ReadFromPubSub(
-                  subscription=input_subscription,
-                  with_attributes=False,
-                  timestamp_attribute='publishTime'
-              )
+                subscription=input_subscription,
+                with_attributes=False,
+                timestamp_attribute='publishTime'  # usuń, jeśli to generuje błędy
+            )
         )
 
-        # Parsowanie surowych danych AIS
+        # Parsowanie
         parsed = (
             lines
             | 'Parse' >> beam.Map(parse_message)
-            | 'FilterNotNone' >> beam.Filter(lambda r: r is not None)
+            | 'FilterNone' >> beam.Filter(lambda r: r is not None)
         )
 
-        # [Gałąź surowa AIS -> zapis do GCS co 1 minutę]
-        # Odtąd można ewentualnie w cron/Cloud Scheduler ładować do BQ (batch load)
+        # Okienkowanie 1-min
         ships_windowed = (
             parsed
             | 'WindowShips' >> beam.WindowInto(
@@ -86,19 +77,16 @@ def run():
             )
         )
 
+        # Zapis surowych danych AIS do GCS
         (
             ships_windowed
-            | 'ShipsCSV' >> beam.Map(format_ships_csv)
+            | 'FormatShipsCSV' >> beam.Map(format_ships_csv)
             | 'WriteShipsCSV' >> beam.io.WriteToText(
                 file_path_prefix='gs://ais-collision-detection-bucket/ais_data/ships/ships',
                 file_name_suffix='.csv',
                 shard_name_template='-SSSS-of-NNNN'
             )
         )
-
-        # [Tu brak groupByKey w streaming]
-        # Ewentualne kolizje można wykrywać inną metodą (Stateful DoFn),
-        # lub w potoku batch offline z załadowanych plików.
 
 if __name__=='__main__':
     run()
