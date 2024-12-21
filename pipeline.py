@@ -1,8 +1,8 @@
 import os
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions, GoogleCloudOptions, SetupOptions
+from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions, GoogleCloudOptions
 from apache_beam.transforms.window import FixedWindows
-from apache_beam.transforms.trigger import AfterWatermark, AfterProcessingTime, AccumulationMode
+from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 import math
 import json
 from datetime import datetime
@@ -166,8 +166,6 @@ def run():
 
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
-    # Definiujemy okna 1-minutowe i trigger w oparciu o watermark
-    # AfterWatermark spowoduje wyzwolenie grupowania po zakończeniu okna
     with beam.Pipeline(options=pipeline_options) as p:
         parsed = (
             p
@@ -176,24 +174,26 @@ def run():
             | 'FilterValid' >> beam.Filter(lambda x: x is not None)
         )
 
-        windowed_ships = (
+        # Okno 1-minutowe + trigger w oparciu o watermark
+        ships_windowed = (
             parsed
             | 'WindowForShips' >> beam.WindowInto(
                 FixedWindows(60),
                 allowed_lateness=0,
-                trigger=AfterWatermark(),
+                trigger=AfterWatermark(),  # czekamy aż okno się zakończy
                 accumulation_mode=AccumulationMode.DISCARDING)
         )
 
-        (windowed_ships
+        # Zapis do CSV w GCS
+        (ships_windowed
          | 'FormatShipsCSV' >> beam.Map(format_ships_csv)
          | 'WriteShipsToGCS' >> beam.io.WriteToText(
                 file_path_prefix='gs://ais-collision-detection-bucket/ais_data/ships/ships',
                 file_name_suffix='.csv',
-                shard_name_template='-SSSS-of-NNNN',
-                windowedWrites=True))
+                shard_name_template='-SSSS-of-NNNN'
+            ))
 
-        windowed_collisions = (
+        collisions_windowed = (
             parsed
             | 'WindowForCollisions' >> beam.WindowInto(
                 FixedWindows(60),
@@ -205,13 +205,13 @@ def run():
             | 'FindCollisions' >> beam.FlatMap(find_collisions)
         )
 
-        (windowed_collisions
+        (collisions_windowed
          | 'FormatCollisionsCSV' >> beam.Map(format_collisions_csv)
          | 'WriteCollisionsToGCS' >> beam.io.WriteToText(
                 file_path_prefix='gs://ais-collision-detection-bucket/ais_data/collisions/collisions',
                 file_name_suffix='.csv',
-                shard_name_template='-SSSS-of-NNNN',
-                windowedWrites=True))
+                shard_name_template='-SSSS-of-NNNN'
+            ))
 
 if __name__ == '__main__':
     run()
