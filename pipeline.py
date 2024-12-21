@@ -6,7 +6,7 @@ from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 import math
 import json
 from datetime import datetime
-import apache_beam.window as window
+from apache_beam import window  # <-- kluczowa zmiana
 
 CPA_THRESHOLD = 0.5
 TCPA_THRESHOLD = 10.0
@@ -24,7 +24,8 @@ def parse_message_with_timestamp(message):
 
         lat = record['latitude']
         lon = record['longitude']
-        if not (isinstance(lat, (int,float)) and isinstance(lon, (int,float)) and -90<=lat<=90 and -180<=lon<=180):
+        if not (isinstance(lat, (int,float)) and isinstance(lon, (int,float))
+                and -90<=lat<=90 and -180<=lon<=180):
             return None, None
 
         sl = record.get('ship_length', None)
@@ -45,7 +46,7 @@ def parse_message_with_timestamp(message):
             dt=datetime.fromisoformat(timestamp_str.replace('Z',''))
             event_ts=dt.timestamp()
         except:
-            # nie udało się sparsować - fallback
+            # fallback
             event_ts=0
 
         parsed_rec={
@@ -65,13 +66,12 @@ def parse_message_with_timestamp(message):
 
 def to_timestamped_value(record_tuple):
     """
-    Zamieniamy (record, event_ts) na TimestampedValue(record, event_ts).
+    Zamieniamy (record, event_ts) na window.TimestampedValue(record, event_ts).
     """
     record, event_ts=record_tuple
     if record is None:
         return None
-    # beam.window.TimestampedValue(obiekt, event_time w sekundach)
-    return beam.window.TimestampedValue(record, event_ts)
+    return window.TimestampedValue(record, event_ts)
 
 def compute_cpa_tcpa(ship_a, ship_b):
     # (logika CPA/TCPA bez zmian)
@@ -87,12 +87,14 @@ class MyPipelineOptions(beam.PipelineOptions):
         parser.add_argument('--input_subscription', type=str, required=True)
 
 def format_ships_csv(record):
-    # (logika formatowania CSV bez zmian)
-    ...
+    def safe_str(x):
+        return '' if x is None else str(x)
+    return f"{safe_str(record['mmsi'])},{safe_str(record['latitude'])},{safe_str(record['longitude'])},{safe_str(record['cog'])},{safe_str(record['sog'])},{safe_str(record['timestamp'])},{safe_str(record['ship_name'])},{safe_str(record['ship_length'])}"
 
 def format_collisions_csv(record):
-    # (logika formatowania CSV bez zmian)
-    ...
+    def safe_str(x):
+        return '' if x is None else str(x)
+    return f"{safe_str(record['mmsi_a'])},{safe_str(record['mmsi_b'])},{safe_str(record['timestamp'])},{safe_str(record['cpa'])},{safe_str(record['tcpa'])},{safe_str(record['latitude_a'])},{safe_str(record['longitude_a'])},{safe_str(record['latitude_b'])},{safe_str(record['longitude_b'])}"
 
 def run():
     project_id=os.getenv('GOOGLE_CLOUD_PROJECT')
@@ -114,10 +116,10 @@ def run():
             | 'ParseMessage' >> beam.Map(parse_message_with_timestamp)
             | 'FilterNone' >> beam.Filter(lambda x: x[0] is not None)  # x=(record, event_ts)
             | 'AssignTimestamps' >> beam.Map(to_timestamped_value)
-            | 'FilterStamp' >> beam.Filter(lambda x: x is not None)  # odfiltruj None
+            | 'FilterStamp' >> beam.Filter(lambda x: x is not None)
         )
 
-        # ships w 1-minutowych oknach
+        # Ships
         ships_windowed=(
             parsed
             | 'WindowForShips' >> beam.WindowInto(
@@ -136,7 +138,7 @@ def run():
          )
         )
 
-        # collisions
+        # Collisions
         collisions_windowed=(
             parsed
             | 'WindowForCollisions' >> beam.WindowInto(
