@@ -81,7 +81,7 @@ def find_collisions(geohash_record):
     # (logika find_collisions bez zmian)
     ...
 
-class MyPipelineOptions(beam.PipelineOptions):
+class MyPipelineOptions(PipelineOptions):
     @classmethod
     def _add_argparse_args(cls, parser):
         parser.add_argument('--input_subscription', type=str, required=True)
