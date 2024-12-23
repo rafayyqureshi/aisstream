@@ -29,14 +29,21 @@ class MyPipelineOptions(PipelineOptions):
 
 def run():
     pipeline_options = PipelineOptions()
-    pipeline_options.view_as(StandardOptions).streaming = True
+    # Ustawiamy streaming=False => batch
+    pipeline_options.view_as(StandardOptions).streaming = False
 
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
     with beam.Pipeline(options=pipeline_options) as p:
         lines = (
             p
-            | 'ReadPubSub' >> beam.io.ReadFromPubSub(subscription=input_subscription)
+            | 'ReadPubSub' >> beam.io.ReadFromPubSub(
+                subscription=input_subscription,
+                with_attributes=False,
+                # DODAJ np:
+                # max_num_records=100000,
+                # max_read_time=600,  # sek
+            )
         )
         parsed = (
             lines
@@ -44,10 +51,9 @@ def run():
             | 'FilterNone' >> beam.Filter(lambda x: x is not None)
         )
 
-        # Zapis do plików (bez okna) - zero GroupByKey => brak słynnego błędu
         (
             parsed
-            | 'ToCSV' >> beam.Map(format_csv)
+            | 'FormatCSV' >> beam.Map(format_csv)
             | 'WriteCSV' >> beam.io.WriteToText(
                 file_path_prefix='gs://ais-collision-detection-bucket/ais_data/raw/ais_raw',
                 file_name_suffix='.csv',
@@ -55,5 +61,5 @@ def run():
             )
         )
 
-if __name__=='__main__':
+if __name__ == '__main__':
     run()
