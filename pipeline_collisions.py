@@ -127,6 +127,7 @@ class CollisionDoFn(beam.DoFn):
     """
     RECORDS_STATE = BagStateSpec('records_state', beam.coders.FastPrimitivesCoder())
     TIMER = TimerSpec('cleanup', TimeDomain.WATERMARK)
+    
 
     def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE),
                 timer=beam.DoFn.TimerParam(TIMER)):
@@ -134,6 +135,9 @@ class CollisionDoFn(beam.DoFn):
 
         # Dodaj bieżący record do stanu
         records_state.add(ship)
+
+        # Ustaw timer, by za 30 sek (processing-time) wywołać cleanup
+        timer.set_relative(STATE_RETENTION_SEC)
 
         # Sprawdź kolizje z poprzednimi
         old_ships = list(records_state.read())
@@ -157,7 +161,6 @@ class CollisionDoFn(beam.DoFn):
 
     @on_timer(TIMER)
     def cleanup(self, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
-        # Dla uproszczenia – czyścimy cały stan
         records_state.clear()
 
 class MyPipelineOptions(PipelineOptions):
