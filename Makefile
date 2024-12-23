@@ -1,4 +1,4 @@
-.PHONY: setup ais_stream pipeline_live pipeline_arch flask_app cleanup
+.PHONY: setup ais_stream pipeline_live pipeline_arch flask_app cleanup live arch
 
 SHELL := /bin/bash
 
@@ -14,7 +14,7 @@ ais_stream:
 	python ais_stream.py
 
 pipeline_live:
-	@echo "Uruchamianie potoku Dataflow..."
+	@echo "Uruchamianie potoku Dataflow (kolizje, StatefulDoFn)..."
 	. venv/bin/activate && \
 	export $(shell sed 's/#.*//g' .env | xargs) && \
 	python pipeline_collisions.py \
@@ -30,7 +30,7 @@ pipeline_live:
   		--save_main_session
 
 pipeline_arch:
-	@echo "Uruchamianie potoku Dataflow..."
+	@echo "Uruchamianie potoku Dataflow (archiwizacja AIS do GCS)..."
 	. venv/bin/activate && \
 	export $(shell sed 's/#.*//g' .env | xargs) && \
 	python pipeline_archive.py \
@@ -44,7 +44,6 @@ pipeline_arch:
   		--requirements_file=requirements.txt \
   		--save_main_session
 
-
 flask_app:
 	@echo "Uruchamianie aplikacji Flask..."
 	. venv/bin/activate && \
@@ -56,3 +55,7 @@ cleanup:
 	@gcloud dataflow jobs cancel $$(gcloud dataflow jobs list --region $$(grep REGION .env | cut -d '=' -f2) --filter="NAME:$$(grep JOB_NAME .env | cut -d '=' -f2)" --format="value(JOB_ID)" | head -n 1)
 	@gcloud pubsub subscriptions seek $$(basename $$(grep INPUT_SUBSCRIPTION .env | cut -d '=' -f2)) --time=+0s
 	@echo "Zasoby wyczyszczone."
+
+# --- Aliasy skracające wywołania ---
+live: pipeline_live
+arch: pipeline_arch
