@@ -13,20 +13,37 @@ ais_stream:
 	. venv/bin/activate && \
 	python ais_stream.py
 
-pipeline:
+pipeline_live:
 	@echo "Uruchamianie potoku Dataflow..."
 	. venv/bin/activate && \
 	export $(shell sed 's/#.*//g' .env | xargs) && \
-	python pipeline_minimal.py \
-		--runner=DataflowRunner \
-		--project=$$GOOGLE_CLOUD_PROJECT \
-		--region=$$REGION \
-		--staging_location=$$STAGING_LOCATION \
-		--temp_location=$$TEMP_LOCATION \
-		--job_name=$$JOB_NAME \
-		--input_subscription=$$INPUT_SUBSCRIPTION \
-		--requirements_file=requirements.txt \
-		--save_main_session
+	python pipeline_collisions.py \
+  		--runner=DataflowRunner \
+  		--project=ais-collision-detection \
+  		--region=us-east1 \
+  		--staging_location=gs://ais-collision-detection-bucket/staging \
+  		--temp_location=gs://ais-collision-detection-bucket/temp \
+  		--job_name=collision-detector \
+  		--input_subscription=projects/ais-collision-detection/subscriptions/ais-data-sub \
+  		--collisions_topic=projects/ais-collision-detection/topics/collisions-topic \
+  		--requirements_file=requirements.txt \
+  		--save_main_session
+
+pipeline_arch:
+	@echo "Uruchamianie potoku Dataflow..."
+	. venv/bin/activate && \
+	export $(shell sed 's/#.*//g' .env | xargs) && \
+	python pipeline_archive.py \
+  		--runner=DataflowRunner \
+  		--project=ais-collision-detection \
+  		--region=us-east1 \
+  		--staging_location=gs://ais-collision-detection-bucket/staging \
+  		--temp_location=gs://ais-collision-detection-bucket/temp \
+  		--job_name=ais-archive \
+  		--input_subscription=projects/ais-collision-detection/subscriptions/ais-data-sub \
+  		--requirements_file=requirements.txt \
+  		--save_main_session
+
 
 flask_app:
 	@echo "Uruchamianie aplikacji Flask..."
