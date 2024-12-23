@@ -79,7 +79,7 @@ def run():
             | 'WriteToFiles' >> fileio.WriteToFiles(
                   path='gs://ais-collision-detection-bucket/ais_data/raw/',
                   file_naming=fileio.default_file_naming(prefix='ais_raw-', suffix='.csv'),
-                  sink=lambda dest: fileio.TextSink(encoding='utf-8')
+                  sink=lambda _: fileio.TextSink()
             )
         )
 

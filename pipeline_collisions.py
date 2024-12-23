@@ -35,10 +35,20 @@ def compute_cpa_tcpa(ship_a, ship_b):
       - latitude, longitude w stopniach.
       - Brak kolizji, jeśli któryś statek <50m albo brak ship_length.
     """
-
+       # Bezpieczna konwersja
+    sl_a = ship_a.get('ship_length')
+    sl_b = ship_b.get('ship_length')
+    try:
+        sl_a = float(sl_a)
+    except:
+        return (9999, -1)
+    try:
+        sl_b = float(sl_b)
+    except:
+        return (9999, -1)
+    
     # Odrzucamy z obliczeń, jeśli statek <50m
-    if (ship_a.get('ship_length') is None or ship_b.get('ship_length') is None
-        or ship_a['ship_length'] < 50 or ship_b['ship_length'] < 50):
+    if sl_a < 50 or sl_b < 50:
         return (9999, -1)
 
     # Współczynnik geograficzny
