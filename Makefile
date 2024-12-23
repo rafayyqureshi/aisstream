@@ -1,4 +1,4 @@
-.PHONY: setup ais_stream pipeline flask_app cleanup
+.PHONY: setup ais_stream pipeline_live pipeline_arch flask_app cleanup
 
 SHELL := /bin/bash
 
