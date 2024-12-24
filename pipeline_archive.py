@@ -1,32 +1,29 @@
 import os
 import json
-import time
-import logging
-
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
-from apache_beam.metrics import Metrics
 from apache_beam.io import fileio
 from apache_beam.transforms import window
 
 def parse_message(record):
-    parse_counter = Metrics.counter('ArchivePipeline', 'parse_calls')
+    """
+    Parsuje AIS rekord z Pub/Sub (kodowany JSON).
+    Zwraca None, jeśli brakuje pól mmsi, latitude, ...
+    """
     try:
         data = json.loads(record.decode('utf-8'))
         required = ['mmsi','latitude','longitude','cog','sog','timestamp']
         if not all(k in data for k in required):
             return None
-        parse_counter.inc()
         return data
     except:
-        logging.warning("Archive pipeline: Failed to parse JSON.")
         return None
 
 def format_csv(r):
-    format_counter = Metrics.counter('ArchivePipeline', 'format_csv_calls')
-    format_counter.inc()
-
-    def s(x):
+    """
+    Zwraca string w postaci: mmsi,lat,lon,cog,sog,timestamp,ship_name,ship_length
+    """
+    def s(x): 
         return '' if x is None else str(x)
     return (
         f"{s(r.get('mmsi'))},{s(r.get('latitude'))},"
@@ -41,42 +38,46 @@ class MyPipelineOptions(PipelineOptions):
         parser.add_argument('--input_subscription', type=str, required=True)
 
 def run():
-    logging.getLogger().setLevel(logging.INFO)
-
     pipeline_options = PipelineOptions()
     pipeline_options.view_as(StandardOptions).streaming = True
 
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
     with beam.Pipeline(options=pipeline_options) as p:
+        # Odczyt z Pub/Sub
         lines = (
             p
             | 'ReadPubSub' >> beam.io.ReadFromPubSub(subscription=input_subscription)
         )
 
+        # Parsowanie
         parsed = (
             lines
             | 'ParseJson' >> beam.Map(parse_message)
             | 'FilterNone' >> beam.Filter(lambda x: x is not None)
         )
 
+        # Konwersja do CSV
         csv_lines = (
             parsed
             | 'FormatCSV' >> beam.Map(format_csv)
         )
 
-        # Dodajemy okno 5-minutowe, żeby co 5 min commitować pliki
+        # Ustawiamy okno 5-minutowe
         windowed = (
             csv_lines
-            | 'Window5min' >> beam.WindowInto(window.FixedWindows(300))
+            | 'WindowInto5min' >> beam.WindowInto(window.FixedWindows(300))
         )
 
+        # Zapis do GCS
         (
             windowed
             | 'WriteFiles' >> fileio.WriteToFiles(
                 path='gs://ais-collision-detection-bucket/ais_data/raw/',
-                file_naming=fileio.default_file_naming(prefix='ais_raw-', suffix='.csv'),
-                sink=lambda _: fileio.TextSink()  # Bez argumentów
+                file_naming=fileio.default_file_naming(
+                    prefix='ais_raw-', suffix='.csv'
+                ),
+                sink=lambda _: fileio.TextSink()
             )
         )
 
