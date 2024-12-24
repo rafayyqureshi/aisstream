@@ -72,12 +72,13 @@ def run():
         # Zapis do GCS
         (
             windowed
-            | 'WriteFiles' >> fileio.WriteToFiles(
-                path='gs://ais-collision-detection-bucket/ais_data/raw/',
-                file_naming=fileio.default_file_naming(
-                    prefix='ais_raw-', suffix='.csv'
-                ),
-                sink=lambda _: fileio.TextSink()
+            | 'FormatToCSV' >> beam.Map(lambda x: format_csv(x))
+            | 'WriteRaw' >> beam.io.WriteToText(
+                file_path_prefix='gs://BUCKET/ais_data/raw/ais_raw',
+                file_name_suffix='.csv',
+                # Ustawiamy liczbę shardów tak, żeby nie było ich 300 w 5 minut
+                num_shards=3,  
+                shard_name_template='-SS-of-NN'
             )
         )
 
