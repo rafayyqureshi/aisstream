@@ -2,8 +2,8 @@ import os
 import json
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
-from apache_beam.io import fileio
-from apache_beam.transforms import window
+from apache_beam.transforms.window import FixedWindows
+from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 
 def parse_message(record):
     """
@@ -21,15 +21,16 @@ def parse_message(record):
 
 def format_csv(r):
     """
-    Zwraca string w postaci: mmsi,lat,lon,cog,sog,timestamp,ship_name,ship_length
+    Zwraca pojedynczy wiersz w formacie CSV:
+      mmsi,latitude,longitude,cog,sog,timestamp,ship_name,ship_length
     """
-    def s(x): 
+    def s(x):
         return '' if x is None else str(x)
     return (
         f"{s(r.get('mmsi'))},{s(r.get('latitude'))},"
         f"{s(r.get('longitude'))},{s(r.get('cog'))},"
         f"{s(r.get('sog'))},{s(r.get('timestamp'))},"
-        f"{s(r.get('ship_name'))},{s(r.get('ship_length'))}\n"
+        f"{s(r.get('ship_name'))},{s(r.get('ship_length'))}"
     )
 
 class MyPipelineOptions(PipelineOptions):
@@ -38,46 +39,57 @@ class MyPipelineOptions(PipelineOptions):
         parser.add_argument('--input_subscription', type=str, required=True)
 
 def run():
+    # Podstawowe ustawienia potoku
     pipeline_options = PipelineOptions()
+    # Uruchamiamy w trybie streaming (Pub/Sub)
     pipeline_options.view_as(StandardOptions).streaming = True
 
+    # Pobranie parametru z linii poleceń: --input_subscription
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # Odczyt z Pub/Sub
+
+        # 1. Odczyt danych z Pub/Sub
         lines = (
             p
-            | 'ReadPubSub' >> beam.io.ReadFromPubSub(subscription=input_subscription)
+            | 'ReadFromPubSub' >> beam.io.ReadFromPubSub(
+                subscription=input_subscription
+            )
         )
 
-        # Parsowanie
+        # 2. Parsowanie JSON + filtrowanie None
         parsed = (
             lines
             | 'ParseJson' >> beam.Map(parse_message)
-            | 'FilterNone' >> beam.Filter(lambda x: x is not None)
+            | 'FilterInvalid' >> beam.Filter(lambda x: x is not None)
         )
 
-        # Konwersja do CSV
+        # 3. Formatowanie do CSV (jeden wiersz na rekord)
         csv_lines = (
             parsed
             | 'FormatCSV' >> beam.Map(format_csv)
         )
 
-        # Ustawiamy okno 5-minutowe
+        # 4. Okno 5 minut z wyzwalaczem "po watermarku",
+        #    aby Dataflow wiedziało, kiedy zamknąć i zapisać plik.
+        #    AccumulationMode.DISCARDING oznacza, że po emisji okna kasujemy stan (oszczędza zasoby).
         windowed = (
             csv_lines
-            | 'WindowInto5min' >> beam.WindowInto(window.FixedWindows(300))
+            | 'WindowInto5min' >> beam.WindowInto(
+                FixedWindows(5 * 60),      # co 5 minut
+                trigger=AfterWatermark(),  # prosty wyzwalacz "po watermarku"
+                accumulation_mode=AccumulationMode.DISCARDING
+            )
         )
 
-        # Zapis do GCS
+        # 5. Zapis do GCS w formacie .csv, z minimalną liczbą shardów (np. 3),
+        #    aby uniknąć generowania setek malutkich plików.
         (
             windowed
-            | 'FormatToCSV' >> beam.Map(lambda x: format_csv(x))
-            | 'WriteRaw' >> beam.io.WriteToText(
+            | 'WriteToGCS' >> beam.io.WriteToText(
                 file_path_prefix='gs://BUCKET/ais_data/raw/ais_raw',
                 file_name_suffix='.csv',
-                # Ustawiamy liczbę shardów tak, żeby nie było ich 300 w 5 minut
-                num_shards=3,  
+                num_shards=3,
                 shard_name_template='-SS-of-NN'
             )
         )
