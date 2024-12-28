@@ -3,7 +3,13 @@ import json
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from apache_beam.transforms.window import FixedWindows
-from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
+from apache_beam.transforms.trigger import (
+    AfterWatermark, 
+    AccumulationMode
+)
+from apache_beam.utils.timestamp import Duration
+from apache_beam.io import fileio
+from apache_beam.io.fileio import TextSink
 
 def parse_message(record):
     """
@@ -39,17 +45,16 @@ class MyPipelineOptions(PipelineOptions):
         parser.add_argument('--input_subscription', type=str, required=True)
 
 def run():
-    # Podstawowe ustawienia potoku
+    # 1. Konfiguracja podstawowa
     pipeline_options = PipelineOptions()
-    # Uruchamiamy w trybie streaming (Pub/Sub)
+    # Ustawiamy streaming, bo czytamy z Pub/Sub
     pipeline_options.view_as(StandardOptions).streaming = True
 
-    # Pobranie parametru z linii poleceń: --input_subscription
     input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
 
     with beam.Pipeline(options=pipeline_options) as p:
 
-        # 1. Odczyt danych z Pub/Sub
+        # 2. Czytamy rekordy z Pub/Sub
         lines = (
             p
             | 'ReadFromPubSub' >> beam.io.ReadFromPubSub(
@@ -57,41 +62,60 @@ def run():
             )
         )
 
-        # 2. Parsowanie JSON + filtrowanie None
+        # 3. Parsujemy JSON + odrzucamy None
         parsed = (
             lines
             | 'ParseJson' >> beam.Map(parse_message)
             | 'FilterInvalid' >> beam.Filter(lambda x: x is not None)
         )
 
-        # 3. Formatowanie do CSV (jeden wiersz na rekord)
+        # 4. Format do CSV (string)
         csv_lines = (
             parsed
             | 'FormatCSV' >> beam.Map(format_csv)
         )
 
-        # 4. Okno 5 minut z wyzwalaczem "po watermarku",
-        #    aby Dataflow wiedziało, kiedy zamknąć i zapisać plik.
-        #    AccumulationMode.DISCARDING oznacza, że po emisji okna kasujemy stan (oszczędza zasoby).
+        # 5. Okienko 5-minutowe
+        #    Po watermarku emitujemy dane, kasując stan (DISCARDING).
         windowed = (
             csv_lines
             | 'WindowInto5min' >> beam.WindowInto(
-                FixedWindows(5 * 60),      # co 5 minut
-                trigger=AfterWatermark(),  # prosty wyzwalacz "po watermarku"
-                accumulation_mode=AccumulationMode.DISCARDING
+                FixedWindows(5*60),
+                trigger=AfterWatermark(),
+                accumulation_mode=AccumulationMode.DISCARDING,
+                # jeżeli nie chcesz spóźnionych danych, to:
+                # allowed_lateness=Duration(0)
             )
         )
 
-        # 5. Zapis do GCS w formacie .csv, z minimalną liczbą shardów (np. 3),
-        #    aby uniknąć generowania setek malutkich plików.
-        (
+        # 6. Aby plik nie był tworzony dla każdego rekordu,
+        #    przypinamy sztuczny klucz (None), a potem groupujemy w obrębie okna.
+        #    => Każde okno => 1 (lub kilka shardów).
+        grouped = (
             windowed
-            | 'WriteToGCS' >> beam.io.WriteToText(
-                file_path_prefix='gs://BUCKET/ais_data/raw/ais_raw',
-                file_name_suffix='.csv',
-                num_shards=3,
-                shard_name_template='-SS-of-NN'
-            )
+            | 'KeyByNone' >> beam.Map(lambda row: (None, row))
+            | 'GroupByNone' >> beam.GroupByKey()
+        )
+
+        # 7. Teraz zapisujemy do GCS. Tu używamy transformacji
+        #    fileio.WriteToFiles, która obsługuje okna i jest
+        #    poprawna dla streaming.
+        #    Wewnątrz jednego klucza (None) = jednego okna
+        #    generujemy 1-lub więcej shardów. 
+        (
+            grouped
+            | 'WriteWindowedFiles'
+              >> fileio.WriteToFiles(
+                    path='gs://YOUR_BUCKET/ais_data/raw/',
+                    file_naming=fileio.default_file_naming(
+                        prefix='ais_raw-',
+                        suffix='.csv'
+                    ),
+                    # Liczba równoległych writerów = liczba shardów. 
+                    max_writers_per_bundle=1
+                 )
+              # W razie potrzeby format = text
+              .with_format(TextSink())
         )
 
 if __name__ == '__main__':
