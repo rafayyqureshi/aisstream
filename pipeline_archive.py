@@ -4,7 +4,9 @@ import json
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from apache_beam.transforms.window import FixedWindows
-from apache_beam.io import WriteToText
+from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
+from apache_beam import window
+from apache_beam.io import fileio
 
 def parse_message(record):
     """
@@ -33,19 +35,28 @@ def to_csv(row):
         f"{s(row.get('sog'))},"
         f"{s(row.get('timestamp'))},"
         f"{s(row.get('ship_name'))},"
-        f"{s(row.get('ship_length'))}"
+        f"{s(row.get('ship_length'))}\n"
     )
+
+class MyPipelineOptions(PipelineOptions):
+    @classmethod
+    def _add_argparse_args(cls, parser):
+        parser.add_argument('--input_subscription', type=str, required=True)
 
 def run():
     pipeline_options = PipelineOptions()
     pipeline_options.view_as(StandardOptions).streaming = True
 
-    # Subskrypcja do AIS (np. ta sama lub osobna)
-    input_subscription = os.getenv('HISTORY_INPUT_SUB') or 'projects/ais-collision-detection/subscriptions/ais-data-sub'
+    # Subskrypcja do AIS (osobna np. 'ais-data-sub-archive')
+    input_subscription = pipeline_options.view_as(MyPipelineOptions).input_subscription
+    # Ścieżka do GCS
     output_prefix = os.getenv('HISTORY_OUTPUT_PREFIX') or 'gs://ais-collision-detection-bucket/ais_data/raw/ais_raw'
 
     with beam.Pipeline(options=pipeline_options) as p:
-        lines = p | 'ReadPubSub' >> beam.io.ReadFromPubSub(subscription=input_subscription)
+        lines = (
+            p
+            | 'ReadPubSub' >> beam.io.ReadFromPubSub(subscription=input_subscription)
+        )
 
         parsed = (
             lines
@@ -53,23 +64,36 @@ def run():
             | 'FilterNone' >> beam.Filter(lambda x: x is not None)
         )
 
-        # Okienkowanie np. 5-minutowe
+        # Okienkowanie np. 5-minutowe, z prostym triggerem "AfterWatermark"
+        # i odrzuceniem (DISCARDING) starych danych w oknie
         windowed = (
             parsed
-            | 'FixedWindow5min' >> beam.WindowInto(FixedWindows(5*60))
+            | 'WindowInto' >> beam.WindowInto(
+                FixedWindows(5*60),
+                trigger=beam.transforms.trigger.AfterWatermark(),
+                accumulation_mode=AccumulationMode.DISCARDING,
+                allowed_lateness=0
+            )
         )
 
-        # konwersja do CSV
-        csv_lines = windowed | 'ToCSV' >> beam.Map(to_csv)
+        # Konwersja do CSV (dodajemy znak końca linii w to_csv)
+        csv_lines = (
+            windowed
+            | 'ToCSV' >> beam.Map(to_csv)
+        )
 
-        # zapis do GCS
+        # Zapis do GCS za pomocą FileIO (WriteToFiles):
+        # Tworzymy pliki windowowane, omijając wewnętrzny GroupByKey w streaming.
         (
             csv_lines
-            | 'WriteCSV' >> WriteToText(
-                file_path_prefix=output_prefix,
-                file_name_suffix='.csv',
-                num_shards=2,             # żeby nie tworzyć setek shardów
-                shard_name_template='-SS-of-NN'
+            | 'WriteToFiles' >> fileio.WriteToFiles(
+                path=output_prefix,
+                file_naming=fileio.file_naming.prefix_naming(
+                    prefix=output_prefix,
+                    suffix='.csv'
+                ),
+                # liczba jednoczesnych writerów, by nie generować setek plików
+                max_writers_per_bundle=2
             )
         )
 
