@@ -5,35 +5,42 @@ from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
 from datetime import datetime, timedelta
 
-app = Flask(__name__,
-            static_folder='static',
-            template_folder='templates')
+app = Flask(
+    __name__,
+    static_folder='static',      # Folder for your CSS/JS
+    template_folder='templates'  # Folder for your .html templates
+)
 
 client = bigquery.Client()
 
 def compute_cpa_tcpa(ship_a, ship_b):
+    """
+    Computes (CPA, TCPA) using approximate geographic calculations.
+    Returns (9999, -1) if ship_length < 50 or missing data.
+    """
+    # Check for missing or small ship length
     if ship_a.get('ship_length') is None or ship_b.get('ship_length') is None:
         return (9999, -1)
     if ship_a['ship_length'] < 50 or ship_b['ship_length'] < 50:
         return (9999, -1)
 
-    latRef = (ship_a['latitude']+ship_b['latitude'])/2
-    scaleLat = 111000
-    scaleLon = 111000*math.cos(math.radians(latRef))
+    latRef = (ship_a['latitude'] + ship_b['latitude']) / 2.0
+    scaleLat = 111000.0
+    scaleLon = 111000.0 * math.cos(math.radians(latRef))
 
     def toXY(lat, lon):
-        return [lon*scaleLon, lat*scaleLat]
+        return [lon * scaleLon, lat * scaleLat]
 
-    xA,yA = toXY(ship_a['latitude'], ship_a['longitude'])
-    xB,yB = toXY(ship_b['latitude'], ship_b['longitude'])
+    xA, yA = toXY(ship_a['latitude'], ship_a['longitude'])
+    xB, yB = toXY(ship_b['latitude'], ship_b['longitude'])
 
-    sogA = ship_a['sog']
-    sogB = ship_b['sog']
+    sogA = float(ship_a['sog'])
+    sogB = float(ship_b['sog'])
 
     def cogToVector(cogDeg, sogNmH):
         r = math.radians(cogDeg)
-        vx = sogNmH*math.sin(r)
-        vy = sogNmH*math.cos(r)
+        vx = sogNmH * math.sin(r)
+        vy = sogNmH * math.cos(r)
         return vx, vy
 
     vxA, vyA = cogToVector(ship_a['cog'], sogA)
@@ -44,42 +51,52 @@ def compute_cpa_tcpa(ship_a, ship_b):
     dvx = vxA - vxB
     dvy = vyA - vyB
 
-    speedScale = 1852/60
-    dvx_mpm = dvx*speedScale
-    dvy_mpm = dvy*speedScale
+    # Convert nm/h to m/min
+    speedScale = 1852.0 / 60.0
+    dvx_mpm = dvx * speedScale
+    dvy_mpm = dvy * speedScale
 
     VV_m = dvx_mpm**2 + dvy_mpm**2
-    PV_m = dx*dvx_mpm + dy*dvy_mpm
+    PV_m = dx * dvx_mpm + dy * dvy_mpm
 
     if VV_m == 0:
         tcpa = 0.0
     else:
-        tcpa = -PV_m/VV_m
+        tcpa = -PV_m / VV_m
+
     if tcpa < 0:
         return (9999, -1)
 
-    vxA_mpm = vxA*speedScale
-    vyA_mpm = vyA*speedScale
-    vxB_mpm = vxB*speedScale
-    vyB_mpm = vyB*speedScale
+    # Positions at tcpa
+    vxA_mpm = vxA * speedScale
+    vyA_mpm = vyA * speedScale
+    vxB_mpm = vxB * speedScale
+    vyB_mpm = vyB * speedScale
 
-    xA2 = xA + vxA_mpm*tcpa
-    yA2 = yA + vyA_mpm*tcpa
-    xB2 = xB + vxB_mpm*tcpa
-    yB2 = yB + vyB_mpm*tcpa
+    xA2 = xA + vxA_mpm * tcpa
+    yA2 = yA + vyA_mpm * tcpa
+    xB2 = xB + vxB_mpm * tcpa
+    yB2 = yB + vyB_mpm * tcpa
 
-    dist = math.sqrt((xA2-xB2)**2 + (yA2-yB2)**2)
-    distNm = dist/1852
+    dist = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
+    distNm = dist / 1852.0
     return (distNm, tcpa)
+
 
 @app.route('/')
 def index():
-    # Główna strona front-end (LIVE)
+    """
+    Main front-end (Live map).
+    Renders 'index.html' from templates folder.
+    """
     return render_template('index.html')
+
 
 @app.route('/ships')
 def ships():
-    # Pobiera statki z ostatnich 2 min
+    """
+    Returns current ships (last 2 minutes).
+    """
     query = """
     SELECT
       mmsi,
@@ -94,6 +111,7 @@ def ships():
     WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
     """
     rows = client.query(query).result()
+
     result = []
     for r in rows:
         result.append({
@@ -108,12 +126,34 @@ def ships():
         })
     return jsonify(result)
 
+
 @app.route('/collisions')
 def collisions():
+    """
+    Returns collisions for the last known data, filtered by user-provided cpa/tcpa thresholds.
+    The fix: use ANY_VALUE(...) or a subselect to avoid GROUP BY issues on ship_name.
+    """
     max_cpa = float(request.args.get('max_cpa', 0.5))
     max_tcpa = float(request.args.get('max_tcpa', 10.0))
 
+    # Using ANY_VALUE on ship_name so we don't have group-by errors:
     query = f"""
+    WITH latestA AS (
+      SELECT
+        mmsi,
+        ANY_VALUE(ship_name) AS ship_name,  -- avoid grouping errors
+        MAX(timestamp) AS latest_ts
+      FROM `ais_dataset.ships_positions`
+      GROUP BY mmsi
+    ),
+    latestB AS (
+      SELECT
+        mmsi,
+        ANY_VALUE(ship_name) AS ship_name,
+        MAX(timestamp) AS latest_ts
+      FROM `ais_dataset.ships_positions`
+      GROUP BY mmsi
+    )
     SELECT
       c.mmsi_a,
       c.mmsi_b,
@@ -124,33 +164,22 @@ def collisions():
       c.longitude_a,
       c.latitude_b,
       c.longitude_b,
-      spA.ship_name AS ship1_name,
-      spB.ship_name AS ship2_name
+      la.ship_name AS ship1_name,
+      lb.ship_name AS ship2_name
     FROM `ais_dataset.collisions` c
-    LEFT JOIN (
-      SELECT mmsi, ship_name, MAX(timestamp) as latest_ts
-      FROM `ais_dataset.ships_positions`
-      GROUP BY mmsi
-    ) lastA ON lastA.mmsi = c.mmsi_a
-    LEFT JOIN `ais_dataset.ships_positions` spA
-      ON spA.mmsi = lastA.mmsi AND spA.timestamp = lastA.latest_ts
-
-    LEFT JOIN (
-      SELECT mmsi, ship_name, MAX(timestamp) as latest_ts
-      FROM `ais_dataset.ships_positions`
-      GROUP BY mmsi
-    ) lastB ON lastB.mmsi = c.mmsi_b
-    LEFT JOIN `ais_dataset.ships_positions` spB
-      ON spB.mmsi = lastB.mmsi AND spB.timestamp = lastB.latest_ts
-
+    LEFT JOIN latestA la
+      ON la.mmsi = c.mmsi_a
+    LEFT JOIN latestB lb
+      ON lb.mmsi = c.mmsi_b
     WHERE c.cpa <= {max_cpa}
       AND c.tcpa <= {max_tcpa}
-      AND tcpa >= 0
+      AND c.tcpa >= 0
     ORDER BY c.timestamp DESC
     LIMIT 100
     """
     rows = client.query(query).result()
-    result=[]
+
+    result = []
     for r in rows:
         shipA = r.ship1_name or str(r.mmsi_a)
         shipB = r.ship2_name or str(r.mmsi_b)
@@ -170,25 +199,32 @@ def collisions():
         })
     return jsonify(result)
 
+
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
+    """
+    On-demand CPA/TCPA for a pair of ships (mmsi_a, mmsi_b).
+    We look for their most recent positions (within last 5 minutes).
+    """
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
     if not mmsi_a or not mmsi_b:
-        return jsonify({'error':'Missing mmsi_a or mmsi_b'}), 400
+        return jsonify({'error': 'Missing mmsi_a or mmsi_b'}), 400
 
-    # Bierzemy najświeższe rekordy do 5 min wstecz
     query = f"""
-    SELECT mmsi, latitude, longitude, cog, sog, ship_length
+    SELECT
+      mmsi, latitude, longitude, cog, sog, ship_length
     FROM `ais_dataset.ships_positions`
     WHERE mmsi IN ({mmsi_a},{mmsi_b})
       AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
     ORDER BY timestamp DESC
     """
     rows = list(client.query(query).result())
+
     data_by_mmsi = {}
     for r in rows:
-        if r.mmsi not in data_by_mmsi:  # weźmy pierwszy (najświeższy)
+        # Keep only the first (freshest) row for each MMSI
+        if r.mmsi not in data_by_mmsi:
             data_by_mmsi[r.mmsi] = {
                 'mmsi': r.mmsi,
                 'latitude': r.latitude,
@@ -199,12 +235,13 @@ def calculate_cpa_tcpa():
             }
 
     if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
-        return jsonify({'error':'No recent data for one or both ships'}), 404
+        return jsonify({'error': 'No recent data for one or both ships'}), 404
 
     cpa, tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
-# (Możesz dopisać tutaj /history, /history_collisions itp. jeśli potrzebujesz.)
+
+# Optionally: /history, /history_collisions, etc.
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
