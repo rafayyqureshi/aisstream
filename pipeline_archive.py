@@ -8,20 +8,22 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
 from apache_beam.io import fileio
+from apache_beam.transforms import window
 
 # ------------------------------------------------------------
-# Funkcja interpolacji prostych klatek co X sekund
-# (tu jest pokazana koncepcyjnie, można ulepszyć).
+# Funkcja pomocnicza: Prosta interpolacja klatek
 # ------------------------------------------------------------
 def interpolate_positions(records, step_seconds=60):
     """
-    records – lista krotek (ts: datetime, lat, lon, sog, cog).
-    step_seconds – co ile sekund generujemy klatkę (np. 60).
-    Zwraca nową listę (ts, lat, lon, sog, cog) z równomiernymi odstępami.
+    records: lista krotek (ts, lat, lon, sog, cog),
+             posortowana według czasu.
+    step_seconds: co ile sekund generujemy klatkę.
+    Zwraca listę (ts, lat, lon, sog, cog) z równomiernymi odstępami czasu.
     """
     if not records:
         return []
 
+    # Sortowanie rosnąco po timestamp
     records.sort(key=lambda x: x[0])
     start_t = records[0][0]
     end_t   = records[-1][0]
@@ -31,29 +33,32 @@ def interpolate_positions(records, step_seconds=60):
     idx = 0
 
     while current_t <= end_t:
-        # szukamy segmentu [records[idx], records[idx+1]] gdzie current_t się mieści
-        while idx < len(records)-1 and records[idx+1][0] < current_t:
+        # Znajdujemy segment [records[idx], records[idx+1]] w którym mieści się current_t
+        while idx < len(records) - 1 and records[idx+1][0] < current_t:
             idx += 1
 
-        if idx == len(records)-1:
-            # doszliśmy do końca
-            out.append((current_t, records[-1][1], records[-1][2], records[-1][3], records[-1][4]))
+        if idx == len(records) - 1:
+            # jesteśmy na końcu
+            t_last, la, lo, sg, cg = records[-1]
+            out.append((current_t, la, lo, sg, cg))
         else:
-            tA, latA, lonA, sogA, cogA = records[idx]
-            tB, latB, lonB, sogB, cogB = records[idx+1]
+            tA, laA, loA, sgA, cgA = records[idx]
+            tB, laB, loB, sgB, cgB = records[idx+1]
+
             if current_t < tA:
-                # bierzemy tA
-                out.append((current_t, latA, lonA, sogA, cogA))
+                # jeszcze przed tA → bierzemy wartości z tA
+                out.append((current_t, laA, loA, sgA, cgA))
             else:
                 dt = (tB - tA).total_seconds()
                 if dt <= 0:
-                    out.append((current_t, latA, lonA, sogA, cogA))
+                    # jeżeli tA == tB
+                    out.append((current_t, laA, loA, sgA, cgA))
                 else:
                     ratio = (current_t - tA).total_seconds() / dt
-                    lat_i = latA + (latB - latA)*ratio
-                    lon_i = lonA + (lonB - lonA)*ratio
-                    sog_i = sogA + (sogB - sogA)*ratio
-                    cog_i = cogA + (cogB - cogA)*ratio
+                    lat_i = laA + (laB - laA)*ratio
+                    lon_i = loA + (loB - loA)*ratio
+                    sog_i = sgA + (sgB - sgA)*ratio
+                    cog_i = cgA + (cgB - cgA)*ratio
                     out.append((current_t, lat_i, lon_i, sog_i, cog_i))
 
         current_t += datetime.timedelta(seconds=step_seconds)
@@ -61,39 +66,46 @@ def interpolate_positions(records, step_seconds=60):
     return out
 
 # ------------------------------------------------------------
-# DoFn pobierający dane kolizji i ładujący z BQ potrzebny
-# wycinek pozycji statków, interpoluje i zwraca "rozszerzone klatki"
+# DoFn: Pobieramy kolizje z BQ → dla każdej generujemy animację
 # ------------------------------------------------------------
-class PrepareCollisionDataFn(beam.DoFn):
+class ProcessCollisionsFn(beam.DoFn):
     def setup(self):
-        self.client = bigquery.Client()
+        # Tworzymy klienta BigQuery raz na worker
+        self.bq_client = bigquery.Client()
 
-    def process(self, collision_msg):
+    def process(self, collision_row):
         """
-        collision_msg to bajty JSON z Pub/Sub, np.:
-        {
-          'collision_id': '111222_999888_2025-01-10T12:30:00Z',
-          'mmsi_a': 111222,
-          'mmsi_b': 999888,
-          'timestamp': '2025-01-10T12:30:00Z',
-          ...
-        }
+        collision_row: obiekt z polami:
+          - collision_id
+          - mmsi_a, mmsi_b
+          - timestamp (datetime)
+          - cpa, tcpa
+          - ...
+        Zakładamy, że w BQ mamy kolumny o tych nazwach.
         """
-        data = json.loads(collision_msg.decode('utf-8'))
-        collision_id = data['collision_id']
-        mmsi_a = data['mmsi_a']
-        mmsi_b = data['mmsi_b']
-        coll_ts_str = data['timestamp']  # "2025-01-10T12:30:00Z"
+        collision_id = collision_row.collision_id
+        mmsi_a       = collision_row.mmsi_a
+        mmsi_b       = collision_row.mmsi_b
+        cpa_val      = collision_row.cpa
+        tcpa_val     = collision_row.tcpa
+        ts_coll      = collision_row.timestamp  # datetime
 
-        # Okno czasowe: [T-20min, T+5min]
-        fmt = "%Y-%m-%dT%H:%M:%SZ"  # zakładamy taki format
-        coll_time = datetime.datetime.strptime(coll_ts_str, fmt)
+        # Filtr bezpieczeństwa – chcemy tylko faktyczne kolizje
+        # np. cpa < 0.5 i (tcpa < 10?), ale faktycznie wystąpiło zbliżenie (tcpa>=0)
+        # Tutaj możemy też sprawdzać inne warunki
+        if cpa_val is None or cpa_val >= 0.5:
+            return  # pomijamy
+        if tcpa_val is None or tcpa_val > 10:
+            return  # pomijamy
+
+        # Zakres czasowy: [T - 20 min, T + 5 min]
+        coll_time = ts_coll
         start_t = coll_time - datetime.timedelta(minutes=20)
         end_t   = coll_time + datetime.timedelta(minutes=5)
 
-        # Query do BQ
+        # Pobieramy dane AIS z BQ
         query = f"""
-        SELECT
+        SELECT 
           mmsi,
           timestamp,
           latitude,
@@ -105,156 +117,156 @@ class PrepareCollisionDataFn(beam.DoFn):
           AND timestamp BETWEEN '{start_t.isoformat()}' AND '{end_t.isoformat()}'
         ORDER BY timestamp
         """
-        rows = list(self.client.query(query).result())
+
+        rows = list(self.bq_client.query(query).result())
 
         data_a = []
         data_b = []
         for r in rows:
             t = r.timestamp
-            la = float(r.latitude or 0)
-            lo = float(r.longitude or 0)
-            sg = float(r.sog or 0)
-            cg = float(r.cog or 0)
+            la = float(r.latitude or 0.0)
+            lo = float(r.longitude or 0.0)
+            sg = float(r.sog or 0.0)
+            cg = float(r.cog or 0.0)
+
             if r.mmsi == mmsi_a:
                 data_a.append((t, la, lo, sg, cg))
             else:
                 data_b.append((t, la, lo, sg, cg))
 
-        # Interpolacja co 30s lub 1 min (dowolnie)
-        interp_a = interpolate_positions(data_a, step_seconds=60)
-        interp_b = interpolate_positions(data_b, step_seconds=60)
+        # Interpolacja co 60 sek
+        interp_a = interpolate_positions(data_a, 60)
+        interp_b = interpolate_positions(data_b, 60)
 
-        # Składamy w jedną listę, dodajemy collision_id i mmsi
-        final_records = []
+        # Budujemy finalne rekordy
+        out = []
         for (ts, la, lo, sg, cg) in interp_a:
-            final_records.append({
-                'collision_id': collision_id,
-                'mmsi': mmsi_a,
-                'timestamp': ts.isoformat(),
-                'latitude': la,
-                'longitude': lo,
-                'sog': sg,
-                'cog': cg
+            out.append({
+                "collision_id": collision_id,
+                "mmsi": mmsi_a,
+                "timestamp": ts.isoformat(),
+                "latitude": la,
+                "longitude": lo,
+                "sog": sg,
+                "cog": cg
             })
         for (ts, la, lo, sg, cg) in interp_b:
-            final_records.append({
-                'collision_id': collision_id,
-                'mmsi': mmsi_b,
-                'timestamp': ts.isoformat(),
-                'latitude': la,
-                'longitude': lo,
-                'sog': sg,
-                'cog': cg
+            out.append({
+                "collision_id": collision_id,
+                "mmsi": mmsi_b,
+                "timestamp": ts.isoformat(),
+                "latitude": la,
+                "longitude": lo,
+                "sog": sg,
+                "cog": cg
             })
 
-        # Zwracamy
-        for rec in final_records:
+        # Zwrot wierszy
+        for rec in out:
             yield rec
 
-def record_to_jsonl(record):
-    """
-    Zwraca string JSON (jednolinijkowy), gotowy do zapisu do pliku w GCS.
-    """
-    return json.dumps(record, default=str) + "\n"
+# ------------------------------------------------------------
+# Konwersja do JSON Lines
+# ------------------------------------------------------------
+def record_to_jsonl(rec):
+    return json.dumps(rec, default=str) + "\n"
 
 def run():
+    # Jest to job *batch*, uruchamiany np. raz na godzinę
     pipeline_options = PipelineOptions()
-    pipeline_options.view_as(StandardOptions).streaming = True
+    # StandardOptions.streaming = False – to jest batch
+    pipeline_options.view_as(StandardOptions).streaming = False
 
-    # Słuchamy collisions-topic
-    collisions_topic = os.getenv('COLLISIONS_TOPIC','projects/ais-collision-detection/topics/collisions-topic')
-    output_path = os.getenv('HISTORY_COLLISIONS_PATH','gs://ais-collision-detection-bucket/history_collisions')
+    # Ścieżka GCS, np.: "gs://ais-collision-detection-bucket/history_collisions"
+    output_prefix = os.getenv('HISTORY_COLLISIONS_PATH','gs://ais-collision-detection-bucket/history_collisions_batch')
+
+    # Parametr, ile minut wstecz – np. 60
+    # (możesz też brać parametry wierszy z collisions z *ostatnich x godzin*)
+    lookback_minutes = int(os.getenv('LOOKBACK_MINUTES','60'))
 
     with beam.Pipeline(options=pipeline_options) as p:
-        collisions = p | "ReadCollisions" >> beam.io.ReadFromPubSub(topic=collisions_topic)
+        # 1) Odczyt kolizji z BigQuery (tylko te z ostatniej godziny)
+        # Filtry cpa < 0.5 i tcpa < 10 – możesz je dać tutaj lub dopiero w DoFn
+        now = datetime.datetime.utcnow()
+        start_time = now - datetime.timedelta(minutes=lookback_minutes)
 
-        # 1) Dla każdej kolizji -> pobieramy, interpolujemy
-        collision_expanded = collisions | "PrepareCollisionData" >> beam.ParDo(PrepareCollisionDataFn())
+        query = f"""
+        SELECT
+          CONCAT(CAST(mmsi_a AS STRING), '_',
+                 CAST(mmsi_b AS STRING), '_',
+                 FORMAT_TIMESTAMP('%Y%m%d%H%M%S', timestamp)) as collision_id,
+          mmsi_a,
+          mmsi_b,
+          timestamp,
+          cpa,
+          tcpa
+        FROM `ais_dataset_us.collisions`
+        WHERE timestamp >= TIMESTAMP('{start_time.isoformat()}')
+          AND cpa < 0.5
+          AND tcpa < 10
+          AND tcpa >= 0
+        ORDER BY timestamp
+        """
 
-        # 2) Konwertujemy do JSON lines
-        collision_jsonl = collision_expanded | "ToJSONL" >> beam.Map(record_to_jsonl)
+        collisions = (
+            p
+            | "ReadCollisionsBQ" >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+        )
 
-        # 3) Grupujemy wg collision_id, by każdy plik w GCS miał dane jednej kolizji
-        #    (można użyć np. key = collision_id)
-        keyed = collision_jsonl | "KeyByCollisionId" >> beam.Map(lambda row: (json.loads(row)['collision_id'], row))
+        # 2) Dla każdej kolizji -> pobierz data AIS i interpoluj
+        expanded = collisions | "ProcessCollisions" >> beam.ParDo(ProcessCollisionsFn())
 
-        # 4) Window - w prostym przypadku global window + np. trigger on_after processing, 
-        #    ale w streaming trudniej jest "zebrać" w 1 plik – można zapisać do wielu shardów 
-        #    i potem scalić.
-        #    Dla uproszczenia – zapiszemy do jednego folderu per collision_id.
-        #    Skorzystamy z FileIO WriteToFiles, z custom naming, 
-        #    tak by collision_id stał się częścią nazwy.
-        from apache_beam.io.fileio import WriteToFiles, FileSink
+        # 3) Konwersja do JSON Lines
+        jsonl = expanded | "ToJSONL" >> beam.Map(record_to_jsonl)
 
-        class CollisionFileNaming(fileio.FileNaming):
-            def __init__(self, prefix):
-                self.prefix = prefix
-            def file_name(self, window, pane, shard_index, total_shards, compression):
-                # np: collisions-<collision_id>-shard-<idx>.json
-                # prefix tu powinien zawierać collision_id
-                return self.prefix + f"-{shard_index:03d}.json"
+        # 4) KeyBy(collision_id), aby 1 plik per kolizja
+        def key_by_collisionid(line):
+            r = json.loads(line)
+            cid = r["collision_id"]
+            return (cid, line)
 
-        def collision_id_to_filename(kv):
-            # k, v
-            collision_id, row = kv
-            return collision_id
+        keyed = jsonl | "KeyByCollisionId" >> beam.Map(key_by_collisionid)
 
-        # W tym przykłdzie zrobimy sobie transform Flatten, GroupByKey,
-        # bo WriteToFiles łatwiej jest użyć z jednym strumieniem (każdy collision_id).
-        # Można też użyć transformacji direct: WriteToFiles with dynamic destinations (Beam 2.30+)
+        # 5) GroupByKey (bo to jest batch, możemy użyć global window)
         grouped = keyed | "GroupByCollisionId" >> beam.GroupByKey()
 
-        # Następnie zapiszemy do GCS każdy collision_id w osobnym pliku:
-        # Niestety w streamingu pliki będą się "doklejać" do istn. outputu. 
-        # Lepiej to robić w systemie Batch lub z użyciem dynamic destinations.
-        def expand_records(kv):
-            collision_id, rows = kv
-            # Każdy wiersz = row (string)
-            # Możemy złączyć w jeden plik
-            # Zrobimy yield jednego "dużego" stringa?
-            combined = "".join(rows)  # bo each row already has \n at the end
-            yield (collision_id, combined)
+        # 6) Łączenie
+        def combine_lines(kv):
+            cid, lines_list = kv
+            combined_str = "".join(lines_list)  # Każda linia ma już \n
+            yield (cid, combined_str)
 
-        combined_pcoll = grouped | "CombineRecords" >> beam.FlatMap(expand_records)
+        combined = grouped | "CombineLines" >> beam.FlatMap(combine_lines)
 
-        # Teraz zapiszemy => WriteToFiles
-        # Użyjemy custom transformu, w którym collision_id jest częścią nazwy
+        # 7) Zapis do GCS
+        from apache_beam.io.fileio import WriteToFiles, FileSink
+
         class CollisionSink(FileSink):
-            def open(self, file_handle):
-                # Zwraca "writer"
-                return file_handle
-            def write(self, file_handle, element):
-                # element = (collision_id, big_string)
-                (cid, data_str) = element
-                file_handle.write(data_str.encode('utf-8'))
-            def flush(self, file_handle):
+            def open(self, fh):
+                return fh
+            def write(self, fh, element):
+                # element = (cid, big_str)
+                cid, big_str = element
+                fh.write(big_str.encode('utf-8'))
+            def flush(self, fh):
                 pass
 
-        # Tworzymy transform WriteToFiles:
-        # path=output_path – folder prefix
-        # file_naming – obiekt, który w runtime otrzyma collision_id i shard
-        #    => tu widać, że w standardzie file_naming nie pobiera klucza 
-        #    => więc typowo używamy partition (Beam 2.30+ dynamicWrite) 
-        #      lub trick z GroupByKey.
-        # Dla uproszczenia – do jednego pliku zawsze shard=1:
-        # (będzie 1 plik per collision).
-        # W streamingu to i tak jest trudne do spójnego scalania 
-        # – docelowo zwykle batch wywołujemy.
+        def collision_file_naming(element, context):
+            cid, _ = element
+            # Możesz dodać datę batcha
+            now_str = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            return f"{cid}_{now_str}.json"
 
-        write_result = (
-            combined_pcoll
-            | "WriteCollisionFiles" >> fileio.WriteToFiles(
-                path=output_path,
+        (
+            combined
+            | "WriteToGCS" >> WriteToFiles(
+                path=output_prefix,
                 sink=CollisionSink(),
+                # W batchu możesz zrobić 1 writer per key => wystarczy 1 shard
                 max_writers_per_bundle=1,
-                shards=1,
-                file_naming=lambda w, p, si, ts, c: f"collision-{time.time_ns()}.json"
+                file_naming=collision_file_naming
             )
         )
 
-        # Powyższe – dość uproszczone podejście. 
-        # W praktyce w streaming + pliki do GCS = musisz liczyć się z wieloma plikami. 
-        # Ewentualnie da się stosować "FileBasedSink" i Dataflow batch.
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     run()

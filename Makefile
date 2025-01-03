@@ -13,36 +13,39 @@ ais_stream:
 	. venv/bin/activate && \
 	python ais_stream.py
 
-pipeline_live:
-	@echo "Uruchamianie potoku Dataflow (kolizje, StatefulDoFn)..."
-	. venv/bin/activate && \
-	export $(shell sed 's/#.*//g' .env | xargs) && \
-	python pipeline_collisions.py \
-  		--runner=DataflowRunner \
-  		--project=$$GOOGLE_CLOUD_PROJECT \
-  		--region=$$REGION \
-  		--staging_location=$$STAGING_LOCATION \
-  		--temp_location=$$TEMP_LOCATION \
-  		--job_name=collision-detector \
-  		--input_subscription=projects/ais-collision-detection/subscriptions/ais-data-sub-collisions \
-  		--collisions_topic=projects/ais-collision-detection/topics/collisions-topic \
-  		--requirements_file=requirements.txt \
-  		--save_main_session
 
-pipeline_arch:
-	@echo "Uruchamianie potoku Dataflow (archiwizacja AIS do GCS)..."
+live: pipeline_live
+
+history: pipeline_history
+
+pipeline_live:
+	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
+	. venv/bin/activate && \
+	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
+	python pipeline_live.py \
+		--runner=DataflowRunner \
+		--project=$$GOOGLE_CLOUD_PROJECT \
+		--region=$$REGION \
+		--staging_location=$$STAGING_LOCATION \
+		--temp_location=$$TEMP_LOCATION \
+		--job_name=collision-detector \
+		--requirements_file=requirements.txt \
+		--save_main_session
+
+pipeline_history:
+	@echo "Uruchamianie batchowego potoku Dataflow (history collisions)..."
 	. venv/bin/activate && \
 	export $(shell sed 's/#.*//g' .env | xargs) && \
 	python pipeline_archive.py \
-  		--runner=DataflowRunner \
-  		--project=$$GOOGLE_CLOUD_PROJECT \
-  		--region=$$REGION \
-  		--staging_location=$$STAGING_LOCATION \
-  		--temp_location=$$TEMP_LOCATION \
-  		--job_name=ais-archive \
-  		--input_subscription=projects/ais-collision-detection/subscriptions/ais-data-sub-archive \
-  		--requirements_file=requirements.txt \
-  		--save_main_session
+	  --runner=DataflowRunner \
+	  --project=$$GOOGLE_CLOUD_PROJECT \
+	  --region=$$REGION \
+	  --staging_location=$$STAGING_LOCATION \
+	  --temp_location=$$TEMP_LOCATION \
+	  --job_name=ais-history-batch \
+	  --requirements_file=requirements.txt \
+	  --save_main_session
+
 
 flask_app:
 	@echo "Uruchamianie aplikacji Flask..."
@@ -55,7 +58,3 @@ cleanup:
 	@gcloud dataflow jobs cancel $$(gcloud dataflow jobs list --region $$(grep REGION .env | cut -d '=' -f2) --filter="NAME:$$(grep JOB_NAME .env | cut -d '=' -f2)" --format="value(JOB_ID)" | head -n 1)
 	@gcloud pubsub subscriptions seek $$(basename $$(grep INPUT_SUBSCRIPTION .env | cut -d '=' -f2)) --time=+0s
 	@echo "Zasoby wyczyszczone."
-
-# --- Aliasy skracające wywołania ---
-live: pipeline_live
-arch: pipeline_arch

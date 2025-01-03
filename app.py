@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(
     __name__,
-    static_folder='static',      # Folder for your CSS/JS
-    template_folder='templates'  # Folder for your .html templates
+    static_folder='static',
+    template_folder='templates'
 )
 
 client = bigquery.Client()
@@ -16,9 +16,8 @@ client = bigquery.Client()
 def compute_cpa_tcpa(ship_a, ship_b):
     """
     Computes (CPA, TCPA) using approximate geographic calculations.
-    Returns (9999, -1) if ship_length < 50 or missing data.
+    Returns (9999, -1) if ship_length < 50 or missing data, or if TCPA < 0.
     """
-    # Check for missing or small ship length
     if ship_a.get('ship_length') is None or ship_b.get('ship_length') is None:
         return (9999, -1)
     if ship_a['ship_length'] < 50 or ship_b['ship_length'] < 50:
@@ -34,11 +33,11 @@ def compute_cpa_tcpa(ship_a, ship_b):
     xA, yA = toXY(ship_a['latitude'], ship_a['longitude'])
     xB, yB = toXY(ship_b['latitude'], ship_b['longitude'])
 
-    sogA = float(ship_a['sog'])
-    sogB = float(ship_b['sog'])
+    sogA = float(ship_a['sog'] or 0)
+    sogB = float(ship_b['sog'] or 0)
 
     def cogToVector(cogDeg, sogNmH):
-        r = math.radians(cogDeg)
+        r = math.radians(cogDeg or 0)
         vx = sogNmH * math.sin(r)
         vy = sogNmH * math.cos(r)
         return vx, vy
@@ -48,16 +47,14 @@ def compute_cpa_tcpa(ship_a, ship_b):
 
     dx = xA - xB
     dy = yA - yB
-    dvx = vxA - vxB
-    dvy = vyA - vyB
 
-    # Convert nm/h to m/min
+    # nm/h -> m/min
     speedScale = 1852.0 / 60.0
-    dvx_mpm = dvx * speedScale
-    dvy_mpm = dvy * speedScale
+    dvx = (vxA - vxB) * speedScale
+    dvy = (vyA - vyB) * speedScale
 
-    VV_m = dvx_mpm**2 + dvy_mpm**2
-    PV_m = dx * dvx_mpm + dy * dvy_mpm
+    VV_m = dvx**2 + dvy**2
+    PV_m = dx*dvx + dy*dvy
 
     if VV_m == 0:
         tcpa = 0.0
@@ -67,30 +64,22 @@ def compute_cpa_tcpa(ship_a, ship_b):
     if tcpa < 0:
         return (9999, -1)
 
-    # Positions at tcpa
-    vxA_mpm = vxA * speedScale
-    vyA_mpm = vyA * speedScale
-    vxB_mpm = vxB * speedScale
-    vyB_mpm = vyB * speedScale
+    # positions at tcpa
+    xA2 = xA + vxA*speedScale*tcpa
+    yA2 = yA + vyA*speedScale*tcpa
+    xB2 = xB + vxB*speedScale*tcpa
+    yB2 = yB + vyB*speedScale*tcpa
 
-    xA2 = xA + vxA_mpm * tcpa
-    yA2 = yA + vyA_mpm * tcpa
-    xB2 = xB + vxB_mpm * tcpa
-    yB2 = yB + vyB_mpm * tcpa
-
-    dist = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
-    distNm = dist / 1852.0
+    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
+    distNm = dist_m / 1852.0
     return (distNm, tcpa)
-
 
 @app.route('/')
 def index():
     """
     Main front-end (Live map).
-    Renders 'index.html' from templates folder.
     """
     return render_template('index.html')
-
 
 @app.route('/ships')
 def ships():
@@ -105,12 +94,13 @@ def ships():
       cog,
       sog,
       timestamp,
-      COALESCE(ship_name, CAST(mmsi AS STRING)) AS ship_name,
-      ship_length
-    FROM `ais_dataset.ships_positions`
+      ANY_VALUE(ship_name) AS ship_name,   -- avoids grouping
+      ANY_VALUE(ship_length) AS ship_length
+    FROM `ais_dataset_us.ships_positions`
     WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
+    GROUP BY mmsi, latitude, longitude, cog, sog, timestamp
     """
-    rows = client.query(query).result()
+    rows = list(client.query(query).result())
 
     result = []
     for r in rows:
@@ -126,24 +116,21 @@ def ships():
         })
     return jsonify(result)
 
-
 @app.route('/collisions')
 def collisions():
     """
-    Returns collisions for the last known data, filtered by user-provided cpa/tcpa thresholds.
-    The fix: use ANY_VALUE(...) or a subselect to avoid GROUP BY issues on ship_name.
+    Returns collisions, filtered by user-provided cpa/tcpa thresholds.
     """
     max_cpa = float(request.args.get('max_cpa', 0.5))
     max_tcpa = float(request.args.get('max_tcpa', 10.0))
 
-    # Using ANY_VALUE on ship_name so we don't have group-by errors:
     query = f"""
     WITH latestA AS (
       SELECT
         mmsi,
-        ANY_VALUE(ship_name) AS ship_name,  -- avoid grouping errors
+        ANY_VALUE(ship_name) AS ship_name,
         MAX(timestamp) AS latest_ts
-      FROM `ais_dataset.ships_positions`
+      FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
     ),
     latestB AS (
@@ -151,7 +138,7 @@ def collisions():
         mmsi,
         ANY_VALUE(ship_name) AS ship_name,
         MAX(timestamp) AS latest_ts
-      FROM `ais_dataset.ships_positions`
+      FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
     )
     SELECT
@@ -166,25 +153,28 @@ def collisions():
       c.longitude_b,
       la.ship_name AS ship1_name,
       lb.ship_name AS ship2_name
-    FROM `ais_dataset.collisions` c
-    LEFT JOIN latestA la
-      ON la.mmsi = c.mmsi_a
-    LEFT JOIN latestB lb
-      ON lb.mmsi = c.mmsi_b
+    FROM `ais_dataset_us.collisions` c
+    LEFT JOIN latestA la ON la.mmsi = c.mmsi_a
+    LEFT JOIN latestB lb ON lb.mmsi = c.mmsi_b
     WHERE c.cpa <= {max_cpa}
       AND c.tcpa <= {max_tcpa}
       AND c.tcpa >= 0
     ORDER BY c.timestamp DESC
     LIMIT 100
     """
-    rows = client.query(query).result()
 
+    rows = list(client.query(query).result())
     result = []
     for r in rows:
         shipA = r.ship1_name or str(r.mmsi_a)
         shipB = r.ship2_name or str(r.mmsi_b)
         ts = r.timestamp.isoformat() if r.timestamp else None
+
+        # Tworzymy collision_id w stylu "mmsiA_mmsiB_YYYYmmddHHMMSS"
+        collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}" if r.timestamp else None
+
         result.append({
+            'collision_id': collision_id,
             'mmsi_a': r.mmsi_a,
             'mmsi_b': r.mmsi_b,
             'timestamp': ts,
@@ -195,16 +185,15 @@ def collisions():
             'latitude_b': r.latitude_b,
             'longitude_b': r.longitude_b,
             'ship1_name': shipA,
-            'ship2_name': shipB
+            'ship2_name': shipB,
+            # w razie potrzeby: 'ship1_length': ...
         })
     return jsonify(result)
-
 
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
     """
-    On-demand CPA/TCPA for a pair of ships (mmsi_a, mmsi_b).
-    We look for their most recent positions (within last 5 minutes).
+    On-demand CPA/TCPA for a pair of ships (mmsi_a, mmsi_b) - last 5 minutes.
     """
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
@@ -213,11 +202,12 @@ def calculate_cpa_tcpa():
 
     query = f"""
     SELECT
-      mmsi, latitude, longitude, cog, sog, ship_length
-    FROM `ais_dataset.ships_positions`
+      mmsi, latitude, longitude, cog, sog, ANY_VALUE(ship_length) as ship_length
+    FROM `ais_dataset_us.ships_positions`
     WHERE mmsi IN ({mmsi_a},{mmsi_b})
       AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-    ORDER BY timestamp DESC
+    GROUP BY mmsi, latitude, longitude, cog, sog
+    ORDER BY MAX(timestamp) DESC
     """
     rows = list(client.query(query).result())
 
@@ -240,8 +230,59 @@ def calculate_cpa_tcpa():
     cpa, tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
+# Optional: /history, /history_collisions, etc., e.g.:
+@app.route('/history')
+def history():
+    return render_template('history.html')
 
-# Optionally: /history, /history_collisions, etc.
+@app.route('/history_collisions')
+def history_collisions():
+    """
+    Example endpoint to fetch collisions historically (just reusing /collisions or
+    reading from a separate table).
+    """
+    day_offset = int(request.args.get('day', 0))
+    max_cpa = float(request.args.get('max_cpa', 0.5))
+    # ignoring tcpa here for brevity
+    the_date = (datetime.utcnow() + timedelta(days=day_offset)).date()
+    # or do something advanced with day_offset
+    # for simplicity, we'll just reuse the collisions table with date-based filtering:
+    query = f"""
+    WITH base AS (
+      SELECT
+        c.mmsi_a, c.mmsi_b, c.timestamp AS coll_ts, c.cpa, c.tcpa,
+        c.latitude_a, c.longitude_a, c.latitude_b, c.longitude_b
+      FROM `ais_dataset_us.collisions` c
+      WHERE DATE(c.timestamp) = '{the_date}'
+        AND c.cpa <= {max_cpa}
+        AND c.tcpa >= 0
+        AND c.tcpa <= 10
+    )
+    SELECT *,
+      CONCAT(CAST(mmsi_a AS STRING), '_', CAST(mmsi_b AS STRING), '_',
+             FORMAT_TIMESTAMP('%Y%m%d%H%M%S', coll_ts)) AS collision_id
+    FROM base
+    ORDER BY coll_ts DESC
+    LIMIT 200
+    """
+    rows = list(client.query(query).result())
+    result = []
+    for r in rows:
+        result.append({
+            'collision_id': r.collision_id,
+            'mmsi_a': r.mmsi_a,
+            'mmsi_b': r.mmsi_b,
+            'timestamp': r.coll_ts.isoformat() if r.coll_ts else None,
+            'cpa': r.cpa,
+            'tcpa': r.tcpa,
+            'latitude_a': r.latitude_a,
+            'longitude_a': r.longitude_a,
+            'latitude_b': r.latitude_b,
+            'longitude_b': r.longitude_b,
+            # ship1_name, ship2_name etc. if needed
+        })
+    return jsonify(result)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
