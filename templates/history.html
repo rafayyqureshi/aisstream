@@ -21,6 +21,7 @@
 </head>
 <body>
 
+  <!-- Górny panel: Wybór dnia -->
   <div id="top-center-bar">
     <h2>Historical Mode</h2>
     <div id="day-controls">
@@ -30,23 +31,27 @@
     </div>
   </div>
 
+  <!-- Lewy panel: dane o statkach i cpa/tcpa w danym momencie -->
   <div id="left-panel" style="display:none;">
       <div id="selected-ships-info"></div>
       <div id="pair-info"></div>
   </div>
 
+  <!-- Mapa na środku -->
   <div id="map"></div>
 
+  <!-- Prawy panel: lista kolizji historycznych -->
   <div id="right-panel">
     <h2>Collisions (History)</h2>
     <div id="collision-filters">
       <label for="cpaFilter">Max CPA (Nm):</label>
       <input type="range" id="cpaFilter" min="0" max="0.5" step="0.01" value="0.5">
-      <span id="cpaValue">0.50</span><br>
+      <span id="cpaValue">0.50</span>
     </div>
     <div id="collision-list"></div>
   </div>
 
+  <!-- Dolny panel: klatkowanie / animacja -->
   <div id="bottom-center-bar" style="display:none;">
     <button id="stepBack">&lt;</button>
     <button id="playPause">Play</button>
@@ -54,7 +59,7 @@
     <span id="frameIndicator"></span>
   </div>
 
-  <!-- Twój kod JS (moduł history) -->
+  <!-- Kod JS (moduł history) -->
   <script src="{{ url_for('static', filename='history_app.js') }}"></script>
 
 </body>

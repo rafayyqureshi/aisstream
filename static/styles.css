@@ -1,86 +1,139 @@
-body,html {
-  margin:0;
-  padding:0;
-  height:100%;
-  width:100%;
+/* Resetowanie marginesów, wypełnień i podstawowe style */
+body, html {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
   font-family: sans-serif;
-  font-size:14px;
+  font-size: 14px;
 }
 
+/* Kontener mapy na całe okno (pod panelami) */
 #map {
-  height:100%;
-  width:100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* Mapa w tle; panele nakładamy absolutnie */
+  z-index: 1; 
 }
 
+/* Lewy panel:
+   - Z reguły używamy go w module Live do wyświetlania "Selected ships" itp.
+   - W module History może być w trybie "display: none" i dopiero w widoku odtwarzania
+     kolizji pokazujemy go (tak jak w pliku JS).
+*/
 #left-panel {
-  position:absolute;
-  top:120px;
-  left:0;
-  width:300px;
-  background-color:rgba(255,255,255,0.9);
-  padding:10px;
-  z-index:1000;
-  overflow:auto;
-  max-height:90%;
+  position: absolute;
+  top: 120px; /* odsunięcie od góry (poniżej top-center-bar) */
+  left: 0;
+  width: 300px;
+  max-height: 80%; /* aby nie przykrywać całej mapy w pionie */
+  background-color: rgba(255, 255, 255, 0.9);
+  padding: 10px;
+  overflow: auto;
+  z-index: 1000;
+  border-radius: 4px;
+  box-shadow: 2px 2px 8px rgba(0,0,0,0.2);
 }
 
+/* Prawy panel:
+   - Lista kolizji na żywo, albo Collisions(History). 
+   - Zajmuje całą wysokość, aby mieć przewijaną listę.
+*/
 #right-panel {
-  position:absolute;
-  top:0;
-  right:0;
-  width:300px;
-  height:100%;
-  background-color:#fff;
-  overflow-y:auto;
-  z-index:1000;
-  box-shadow:-2px 0 5px rgba(0,0,0,0.3);
-  padding:10px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 300px;
+  height: 100%;
+  background-color: #fff;
+  overflow-y: auto;
+  z-index: 1000;
+  box-shadow: -2px 0 5px rgba(0, 0, 0, 0.3);
+  padding: 10px;
 }
 
+/* Górny pasek do przełączania dni w History 
+   lub do prezentacji tytułu, np. "Historical Mode"
+*/
 #top-center-bar {
-  position:absolute;
-  top:0;
-  left:50%;
-  transform:translateX(-50%);
-  background:rgba(255,255,255,0.9);
-  padding:10px;
-  z-index:1100;
-  border-radius:5px;
-  text-align:center;
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 10px 20px;
+  z-index: 1100;
+  border-radius: 5px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+  text-align: center;
 }
 
+/* Dolny pasek do sterowania animacją (History) */
 #bottom-center-bar {
-  position:absolute;
-  bottom:10px;
-  left:50%;
-  transform:translateX(-50%);
-  background:rgba(255,255,255,0.9);
-  padding:10px;
-  z-index:1100;
-  border-radius:5px;
-  text-align:center;
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 10px 20px;
+  z-index: 1100;
+  border-radius: 5px;
+  text-align: center;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
 }
 
+/* Lista kolizji – każdy element */
 .collision-item {
-  border-bottom:1px solid #ccc;
-  padding:5px;
-  cursor:pointer;
-  font-size:14px;
+  border-bottom: 1px solid #ccc;
+  padding: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  background: #fff;
+  transition: background 0.2s;
+}
+.collision-item:hover {
+  background: #f7f7f7;
 }
 
+/* Nagłówek w elemencie kolizji */
 .collision-header {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
+/* Przycisk lupki w kolizjach, lub dowolny "zoom-button" */
 .zoom-button {
-  background:none;
-  border:none;
-  cursor:pointer;
-  font-size:16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  margin-left: 8px;
+  color: #333;
 }
 
-#vector-length-container, #selected-ships-info, #pair-info, #collision-filters {
-  margin-bottom:10px;
+/* Różne sekcje wewnątrz paneli: suwak cpa/tdpa, itp. */
+#vector-length-container,
+#selected-ships-info,
+#pair-info,
+#collision-filters {
+  margin-bottom: 10px;
 }
+
+/* Przykładowa stylizacja day-controls (History) w top-center-bar */
+#day-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+#day-controls button {
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+/* Ewentualnie styl animowanych przycisków, itp. 
+   Możesz dodać transition, hover states, itd. */
