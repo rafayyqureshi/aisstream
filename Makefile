@@ -29,6 +29,8 @@ pipeline_live:
 		--requirements_file=requirements.txt \
 		--save_main_session
 
+history: pipeline_history
+
 pipeline_history:
 	@echo "Uruchamianie batchowego potoku Dataflow (history collisions)..."
 	. venv/bin/activate && \
