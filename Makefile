@@ -16,18 +16,18 @@ ais_stream:
 live: pipeline_live
 
 pipeline_live:
-	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
-	. venv/bin/activate && \
-	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
-	python pipeline_live.py \
-		--runner=DataflowRunner \
-		--project=$$GOOGLE_CLOUD_PROJECT \
-		--region=$$REGION \
-		--staging_location=$$STAGING_LOCATION \
-		--temp_location=$$TEMP_LOCATION \
-		--job_name=collision-detector \
-		--requirements_file=requirements.txt \
-		--save_main_session
+   @echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
+   . venv/bin/activate && \
+   export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
+   python pipeline_live.py \
+       --runner=DataflowRunner \
+       --project=$$GOOGLE_CLOUD_PROJECT \
+       --region=$$REGION \
+       --staging_location=$$STAGING_LOCATION \
+       --temp_location=$$TEMP_LOCATION \
+       --job_name=collision-detector \
+       --requirements_file=requirements.txt \
+       --save_main_session
 
 history: pipeline_history
 
