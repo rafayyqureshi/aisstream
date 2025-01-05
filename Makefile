@@ -13,16 +13,13 @@ ais_stream:
 	. venv/bin/activate && \
 	python ais_stream.py
 
-
 live: pipeline_live
-
-history: pipeline_history
 
 pipeline_live:
 	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
 	. venv/bin/activate && \
 	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
-	python pipeline_collisions.py \
+	python pipeline_live.py \
 		--runner=DataflowRunner \
 		--project=$$GOOGLE_CLOUD_PROJECT \
 		--region=$$REGION \
@@ -32,11 +29,13 @@ pipeline_live:
 		--requirements_file=requirements.txt \
 		--save_main_session
 
+history: pipeline_history
+
 pipeline_history:
 	@echo "Uruchamianie batchowego potoku Dataflow (history collisions)..."
 	. venv/bin/activate && \
-	export $(shell sed 's/#.*//g' .env | xargs) && \
-	python pipeline_archive.py \
+	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
+	python pipeline_history.py \
 	  --runner=DataflowRunner \
 	  --project=$$GOOGLE_CLOUD_PROJECT \
 	  --region=$$REGION \
@@ -45,7 +44,6 @@ pipeline_history:
 	  --job_name=ais-history-batch \
 	  --requirements_file=requirements.txt \
 	  --save_main_session
-
 
 flask_app:
 	@echo "Uruchamianie aplikacji Flask..."
