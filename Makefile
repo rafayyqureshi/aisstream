@@ -1,4 +1,4 @@
-.PHONY: setup ais_stream pipeline_live pipeline_arch flask_app cleanup live arch
+.PHONY: setup ais_stream pipeline_live pipeline_arch flask_app cleanup live arch history pipeline_history
 
 SHELL := /bin/bash
 
@@ -16,18 +16,18 @@ ais_stream:
 live: pipeline_live
 
 pipeline_live:
-   @echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
-   . venv/bin/activate && \
-   export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
-   python pipeline_live.py \
-       --runner=DataflowRunner \
-       --project=$$GOOGLE_CLOUD_PROJECT \
-       --region=$$REGION \
-       --staging_location=$$STAGING_LOCATION \
-       --temp_location=$$TEMP_LOCATION \
-       --job_name=collision-detector \
-       --requirements_file=requirements.txt \
-       --save_main_session
+	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
+	. venv/bin/activate && \
+	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
+	python pipeline_live.py \
+		--runner=DataflowRunner \
+		--project=$$GOOGLE_CLOUD_PROJECT \
+		--region=$$REGION \
+		--staging_location=$$STAGING_LOCATION \
+		--temp_location=$$TEMP_LOCATION \
+		--job_name=collision-detector \
+		--requirements_file=requirements.txt \
+		--save_main_session
 
 history: pipeline_history
 
@@ -36,14 +36,14 @@ pipeline_history:
 	. venv/bin/activate && \
 	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
 	python pipeline_history.py \
-	  --runner=DataflowRunner \
-	  --project=$$GOOGLE_CLOUD_PROJECT \
-	  --region=$$REGION \
-	  --staging_location=$$STAGING_LOCATION \
-	  --temp_location=$$TEMP_LOCATION \
-	  --job_name=ais-history-batch \
-	  --requirements_file=requirements.txt \
-	  --save_main_session
+		--runner=DataflowRunner \
+		--project=$$GOOGLE_CLOUD_PROJECT \
+		--region=$$REGION \
+		--staging_location=$$STAGING_LOCATION \
+		--temp_location=$$TEMP_LOCATION \
+		--job_name=ais-history-batch \
+		--requirements_file=requirements.txt \
+		--save_main_session
 
 flask_app:
 	@echo "Uruchamianie aplikacji Flask..."
