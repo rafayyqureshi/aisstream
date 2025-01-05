@@ -18,6 +18,7 @@ live: pipeline_live
 pipeline_live:
 	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
 	. venv/bin/activate && \
+	# Wstrzykujemy wszystkie zmienne z .env
 	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
 	python pipeline_live.py \
 		--runner=DataflowRunner \
@@ -25,11 +26,9 @@ pipeline_live:
 		--region=$$REGION \
 		--staging_location=$$STAGING_LOCATION \
 		--temp_location=$$TEMP_LOCATION \
-		--job_name=collision-detector \
+		--job_name=$$JOB_NAME \
 		--requirements_file=requirements.txt \
 		--save_main_session
-
-history: pipeline_history
 
 pipeline_history:
 	@echo "Uruchamianie batchowego potoku Dataflow (history collisions)..."
