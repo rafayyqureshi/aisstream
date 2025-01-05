@@ -148,11 +148,12 @@ def run():
     pipeline_options = PipelineOptions()
     pipeline_options.view_as(StandardOptions).streaming = True
 
-    # Z .env / Makefile
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
     dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
-    input_subscription = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
-    # collisions_topic = os.getenv("COLLISIONS_TOPIC", "projects/ais-collision-detection/topics/collisions-topic")
+    input_subscription = os.getenv("INPUT_SUBSCRIPTION")
+    # Zwróć uwagę, żebyś w .env miał:
+    #   LIVE_DATASET=ais_dataset_us
+    #   INPUT_SUBSCRIPTION=projects/ais-collision-detection/subscriptions/ais-data-sub
 
     table_positions = f"{project_id}:{dataset}.ships_positions"
     table_collisions = f"{project_id}:{dataset}.collisions"
@@ -166,7 +167,7 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # Zapis do BQ
+        # Dodaj custom_gcs_temp_location
         _ = (
             parsed
             | "WritePositions" >> WriteToBigQuery(
@@ -183,10 +184,8 @@ def run():
                 ),
                 write_disposition=BigQueryDisposition.WRITE_APPEND,
                 create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
-
-                # DODATKOWE PARAMETRY:
-                # Zapewniamy location = "us-east1"
-                additional_bq_parameters={"location": "us-east1"},
+                additional_bq_parameters={"location":"us-east1"},
+                custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
             )
         )
 
@@ -210,15 +209,10 @@ def run():
                 ),
                 write_disposition=BigQueryDisposition.WRITE_APPEND,
                 create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
-
-                # Kluczowa linijka:
-                additional_bq_parameters={"location": "us-east1"},
+                additional_bq_parameters={"location":"us-east1"},
+                custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
             )
         )
-
-        # Ewentualnie publikacja do Pub/Sub collisions_topic
-        # collisions_str = collisions | beam.Map(lambda x: json.dumps(x).encode("utf-8"))
-        # collisions_str | beam.io.WriteToPubSub(topic=collisions_topic)
 
 if __name__ == "__main__":
     run()
