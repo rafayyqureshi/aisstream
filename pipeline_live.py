@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import os
 import json
@@ -12,7 +13,7 @@ from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
 # ----------------------------
-# Parametry kolizji
+# Parametry kolizji (live)
 # ----------------------------
 CPA_THRESHOLD = 0.5       # mile morskie
 TCPA_THRESHOLD = 10.0     # minuty
@@ -20,8 +21,8 @@ STATE_RETENTION_SEC = 30  # ile sekund pamiętamy statki w danym geohash
 
 def parse_ais(record: bytes):
     """
-    Parsuje rekord JSON z Pub/Sub (AIS).
-    Zwraca None, jeśli brakuje wymaganych pól (mmsi, lat, lon, sog, cog, timestamp).
+    Parsuje rekord AIS (JSON z Pub/Sub).
+    Zwraca None, jeśli brakuje wymaganych pól.
     """
     try:
         data = json.loads(record.decode("utf-8"))
@@ -35,7 +36,7 @@ def parse_ais(record: bytes):
         data["cog"] = float(data["cog"])
         data["sog"] = float(data["sog"])
 
-        # Opcjonalna długość:
+        # Opcjonalna długość
         if "ship_length" in data:
             try:
                 data["ship_length"] = float(data["ship_length"])
@@ -46,17 +47,14 @@ def parse_ais(record: bytes):
 
         # geohash – tylko do stateful detection
         data["geohash"] = data.get("geohash", "none")
-
-        # (opcjonalnie) nazwa statku – data.get("ship_name")
-        # nic nie zmieniamy, jeśli brak
         return data
     except:
         return None
 
 def compute_cpa_tcpa(ship_a, ship_b):
     """
-    Oblicza (cpa, tcpa) bazując na sog/cog i prostym przybliżeniu geograficznym.
-    Zwraca (9999, -1), jeśli statki <50m lub tcpa<0.
+    Oblicza (cpa, tcpa). 
+    Zwraca (9999, -1) jeśli statki < 50m lub jeśli tcpa < 0.
     """
     try:
         la = float(ship_a.get("ship_length") or 0)
@@ -64,6 +62,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
     except:
         return (9999, -1)
 
+    # Pomijamy statki krótsze niż 50m
     if la < 50 or lb < 50:
         return (9999, -1)
 
@@ -80,10 +79,10 @@ def compute_cpa_tcpa(ship_a, ship_b):
     sogA = float(ship_a["sog"] or 0)
     sogB = float(ship_b["sog"] or 0)
 
-    def cog_to_vec(cog_deg, sog_nm_h):
+    def cog_to_vec(cog_deg, sog_nm):
         r = math.radians(cog_deg)
-        vx = sog_nm_h * math.sin(r)
-        vy = sog_nm_h * math.cos(r)
+        vx = sog_nm * math.sin(r)
+        vy = sog_nm * math.cos(r)
         return (vx, vy)
 
     vxA, vyA = cog_to_vec(ship_a["cog"], sogA)
@@ -107,6 +106,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
     if tcpa < 0:
         return (9999, -1)
 
+    # Pozycje w momencie CPA
     vxA_mpm = vxA * speed_scale
     vyA_mpm = vyA * speed_scale
     vxB_mpm = vxB * speed_scale
@@ -123,41 +123,39 @@ def compute_cpa_tcpa(ship_a, ship_b):
 
 class CollisionDoFn(beam.DoFn):
     """
-    Stateful DoFn, wykrywanie kolizji w obrębie tego samego geohasha.
+    Stateful DoFn do wykrywania kolizji w obrębie geohash.
+    Przechowuje w stanie BagState poprzednie statki przez STATE_RETENTION_SEC.
     """
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.FastPrimitivesCoder())
 
     def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
-        geohash, ship = element
+        gh, ship = element
         now_sec = time.time()
 
-        # Zapisz do stanu
+        # Dodaj do stanu
         records_state.add((ship, now_sec))
 
-        # Wczytaj dotychczasowy stan
         old_list = list(records_state.read())
         fresh = []
         for (s, t) in old_list:
             if (now_sec - t) <= STATE_RETENTION_SEC:
                 fresh.append((s, t))
 
-        # Czyścimy i zapisujemy z powrotem jedynie fresh
         records_state.clear()
         for (s, t) in fresh:
             records_state.add((s, t))
 
-        # Weryfikacja kolizji
+        # Detekcja kolizji TYLKO jeśli cpa < 0.5 i 0 <= tcpa < 10
+        # => oznacza, że jest to kolizja "na żywo"
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
-
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
             if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
-                # Dodajemy ship_length_a i ship_length_b do collisions:
                 yield {
                     "mmsi_a": old_ship["mmsi"],
                     "mmsi_b": ship["mmsi"],
-                    "timestamp": ship["timestamp"],  # "nowszy" timestamp
+                    "timestamp": ship["timestamp"],
                     "cpa": cpa,
                     "tcpa": tcpa,
                     "latitude_a": old_ship["latitude"],
@@ -165,16 +163,14 @@ class CollisionDoFn(beam.DoFn):
                     "latitude_b": ship["latitude"],
                     "longitude_b": ship["longitude"],
                     "ship_length_a": old_ship.get("ship_length"),
-                    "ship_length_b": ship.get("ship_length")
-                    # ewentualnie: "ship_name_a": old_ship.get("ship_name"),
-                    #              "ship_name_b": ship.get("ship_name"),
+                    "ship_length_b": ship.get("ship_length"),
                 }
 
 def remove_geohash(row):
-    # Pomocnicza funkcja usuwająca geohash przed zapisem do ships_positions
-    new_row = dict(row)
-    new_row.pop("geohash", None)
-    return new_row
+    # Pomocnicza funkcja do usunięcia geohash przed zapisem do ships_positions
+    copy_ = dict(row)
+    copy_.pop("geohash", None)
+    return copy_
 
 def run():
     logging.getLogger().setLevel(logging.INFO)
@@ -184,8 +180,8 @@ def run():
 
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
     dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
-    input_sub = os.getenv("INPUT_SUBSCRIPTION",
-                          "projects/ais-collision-detection/subscriptions/ais-data-sub")
+    input_sub = os.getenv("INPUT_SUBSCRIPTION", 
+        "projects/ais-collision-detection/subscriptions/ais-data-sub")
 
     table_positions = f"{project_id}:{dataset}.ships_positions"
     table_collisions = f"{project_id}:{dataset}.collisions"
@@ -194,14 +190,14 @@ def run():
         # 1) Odczyt z PubSub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # 2) Parsowanie JSON → dict
+        # 2) Parsowanie AIS
         parsed = (
             lines
             | "ParseAIS" >> beam.Map(parse_ais)
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 3) Zapis statków do BQ (bez geohash)
+        # 3) Zapis do BQ - ships_positions
         parsed_for_bq = parsed | "RemoveGeoHash" >> beam.Map(remove_geohash)
         parsed_for_bq | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
@@ -221,14 +217,13 @@ def run():
             custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
         )
 
-        # 4) Detekcja kolizji
+        # 4) Detekcja kolizji (CPA<0.5, 0<=TCPA<10)
         keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        # 5) Zapis kolizji do BQ wraz z ship_length_a, ship_length_b
+        # 5) Zapis kolizji do BQ: dodajemy ship_length_a i ship_length_b
         collisions | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
-            # Dodajemy kolumny ship_length_a i ship_length_b
             schema=(
                 "mmsi_a:INTEGER,"
                 "mmsi_b:INTEGER,"
@@ -248,9 +243,9 @@ def run():
             custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
         )
 
-        # (opcjonalnie) Publikacja do PubSub
-        # collisions_str = collisions | "CollisionsToJson" >> beam.Map(lambda c: json.dumps(c).encode("utf-8"))
-        # collisions_str | "PubCollisions" >> beam.io.WriteToPubSub(topic=...)
+        # (opcjonalnie) publikacja do PubSub
+        # collisions_str = collisions | beam.Map(lambda c: json.dumps(c).encode("utf-8"))
+        # collisions_str | beam.io.WriteToPubSub(topic=...)
         # ...
 
 if __name__ == "__main__":
