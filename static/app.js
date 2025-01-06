@@ -1,53 +1,60 @@
 // ==========================
 // app.js  (Moduł LIVE)
 // ==========================
+
+// -----------------------------------------
+// Zmienne globalne
+// -----------------------------------------
 let map;
 let markerClusterGroup;
 
-// Mapa mmsi -> L.marker (pozycje statków).
+// Mapa: mmsi -> L.marker (pozycje statków).
 let shipMarkers = {};
 
-// Mapa mmsi -> tablica polylines (wektory).
+// Mapa: mmsi -> tablica L.polyline (wektory).
 let overlayMarkers = {};
 
-// Lista mmsi wybranych przez klik.
+// Lista mmsi wybranych statków (klik).
 let selectedShips = [];
 
-// Pełna lista kolizji (z /collisions).
-let collisionsData = [];
+// Mapa kolizji: klucz = "mmsiA_mmsiB" => obiekt najnowszej kolizji
+let activeCollisionsMap = {};
 
-// Mapa collisionKey -> L.marker (ikona kolizji).
-// collisionKey np. "mmsiA_mmsiB_timestamp" (posortowane A<B).
+// Mapa kolizji -> L.marker (ikona kolizji na mapie),
+// klucz zbieżny z activeCollisionsMap, np. "mmsiA_mmsiB".
 let collisionMarkersMap = {};
 
 // Parametry
-let vectorLength = 15;  // rysowany wektor w minutach
-let cpaFilter = 0.5;    // suwak CPA
-let tcpaFilter = 10;    // suwak TCPA
+let vectorLength = 15;   // wektor ruchu w min
+let cpaFilter = 0.5;     // suwak
+let tcpaFilter = 10;     // suwak
+
+// Dla /calculate_cpa_tcpa (podgląd pary statków)
+let lastSelectedPair = null;
+let lastCpaTcpa = null;
 
 // Timery
 let shipsInterval = null;
 let collisionsInterval = null;
 
-// Dla /calculate_cpa_tcpa
-let lastSelectedPair = null;
-let lastCpaTcpa = null;
 
+// -----------------------------------------
+// Inicjalizacja mapy
+// -----------------------------------------
 function initMap() {
-  // Inicjalizacja mapy
   map = L.map('map', {
     center: [50, 0],
     zoom: 5
   });
 
-  // --- Warstwa bazowa OSM ---
+  // Warstwa bazowa OSM
   const osmLayer = L.tileLayer(
     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     { maxZoom: 18 }
   );
   osmLayer.addTo(map);
 
-  // --- Warstwa nawigacyjna (OpenSeaMap) ---
+  // Warstwa nawigacyjna (OpenSeaMap)
   const openSeaMap = L.tileLayer(
     'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
     { maxZoom: 18, opacity: 0.9 }
@@ -58,7 +65,7 @@ function initMap() {
   markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
   map.addLayer(markerClusterGroup);
 
-  // Obsługa suwaków
+  // Obsługa suwaków i przycisków
   document.getElementById('vectorLengthSlider').addEventListener('input', e => {
     vectorLength = parseInt(e.target.value) || 15;
     document.getElementById('vectorLengthValue').textContent = vectorLength;
@@ -78,15 +85,19 @@ function initMap() {
     clearSelectedShips();
   });
 
-  // Startowy fetch
+  // Pierwsze pobrania
   fetchShips();
   fetchCollisions();
 
+  // Odświeżanie co 60s
   shipsInterval = setInterval(fetchShips, 60000);
   collisionsInterval = setInterval(fetchCollisions, 60000);
 }
 
-/** Pobiera statki z /ships */
+
+// -----------------------------------------
+// 1) Pobieranie i wyświetlanie statków
+// -----------------------------------------
 function fetchShips() {
   fetch('/ships')
     .then(r => r.json())
@@ -94,51 +105,43 @@ function fetchShips() {
     .catch(err => console.error('Error /ships:', err));
 }
 
-/** Pobiera kolizje z /collisions */
-function fetchCollisions() {
-  fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
-    .then(r => r.json())
-    .then(data => {
-      collisionsData = data || [];
-      updateCollisionsList();
-    })
-    .catch(err => console.error('Error /collisions:', err));
-}
-
-/** Uaktualnia statki na mapie. */
 function updateShips(shipsArray) {
   const currentMmsiSet = new Set(shipsArray.map(s => s.mmsi));
 
   // Usuwamy statki, których już nie ma
   for (const mmsi in shipMarkers) {
     if (!currentMmsiSet.has(parseInt(mmsi))) {
-      // usuń z mapy
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
       delete shipMarkers[mmsi];
-      // usuń wektory
       if (overlayMarkers[mmsi]) {
-        overlayMarkers[mmsi].forEach(poly => map.removeLayer(poly));
+        overlayMarkers[mmsi].forEach(line => map.removeLayer(line));
         delete overlayMarkers[mmsi];
       }
     }
   }
 
-  // Dodaj / update
+  // Dodaj / aktualizuj
   shipsArray.forEach(ship => {
-    const { mmsi, latitude, longitude, sog, cog, timestamp, ship_name, ship_length } = ship;
+    const { mmsi, latitude, longitude, sog, cog, timestamp,
+            ship_name, ship_length } = ship;
     const fillColor = getShipColor(ship_length);
     const rotation = cog || 0;
     const w = 16, h = 24;
 
+    // highlight ?
     let highlightRect = '';
     if (selectedShips.includes(mmsi)) {
-      highlightRect = `<rect x="-10" y="-10" width="20" height="20"
-                             fill="none" stroke="black" stroke-width="3"
-                             stroke-dasharray="5,5"/>`;
+      highlightRect = `
+        <rect x="-10" y="-10" width="20" height="20"
+              fill="none" stroke="black" stroke-width="3"
+              stroke-dasharray="5,5"/>
+      `;
     }
 
-    const shipSvg = `<polygon points="0,-8 6,8 -6,8"
-                             fill="${fillColor}" stroke="black" stroke-width="1"/>`;
+    const shipSvg = `
+      <polygon points="0,-8 6,8 -6,8"
+               fill="${fillColor}" stroke="black" stroke-width="1"/>
+    `;
     const iconHtml = `
       <svg width="${w}" height="${h}" viewBox="-8 -8 16 16"
            style="transform:rotate(${rotation}deg)">
@@ -177,7 +180,6 @@ function updateShips(shipsArray) {
       shipMarkers[mmsi] = marker;
       markerClusterGroup.addLayer(marker);
     } else {
-      // update
       marker.setLatLng([latitude, longitude]);
       marker.setIcon(icon);
       marker.setTooltipContent(tooltipHtml);
@@ -185,30 +187,79 @@ function updateShips(shipsArray) {
     marker.shipData = ship;
   });
 
+  // Odśwież wektory dla zaznaczonych statków
   updateSelectedShipsInfo(false);
 }
 
-/** Zwraca kolor w zależności od długości statku. */
-function getShipColor(length) {
-  if (length == null) return 'grey';
-  if (length < 50) return 'green';
-  if (length < 150) return 'yellow';
-  if (length < 250) return 'orange';
+function getShipColor(len) {
+  if (len == null) return 'grey';
+  if (len < 50) return 'green';
+  if (len < 150) return 'yellow';
+  if (len < 250) return 'orange';
   return 'red';
 }
 
-/** Uaktualnia listę kolizji w panelu i na mapie. */
-function updateCollisionsList() {
+
+// -----------------------------------------
+// 2) Pobieranie i wyświetlanie kolizji
+// -----------------------------------------
+function fetchCollisions() {
+  fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
+    .then(r => r.json())
+    .then(fetchedCollisions => {
+      if (!Array.isArray(fetchedCollisions)) {
+        fetchedCollisions = [];
+      }
+      // Budujemy nową mapę kolizji
+      const newMap = {};
+
+      fetchedCollisions.forEach(c => {
+        // Odrzucamy to, co wykracza poza filtry:
+        if (!c.timestamp) return;
+        if (c.tcpa < 0) return;    // statki się rozminęły
+        if (c.cpa > cpaFilter) return;
+        if (c.tcpa > tcpaFilter) return;
+
+        // klucz pary (sort mmsi)
+        const pair = [c.mmsi_a, c.mmsi_b].sort((a,b) => a-b);
+        const key = `${pair[0]}_${pair[1]}`;
+
+        // Jeżeli w newMap coś jest, wybieramy nowsze
+        const existing = newMap[key];
+        if (!existing) {
+          newMap[key] = c;
+        } else {
+          // porównaj timestamp
+          const t1 = new Date(c.timestamp).getTime();
+          const t2 = new Date(existing.timestamp).getTime();
+          if (t1 > t2) {
+            newMap[key] = c;
+          }
+        }
+      });
+
+      // Przypisujemy do globalnego
+      activeCollisionsMap = newMap;
+
+      // Render
+      renderCollisions();
+    })
+    .catch(err => console.error('Error /collisions:', err));
+}
+
+function renderCollisions() {
+  // Czyścimy panel
   const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML = '';
 
-  // Usuwamy stare markery kolizji
+  // Usuń stare markery z mapy
   for (const key in collisionMarkersMap) {
     map.removeLayer(collisionMarkersMap[key]);
   }
   collisionMarkersMap = {};
 
-  if (!collisionsData || collisionsData.length === 0) {
+  const keys = Object.keys(activeCollisionsMap);
+  if (keys.length === 0) {
     const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
     noItem.innerHTML = `<i style="padding:8px;">No collisions found</i>`;
@@ -216,48 +267,12 @@ function updateCollisionsList() {
     return;
   }
 
-  // Filtrowanie "nieaktualnych" kolizji,
-  // np. c.cpa>cpaFilter, c.tcpa>tcpaFilter albo c.tcpa<0 => pomijamy.
-  let validCollisions = collisionsData.filter(c => {
-    if (!c.timestamp) return false; // brak timestamp
-    if (c.cpa > cpaFilter) return false;
-    if (c.tcpa > tcpaFilter) return false;
-    if (c.tcpa < 0) return false; // statki się rozminęły
-    return true;
-  });
+  // Tworzymy itemy w panelu i markery
+  keys.forEach(key => {
+    const c = activeCollisionsMap[key];
+    if (!c) return;
 
-  // Eliminacja duplikatów (dla tej samej pary/timestamp):
-  const uniqueMap = {};
-  validCollisions.forEach(col => {
-    const pair = [col.mmsi_a, col.mmsi_b].sort((a,b)=>a-b);
-    const key = `${pair[0]}_${pair[1]}_${col.timestamp}`;
-    const existing = uniqueMap[key];
-    if (!existing) {
-      uniqueMap[key] = col;
-    } else {
-      // Weźmy nowszy
-      if (col.timestamp > existing.timestamp) {
-        uniqueMap[key] = col;
-      }
-    }
-  });
-  const filteredCollisions = Object.values(uniqueMap);
-
-  if (filteredCollisions.length === 0) {
-    const noCol = document.createElement('div');
-    noCol.classList.add('collision-item');
-    noCol.innerHTML = `<i style="padding:8px;">No collisions found after filtering</i>`;
-    collisionList.appendChild(noCol);
-    return;
-  }
-
-  // Tworzymy elementy w panelu i markery na mapie
-  filteredCollisions.forEach(c => {
-    const item = document.createElement('div');
-    item.classList.add('collision-item');
-
-    // Kolory do splitted circle (jeśli c zawiera ship1_length, ship2_length)
-    // Dla uproszczenia sprawdzimy, czy w obiekcie mamy te pola:
+    // splitted circle?
     let circleHtml = '';
     if (typeof c.ship1_length === 'number' && typeof c.ship2_length === 'number') {
       const colorA = getShipColor(c.ship1_length);
@@ -270,6 +285,9 @@ function updateCollisionsList() {
     const cpaVal = c.cpa.toFixed(2);
     const tcpaVal = c.tcpa.toFixed(2);
 
+    // Tworzymy item w liście
+    const item = document.createElement('div');
+    item.classList.add('collision-item');
     item.innerHTML = `
       <div style="display:flex;align-items:center;">
         ${circleHtml}
@@ -283,9 +301,9 @@ function updateCollisionsList() {
     item.querySelector('.zoom-button').addEventListener('click', () => zoomToCollision(c));
     collisionList.appendChild(item);
 
-    // Rysujemy ikonę kolizji
-    const latC = (c.latitude_a + c.latitude_b)/2;
-    const lonC = (c.longitude_a + c.longitude_b)/2;
+    // Rysujemy ikonę na mapie
+    const latC = (c.latitude_a + c.latitude_b) / 2;
+    const lonC = (c.longitude_a + c.longitude_b) / 2;
 
     const collisionIcon = L.divIcon({
       className: '',
@@ -301,33 +319,30 @@ function updateCollisionsList() {
     });
 
     const marker = L.marker([latC, lonC], { icon: collisionIcon });
-    const tooltip = `
+    marker.bindTooltip(`
       Potential collision<br>
       <b>${shipA}</b> & <b>${shipB}</b><br>
       CPA: ${cpaVal} nm, TCPA: ${tcpaVal} min
-    `;
-    marker.bindTooltip(tooltip, { direction:'top', sticky:true });
+    `, { direction:'top', sticky:true });
     marker.on('click', () => zoomToCollision(c));
     marker.addTo(map);
 
-    const collisionKey = `${latC}_${lonC}_${c.timestamp}`;
-    collisionMarkersMap[collisionKey] = marker;
+    collisionMarkersMap[key] = marker;
   });
 }
 
-/** Rysuje splitted circle (pół/pół) dla statków. */
+/** Rysuje splitted circle (połówki w różnych kolorach). */
 function createSplittedCircle(colorA, colorB) {
   return `
     <svg width="20" height="20" viewBox="0 0 20 20" style="margin-right:6px;">
-      <!-- lewa połówka -->
+      <!-- lewa połowa -->
       <path d="M10,10 m-10,0 a10,10 0 0,1 20,0 z" fill="${colorA}"/>
-      <!-- prawa połówka -->
+      <!-- prawa połowa -->
       <path d="M10,10 m10,0 a10,10 0 0,1 -20,0 z" fill="${colorB}"/>
     </svg>
   `;
 }
 
-/** Zoom do kolizji (pasuje mapę). */
 function zoomToCollision(c) {
   const bounds = L.latLngBounds([
     [c.latitude_a, c.longitude_a],
@@ -335,13 +350,16 @@ function zoomToCollision(c) {
   ]);
   map.fitBounds(bounds, { padding:[50,50] });
 
-  // Możemy też zaznaczyć statki
+  // Ewentualne zaznaczenie statków
   clearSelectedShips();
   selectShip(c.mmsi_a);
   selectShip(c.mmsi_b);
 }
 
-/** Zaznaczenie statku. */
+
+// -----------------------------------------
+// 3) Obsługa zaznaczonych statków
+// -----------------------------------------
 function selectShip(mmsi) {
   if (!selectedShips.includes(mmsi)) {
     if (selectedShips.length >= 2) {
@@ -352,11 +370,11 @@ function selectShip(mmsi) {
   }
 }
 
-/** Czyścimy zaznaczenie. */
 function clearSelectedShips() {
   selectedShips = [];
   lastSelectedPair = null;
   lastCpaTcpa = null;
+  // usuń wektory
   for (const m in overlayMarkers) {
     overlayMarkers[m].forEach(line => map.removeLayer(line));
   }
@@ -364,35 +382,36 @@ function clearSelectedShips() {
   updateSelectedShipsInfo(false);
 }
 
-/** Uaktualnia panel lewy i wyświetla cpa/tcpa. */
+/** Uaktualnia info w panelu po lewej + CPA/TCPA. */
 function updateSelectedShipsInfo(selectionChanged) {
-  const infoDiv = document.getElementById('selected-ships-info');
-  infoDiv.innerHTML = '';
-  const pairDiv = document.getElementById('pair-info');
-  pairDiv.innerHTML = '';
+  const leftPanel = document.getElementById('selected-ships-info');
+  leftPanel.innerHTML = '';
+  const pairInfo = document.getElementById('pair-info');
+  pairInfo.innerHTML = '';
 
   if (selectedShips.length === 0) {
     reloadAllShipIcons();
     return;
   }
 
-  // Wyświetlamy info o wybranych
-  let shipsData = [];
+  // Zbieramy dane
+  const shipsData = [];
   selectedShips.forEach(m => {
     if (shipMarkers[m]?.shipData) {
       shipsData.push(shipMarkers[m].shipData);
     }
   });
 
+  // Wyświetl info
   shipsData.forEach(sd => {
-    const d = document.createElement('div');
-    d.innerHTML = `
+    const div = document.createElement('div');
+    div.innerHTML = `
       <b>${sd.ship_name || 'Unknown'}</b><br>
       MMSI: ${sd.mmsi}<br>
       SOG: ${sd.sog||0} kn, COG: ${sd.cog||0}°<br>
-      Length: ${sd.ship_length || 'N/A'}
+      Length: ${sd.ship_length||'N/A'}
     `;
-    infoDiv.appendChild(d);
+    leftPanel.appendChild(div);
   });
 
   // Rysuj wektory
@@ -400,34 +419,34 @@ function updateSelectedShipsInfo(selectionChanged) {
     overlayMarkers[m].forEach(line => map.removeLayer(line));
   }
   overlayMarkers = {};
-
   selectedShips.forEach(m => drawVector(m));
   reloadAllShipIcons();
 
-  // Jak mamy 2 statki, liczymy /calculate_cpa_tcpa
+  // Jeżeli 2 statki => oblicz /calculate_cpa_tcpa
   if (selectedShips.length === 2) {
     const sortedPair = [selectedShips[0], selectedShips[1]].sort((a,b)=>a-b);
     if (selectionChanged || !lastSelectedPair ||
         JSON.stringify(lastSelectedPair) !== JSON.stringify(sortedPair)) {
       lastSelectedPair = sortedPair;
       lastCpaTcpa = null;
+
       fetch(`/calculate_cpa_tcpa?mmsi_a=${sortedPair[0]}&mmsi_b=${sortedPair[1]}`)
         .then(r => r.json())
         .then(data => {
           if (data.error) {
-            pairDiv.innerHTML = `<b>CPA/TCPA:</b> n/a (${data.error})`;
-            lastCpaTcpa = { cpa:null, tcpa:null };
+            pairInfo.innerHTML = `<b>CPA/TCPA:</b> n/a (${data.error})`;
+            lastCpaTcpa = { cpa: null, tcpa: null };
           } else {
             // interpretacja
-            if (data.cpa>=9999 || data.tcpa<0) {
-              pairDiv.innerHTML = `<b>CPA/TCPA:</b> n/a (diverging)`;
+            if (data.cpa >= 9999 || data.tcpa < 0) {
+              pairInfo.innerHTML = `<b>CPA/TCPA:</b> n/a (diverging)`;
               lastCpaTcpa = data;
-            } else if (data.cpa>10 || data.tcpa>600) {
-              pairDiv.innerHTML = `<b>CPA/TCPA:</b> n/a (too large)`;
+            } else if (data.cpa > 10 || data.tcpa > 600) {
+              pairInfo.innerHTML = `<b>CPA/TCPA:</b> n/a (too large)`;
               lastCpaTcpa = data;
             } else {
               lastCpaTcpa = data;
-              pairDiv.innerHTML = `
+              pairInfo.innerHTML = `
                 <b>CPA/TCPA:</b> ${data.cpa.toFixed(2)} nm /
                 ${data.tcpa.toFixed(2)} min
               `;
@@ -436,16 +455,16 @@ function updateSelectedShipsInfo(selectionChanged) {
         })
         .catch(err => {
           console.error('Error /calculate_cpa_tcpa:', err);
-          pairDiv.innerHTML = `<b>CPA/TCPA:</b> n/a`;
+          pairInfo.innerHTML = `<b>CPA/TCPA:</b> n/a`;
         });
     } else if (lastCpaTcpa) {
       // Odtwarzamy zapamiętane
-      if (lastCpaTcpa.cpa>=9999 || lastCpaTcpa.tcpa<0) {
-        pairDiv.innerHTML = `<b>CPA/TCPA:</b> n/a (diverging)`;
-      } else if (lastCpaTcpa.cpa>10 || lastCpaTcpa.tcpa>600) {
-        pairDiv.innerHTML = `<b>CPA/TCPA:</b> n/a (too large)`;
+      if (lastCpaTcpa.cpa >= 9999 || lastCpaTcpa.tcpa < 0) {
+        pairInfo.innerHTML = `<b>CPA/TCPA:</b> n/a (diverging)`;
+      } else if (lastCpaTcpa.cpa > 10 || lastCpaTcpa.tcpa > 600) {
+        pairInfo.innerHTML = `<b>CPA/TCPA:</b> n/a (too large)`;
       } else {
-        pairDiv.innerHTML = `
+        pairInfo.innerHTML = `
           <b>CPA/TCPA:</b> ${lastCpaTcpa.cpa.toFixed(2)} nm /
           ${lastCpaTcpa.tcpa.toFixed(2)} min
         `;
@@ -454,7 +473,7 @@ function updateSelectedShipsInfo(selectionChanged) {
   }
 }
 
-/** Przeładowuje ikony statków z highlight. */
+/** Odtwarza ikony statków z highlight. */
 function reloadAllShipIcons() {
   for (const mmsi in shipMarkers) {
     const marker = shipMarkers[mmsi];
@@ -463,9 +482,9 @@ function reloadAllShipIcons() {
     const rotation = sd.cog||0;
     const w=16, h=24;
 
-    let highlightRect='';
+    let highlightRect = '';
     if (selectedShips.includes(parseInt(mmsi))) {
-      highlightRect=`
+      highlightRect = `
         <rect x="-10" y="-10" width="20" height="20"
               fill="none" stroke="black" stroke-width="3"
               stroke-dasharray="5,5"/>
@@ -484,16 +503,16 @@ function reloadAllShipIcons() {
       </svg>
     `;
     const icon = L.divIcon({
-      className:'',
+      className: '',
       html: iconHtml,
-      iconSize:[w,h],
+      iconSize: [w,h],
       iconAnchor:[w/2,h/2]
     });
     marker.setIcon(icon);
   }
 }
 
-/** Rysuje wektor (kilkuminutowy) statku. */
+/** Rysuje wektor statku. */
 function drawVector(mmsi) {
   const marker = shipMarkers[mmsi];
   if (!marker) return;
@@ -502,7 +521,7 @@ function drawVector(mmsi) {
 
   const lat = sd.latitude;
   const lon = sd.longitude;
-  const sog = sd.sog; // nm/h
+  const sog = sd.sog;  // nm/h
   const cogDeg = sd.cog;
   const distanceNm = sog * (vectorLength / 60.0);
   const cogRad = cogDeg * Math.PI / 180;
@@ -513,14 +532,16 @@ function drawVector(mmsi) {
   const endLat = lat + deltaLat;
   const endLon = lon + deltaLon;
 
-  const line = L.polyline([[lat, lon],[endLat, endLon]], {
-    color:'blue', dashArray:'4,4'
-  });
+  const line = L.polyline([[lat, lon], [endLat, endLon]],
+                          { color:'blue', dashArray:'4,4' });
   line.addTo(map);
 
   if (!overlayMarkers[mmsi]) overlayMarkers[mmsi] = [];
   overlayMarkers[mmsi].push(line);
 }
 
+
+// -----------------------------------------
 // Start
+// -----------------------------------------
 document.addEventListener('DOMContentLoaded', initMap);
