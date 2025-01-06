@@ -19,17 +19,26 @@ let shipMarkersOnMap = [];
 
 function initMap() {
   map = L.map('map').setView([50.0, 0.0], 5);
-  // Base OSM layer
+
+  // Warstwa bazowa
   const osmLayer = L.tileLayer(
     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { maxZoom:18 }
+    { maxZoom: 18 }
   );
   osmLayer.addTo(map);
+
+  // (opcjonalnie) warstwa morska
+  // const openSeaMapLayer = L.tileLayer(
+  //   'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
+  //   { maxZoom:18, opacity:0.7 }
+  // );
+  // openSeaMapLayer.addTo(map);
 
   updateDayLabel();
   fetchCollisionsData();
   setupUI();
 
+  // Klik = exit
   map.on('click', ()=>{
     if(inSituationView) {
       exitSituationView();
@@ -38,7 +47,6 @@ function initMap() {
 }
 
 function setupUI() {
-  // Day controls
   document.getElementById('prevDay').addEventListener('click', ()=>{
     if(currentDay>minDay) {
       currentDay--;
@@ -54,15 +62,13 @@ function setupUI() {
     }
   });
 
-  // Anim controls
   document.getElementById('playPause').addEventListener('click', ()=>{
-    if(isPlaying) stopAnimation(); 
+    if(isPlaying) stopAnimation();
     else startAnimation();
   });
   document.getElementById('stepForward').addEventListener('click', ()=> stepAnimation(1));
   document.getElementById('stepBack').addEventListener('click', ()=> stepAnimation(-1));
 
-  // Filter cpa
   document.getElementById('cpaFilter').addEventListener('input', (e)=>{
     cpaFilter = parseFloat(e.target.value) || 0.5;
     document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
@@ -72,9 +78,9 @@ function setupUI() {
 
 function updateDayLabel() {
   const now = new Date();
-  let d = new Date(now);
-  d.setDate(now.getDate() + currentDay);
-  const dateStr = d.toISOString().slice(0,10);
+  let targetDate = new Date(now);
+  targetDate.setDate(now.getDate() + currentDay);
+  const dateStr = targetDate.toISOString().slice(0,10);
 
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
   document.getElementById('prevDay').disabled = (currentDay<=minDay);
@@ -83,54 +89,56 @@ function updateDayLabel() {
 
 function fetchCollisionsData() {
   clearCollisions();
-  // e.g. /history_collisions?day=...&max_cpa=...
   fetch(`/history_collisions?day=${currentDay}&max_cpa=${cpaFilter}`)
     .then(r=>r.json())
-    .then(data=>{
-      displayCollisions(data);
-    })
+    .then(data=> displayCollisions(data))
     .catch(err=>console.error("Error fetching collisions:", err));
 }
 
 function displayCollisions(collisions) {
   const list = document.getElementById('collision-list');
-  list.innerHTML='';
+  list.innerHTML = '';
 
   if(!collisions || collisions.length===0) {
     const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML='<div style="padding:10px;font-style:italic;">No collisions for this day.</div>';
+    noItem.innerHTML= `<div style="padding:10px; font-style:italic;">
+      No collisions for this day.</div>`;
     list.appendChild(noItem);
     return;
   }
 
+  // ewentualnie usuwanie duplikatów
+  let uniqueMap = {};
   collisions.forEach(c=>{
+    if(!c.collision_id) {
+      c.collision_id = `${c.mmsi_a}_${c.mmsi_b}_${c.timestamp||''}`;
+    }
+    if(!uniqueMap[c.collision_id]) {
+      uniqueMap[c.collision_id] = c;
+    }
+  });
+  let finalCollisions = Object.values(uniqueMap);
+
+  finalCollisions.forEach(c=>{
     const item = document.createElement('div');
     item.classList.add('collision-item');
 
+    // tu możesz dodać ship1_name i ship2_name, jeśli dołączysz je w data
     let shipA = c.ship1_name || c.mmsi_a;
     let shipB = c.ship2_name || c.mmsi_b;
-    let timeStr = c.timestamp ? new Date(c.timestamp).toLocaleTimeString('en-GB') : '???';
-
-    // Kolory statków (opcjonalnie)
-    // let colorA = ...
-    // let colorB = ...
-
-    // Twój splitted circle
-    // let splittedCircle = createSplittedCircle(colorA, colorB);
+    let timeStr = (c.timestamp)
+      ? new Date(c.timestamp).toLocaleTimeString('en-GB')
+      : 'unknown';
 
     item.innerHTML=`
-      <div class="collision-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <strong>${shipA} - ${shipB}</strong><br>
-          CPA: ${Number(c.cpa).toFixed(2)} nm @ ${timeStr}
-        </div>
+      <div class="collision-header">
+        <strong>${shipA} - ${shipB}</strong><br>
+        CPA: ${Number(c.cpa).toFixed(2)} nm at ${timeStr}
         <button class="zoom-button">🔍</button>
       </div>
     `;
-    // splitted circle i inne elementy w razie potrzeby
-
-    item.querySelector('.zoom-button').addEventListener('click', ()=>{
+    item.querySelector('.zoom-button').addEventListener('click',()=>{
       zoomToCollision(c);
     });
     list.appendChild(item);
@@ -140,56 +148,38 @@ function displayCollisions(collisions) {
     let lon = (c.longitude_a + c.longitude_b)/2;
 
     const collisionIcon = L.divIcon({
-      className: '',
-      html: `
-        <svg width="15" height="15" viewBox="-7.5 -7.5 15 15">
-          <polygon points="0,-5 5,5 -5,5" fill="yellow" stroke="red" stroke-width="2"/>
-          <text x="0" y="2" text-anchor="middle" font-size="8" fill="red">!</text>
-        </svg>
-      `,
-      iconSize:[15,15],
-      iconAnchor:[7.5,7.5]
+      className:'',
+      html:`<svg width="15" height="15" viewBox="-7.5 -7.5 15 15">
+              <polygon points="0,-5 5,5 -5,5"
+                       fill="yellow" stroke="red" stroke-width="2"/>
+              <text x="0" y="2" text-anchor="middle" font-size="8"
+                    fill="red">!</text>
+            </svg>`
     });
-
-    let marker = L.marker([lat, lon], {icon: collisionIcon})
-      .on('click', ()=>zoomToCollision(c));
+    let marker = L.marker([lat,lon], {icon: collisionIcon})
+      .on('click', ()=> zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
   });
 }
 
-// ewentualnie splitted circle:
-function createSplittedCircle(colorA, colorB){
-  return `
-    <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:middle;margin-right:6px;">
-      <path d="M8,8 m-8,0 a8,8 0 0,1 16,0 z" fill="${colorA}"/>
-      <path d="M8,8 m8,0 a8,8 0 0,1 -16,0 z" fill="${colorB}"/>
-    </svg>
-  `;
-}
-
-function zoomToCollision(c){
-  let bounds = L.latLngBounds([
+function zoomToCollision(c) {
+  const bounds = L.latLngBounds([
     [c.latitude_a, c.longitude_a],
     [c.latitude_b, c.longitude_b]
   ]);
   map.fitBounds(bounds, {padding:[20,20]});
-
-  // Wczytanie danych 10 klatek z GCS lub z /history_data
   loadCollisionData(c.collision_id);
 }
 
-// Przykład wczytania z GCS:
-function loadCollisionData(collision_id){
-  let url = `https://storage.googleapis.com/your_bucket/history_collisions_batch/${collision_id}.json`;
-
-  fetch(url)
-    .then(r=>{
-      if(!r.ok) throw new Error("HTTP error " + r.status);
-      return r.text();
-    })
-    .then(text=>{
-      animationData = JSON.parse(text); 
+function loadCollisionData(collision_id) {
+  // Możesz wczytywać z /history_data?collision_id=...
+  // Albo z GCS – zależy od implementacji
+  // Poniżej – wersja z endpointem Flask:
+  fetch(`/history_data?collision_id=${collision_id}`)
+    .then(r=>r.json())
+    .then(data=>{
+      animationData = data;
       animationIndex=0;
       stopAnimation();
       inSituationView=true;
@@ -198,87 +188,83 @@ function loadCollisionData(collision_id){
       document.getElementById('bottom-center-bar').style.display='block';
 
       updateMapFrame();
-
-      // ewentualne dopasowanie mapy do klatki 10
-      if(animationData.length===10 && animationData[9].shipPositions.length===2){
-        let sA=animationData[9].shipPositions[0];
-        let sB=animationData[9].shipPositions[1];
+      // dopasowanie do klatki 9
+      if(animationData.length===10 && animationData[9].shipPositions?.length===2) {
+        let sA = animationData[9].shipPositions[0];
+        let sB = animationData[9].shipPositions[1];
         let b = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
         map.fitBounds(b,{padding:[20,20]});
       }
     })
-    .catch(err=>{
-      console.error("Error loading collision data from GCS:", err);
-    });
+    .catch(err=>console.error("Error /history_data:", err));
 }
 
-// Animacja
-function startAnimation(){
+function startAnimation() {
   if(!animationData || animationData.length===0) return;
   isPlaying=true;
   document.getElementById('playPause').textContent='Pause';
-  animationInterval=setInterval(()=>stepAnimation(1),1000);
+  animationInterval = setInterval(()=> stepAnimation(1), 1000);
 }
-function stopAnimation(){
+function stopAnimation() {
   isPlaying=false;
   document.getElementById('playPause').textContent='Play';
   if(animationInterval) clearInterval(animationInterval);
   animationInterval=null;
 }
-function stepAnimation(step){
-  animationIndex += step;
+function stepAnimation(step) {
+  animationIndex+=step;
   if(animationIndex<0) animationIndex=0;
   if(animationIndex>=animationData.length) animationIndex=animationData.length-1;
   updateMapFrame();
 }
-function updateMapFrame(){
-  const frameIndicator=document.getElementById('frameIndicator');
-  frameIndicator.textContent=`${animationIndex+1}/${animationData.length}`;
+function updateMapFrame() {
+  const frameIndicator = document.getElementById('frameIndicator');
+  frameIndicator.textContent = `${animationIndex+1}/${animationData.length}`;
 
+  // czyścimy stare
   shipMarkersOnMap.forEach(m=>map.removeLayer(m));
   shipMarkersOnMap=[];
 
   if(!animationData || animationData.length===0) return;
-  let frame=animationData[animationIndex];
-  let ships=frame.shipPositions||[];
+  let frame = animationData[animationIndex];
+  let ships = frame.shipPositions||[];
 
-  ships.forEach(s=>{
-    let marker = L.marker([s.lat,s.lon],{
-      icon:createShipIcon(s)
+  ships.forEach(s => {
+    let marker = L.marker([s.lat, s.lon], {
+      icon: createShipIcon(s)
     });
     let nm = s.name||s.mmsi;
     let toolTip=`
       <b>${nm}</b><br>
-      COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)}kn<br>
+      COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)} kn<br>
       Len:${s.ship_length||'Unknown'}
     `;
-    marker.bindTooltip(toolTip,{direction:'top',sticky:true});
+    marker.bindTooltip(toolTip, {direction:'top', sticky:true});
     marker.addTo(map);
     shipMarkersOnMap.push(marker);
   });
-  
-  // W lewym panelu
+
   let leftPanel=document.getElementById('selected-ships-info');
   leftPanel.innerHTML='';
   let pairInfo=document.getElementById('pair-info');
   pairInfo.innerHTML='';
 
-  if(ships.length===2){
+  if(ships.length===2) {
     let sA=ships[0];
     let sB=ships[1];
-    let {cpa, tcpa}=compute_cpa_tcpa_js(sA, sB);
+    // compute cpa/tcpa in JS
+    let { cpa, tcpa } = compute_cpa_tcpa_js(sA, sB);
 
-    // Czas klatki
     let tObj=new Date(frame.time);
     let hh=tObj.getHours().toString().padStart(2,'0');
     let mm=tObj.getMinutes().toString().padStart(2,'0');
     let ss=tObj.getSeconds().toString().padStart(2,'0');
     let timeStr=`${hh}:${mm}:${ss}`;
 
-    if(animationIndex>6){
+    if(animationIndex>6) {
       pairInfo.innerHTML=`
         Time: ${timeStr}<br>
-        Dist now: ${cpa.toFixed(2)} nm
+        Distance now: ${cpa.toFixed(2)} nm
         (Ships are moving apart)
       `;
     } else {
@@ -290,36 +276,35 @@ function updateMapFrame(){
 
     leftPanel.innerHTML=`
       <b>${sA.name||sA.mmsi}</b><br>
-      SOG:${sA.sog.toFixed(1)} kn, COG:${Math.round(sA.cog)}°, L:${sA.ship_length||'?'}<br><br>
+      SOG:${sA.sog.toFixed(1)} kn, COG:${Math.round(sA.cog)}°, L:${sA.ship_length||'N/A'}<br><br>
       <b>${sB.name||sB.mmsi}</b><br>
-      SOG:${sB.sog.toFixed(1)} kn, COG:${Math.round(sB.cog)}°, L:${sB.ship_length||'?'}
+      SOG:${sB.sog.toFixed(1)} kn, COG:${Math.round(sB.cog)}°, L:${sB.ship_length||'N/A'}
     `;
   }
 }
 
-// Pomocnicza – oblicz cpa/tcpa w JS, podobnie jak w "live"
-function compute_cpa_tcpa_js(a,b){
-  // ...
-  // identycznie jak w poprzednich wersjach
-  return {cpa:0.2, tcpa:5.0}; // stub
-}
-
-function createShipIcon(s){
+function createShipIcon(s) {
   let fillColor = getShipColor(s.ship_length);
   let rotation = s.cog||0;
   return L.divIcon({
     className:'',
-    html:`
-      <svg width="18" height="24" viewBox="-9 -9 18 18" style="transform:rotate(${rotation}deg)">
-        <polygon points="0,-7 5,7 -5,7"
-                 fill="${fillColor}" stroke="black" stroke-width="1"/>
-      </svg>
-    `,
+    html: `<svg width="18" height="24" viewBox="-9 -9 18 18"
+                style="transform:rotate(${rotation}deg)">
+             <polygon points="0,-7 5,7 -5,7"
+                      fill="${fillColor}" stroke="black" stroke-width="1"/>
+           </svg>`,
     iconSize:[18,24],
     iconAnchor:[9,9]
   });
 }
-function getShipColor(len){
+
+// prosty cpa/tcpa w JS
+function compute_cpa_tcpa_js(a,b) {
+  // np. identyczny jak w live, tutaj pomijam
+  return { cpa: 0.20, tcpa: 5.0 };
+}
+
+function getShipColor(len) {
   if(!len) return 'gray';
   if(len<50) return 'green';
   if(len<150) return 'yellow';
@@ -327,7 +312,7 @@ function getShipColor(len){
   return 'red';
 }
 
-function exitSituationView(){
+function exitSituationView() {
   inSituationView=false;
   document.getElementById('left-panel').style.display='none';
   document.getElementById('bottom-center-bar').style.display='none';
@@ -338,7 +323,7 @@ function exitSituationView(){
   animationIndex=0;
 }
 
-function clearCollisions(){
+function clearCollisions() {
   collisionMarkers.forEach(m=>map.removeLayer(m));
   collisionMarkers=[];
 }

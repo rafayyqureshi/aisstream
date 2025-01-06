@@ -48,7 +48,6 @@ def compute_cpa_tcpa(ship_a, ship_b):
     dx = xA - xB
     dy = yA - yB
 
-    # nm/h -> m/min
     speedScale = 1852.0 / 60.0
     dvx = (vxA - vxB) * speedScale
     dvy = (vyA - vyB) * speedScale
@@ -64,7 +63,6 @@ def compute_cpa_tcpa(ship_a, ship_b):
     if tcpa < 0:
         return (9999, -1)
 
-    # positions at tcpa
     xA2 = xA + vxA*speedScale*tcpa
     yA2 = yA + vyA*speedScale*tcpa
     xB2 = xB + vxB*speedScale*tcpa
@@ -94,14 +92,14 @@ def ships():
       cog,
       sog,
       timestamp,
-      ANY_VALUE(ship_name) AS ship_name,   -- avoids grouping
+      ANY_VALUE(ship_name) AS ship_name,
       ANY_VALUE(ship_length) AS ship_length
     FROM `ais_dataset_us.ships_positions`
     WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
     GROUP BY mmsi, latitude, longitude, cog, sog, timestamp
     """
-    rows = list(client.query(query).result())
 
+    rows = list(client.query(query).result())
     result = []
     for r in rows:
         result.append({
@@ -165,13 +163,16 @@ def collisions():
 
     rows = list(client.query(query).result())
     result = []
+    # Możemy usunąć duplikaty tej samej pary – np. bierzemy minimum CPA albo ostatni timestamp
+    # Ale tutaj upraszczamy – lub zrobimy w front-endzie.
     for r in rows:
         shipA = r.ship1_name or str(r.mmsi_a)
         shipB = r.ship2_name or str(r.mmsi_b)
         ts = r.timestamp.isoformat() if r.timestamp else None
 
-        # Tworzymy collision_id w stylu "mmsiA_mmsiB_YYYYmmddHHMMSS"
-        collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}" if r.timestamp else None
+        collision_id = None
+        if r.timestamp:
+            collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}"
 
         result.append({
             'collision_id': collision_id,
@@ -185,8 +186,7 @@ def collisions():
             'latitude_b': r.latitude_b,
             'longitude_b': r.longitude_b,
             'ship1_name': shipA,
-            'ship2_name': shipB,
-            # w razie potrzeby: 'ship1_length': ...
+            'ship2_name': shipB
         })
     return jsonify(result)
 
@@ -202,7 +202,8 @@ def calculate_cpa_tcpa():
 
     query = f"""
     SELECT
-      mmsi, latitude, longitude, cog, sog, ANY_VALUE(ship_length) as ship_length
+      mmsi, latitude, longitude, cog, sog,
+      ANY_VALUE(ship_length) as ship_length
     FROM `ais_dataset_us.ships_positions`
     WHERE mmsi IN ({mmsi_a},{mmsi_b})
       AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
@@ -213,7 +214,6 @@ def calculate_cpa_tcpa():
 
     data_by_mmsi = {}
     for r in rows:
-        # Keep only the first (freshest) row for each MMSI
         if r.mmsi not in data_by_mmsi:
             data_by_mmsi[r.mmsi] = {
                 'mmsi': r.mmsi,
@@ -230,7 +230,6 @@ def calculate_cpa_tcpa():
     cpa, tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
-# Optional: /history, /history_collisions, etc., e.g.:
 @app.route('/history')
 def history():
     return render_template('history.html')
@@ -238,15 +237,12 @@ def history():
 @app.route('/history_collisions')
 def history_collisions():
     """
-    Example endpoint to fetch collisions historically (just reusing /collisions or
-    reading from a separate table).
+    Example endpoint to fetch collisions historically with day offset, cpa filter, etc.
     """
     day_offset = int(request.args.get('day', 0))
     max_cpa = float(request.args.get('max_cpa', 0.5))
-    # ignoring tcpa here for brevity
     the_date = (datetime.utcnow() + timedelta(days=day_offset)).date()
-    # or do something advanced with day_offset
-    # for simplicity, we'll just reuse the collisions table with date-based filtering:
+
     query = f"""
     WITH base AS (
       SELECT
@@ -278,11 +274,9 @@ def history_collisions():
             'latitude_a': r.latitude_a,
             'longitude_a': r.longitude_a,
             'latitude_b': r.latitude_b,
-            'longitude_b': r.longitude_b,
-            # ship1_name, ship2_name etc. if needed
+            'longitude_b': r.longitude_b
         })
     return jsonify(result)
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

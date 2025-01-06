@@ -12,9 +12,9 @@ from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
 # --- Parametry kolizji ---
-CPA_THRESHOLD = 0.5      # mile morskie
-TCPA_THRESHOLD = 10.0    # minuty
-STATE_RETENTION_SEC = 30 # ile sekund pamiętamy poprzednie statki w danym geohash
+CPA_THRESHOLD = 0.5       # mile morskie
+TCPA_THRESHOLD = 10.0     # minuty
+STATE_RETENTION_SEC = 30  # ile sekund pamiętamy poprzednie statki w danym geohash
 
 def parse_ais(record: bytes):
     """
@@ -42,7 +42,7 @@ def parse_ais(record: bytes):
         else:
             data["ship_length"] = None
 
-        # geohash – potrzebne tylko do stateful detection, nie chcemy go zapisywać
+        # geohash – tylko do stateful detection, do BQ go nie zapisujemy
         data["geohash"] = data.get("geohash", "none")
 
         return data
@@ -52,7 +52,7 @@ def parse_ais(record: bytes):
 def compute_cpa_tcpa(a, b):
     """
     Oblicza (cpa, tcpa).
-    Zwraca (9999, -1) jeśli statek < 50m lub tcpa < 0.
+    Zwraca (9999, -1), jeśli statki < 50m lub tcpa < 0.
     """
     try:
         la = float(a.get("ship_length") or 0)
@@ -60,7 +60,6 @@ def compute_cpa_tcpa(a, b):
     except:
         return (9999, -1)
 
-    # statki <50m pomijamy
     if la < 50 or lb < 50:
         return (9999, -1)
 
@@ -119,7 +118,7 @@ def compute_cpa_tcpa(a, b):
 
 class CollisionDoFn(beam.DoFn):
     """
-    Stateful DoFn do wykrywania kolizji w obrębie geohash (STATE_RETENTION_SEC).
+    Stateful DoFn do wykrywania kolizji w obrębie tej samej komórki geohash.
     """
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.FastPrimitivesCoder())
 
@@ -130,19 +129,18 @@ class CollisionDoFn(beam.DoFn):
         # Dodaj do stanu
         records_state.add((ship, now_sec))
 
-        # Wczytaj stan
+        # Odczyt
         old_data = list(records_state.read())
         fresh = []
         for (s, t) in old_data:
             if (now_sec - t) <= STATE_RETENTION_SEC:
                 fresh.append((s, t))
 
-        # Oczyść i zapisz jedynie "fresh"
         records_state.clear()
         for (s, t) in fresh:
             records_state.add((s, t))
 
-        # Wykrywanie kolizji
+        # Sprawdź kolizje
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
@@ -160,6 +158,12 @@ class CollisionDoFn(beam.DoFn):
                     "longitude_b": ship["longitude"]
                 }
 
+def remove_geohash(row):
+    # Pomocnicza funkcja usuwająca geohash z rekordu przed zapisem
+    new_row = dict(row)
+    new_row.pop("geohash", None)
+    return new_row
+
 def run():
     logging.getLogger().setLevel(logging.INFO)
 
@@ -170,36 +174,24 @@ def run():
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
     dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
     input_sub = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
-    # collisions_topic = os.getenv("COLLISIONS_TOPIC")
 
     table_positions = f"{project_id}:{dataset}.ships_positions"
     table_collisions = f"{project_id}:{dataset}.collisions"
-
-    # Funkcja do usunięcia klucza 'geohash' przed zapisem do BQ
-    def remove_geohash(row):
-        row2 = dict(row)
-        row2.pop("geohash", None)
-        return row2
 
     with beam.Pipeline(options=pipeline_options) as p:
         # 1) Odczyt z PubSub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # 2) log
-        _ = lines | "LogRawPubSub" >> beam.Map(lambda r: logging.info(f"[DEBUG raw] {r}"))
-
-        # 3) Parsowanie
+        # 2) Parsowanie
         parsed = (
             lines
             | "ParseAIS" >> beam.Map(parse_ais)
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
-        _ = parsed | "LogParsedAIS" >> beam.Map(lambda r: logging.info(f"[DEBUG parsed] {r}"))
 
-        # 4) Usunięcie geohash przed zapisem
+        # 3) Usuwamy geohash i zapisujemy do BQ -> ships_positions
         parsed_for_bq = parsed | "RemoveGeoHash" >> beam.Map(remove_geohash)
 
-        # 5) Zapis do BQ (ships_positions)
         parsed_for_bq | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
             schema=(
@@ -218,14 +210,11 @@ def run():
             custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
         )
 
-        # 6) Wykrywanie kolizji
+        # 4) Wykrywanie kolizji
         keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        # 7) Debug
-        collisions | "LogCollisions" >> beam.Map(lambda c: logging.info(f"[DEBUG collision] {c}"))
-
-        # 8) Zapis do BQ (collisions)
+        # 5) Zapis kolizji do BQ -> collisions
         collisions | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
             schema=(
@@ -245,9 +234,9 @@ def run():
             custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
         )
 
-        # (opcjonalnie) Publikacja kolizji do PubSub:
+        # (opcjonalnie) Publikacja kolizji do PubSub ...
         # collisions_str = collisions | beam.Map(lambda c: json.dumps(c).encode("utf-8"))
-        # collisions_str | beam.io.WriteToPubSub(topic=collisions_topic)
+        # collisions_str | beam.io.WriteToPubSub(topic=...)
 
 if __name__ == "__main__":
     run()
