@@ -1,5 +1,5 @@
 // ==========================
-// app.js (Moduł LIVE) – z splitted circle i filtr duplikatów
+// app.js (Moduł LIVE) – z filtrowaniem przeszłych kolizji
 // ==========================
 let map;
 let markerClusterGroup;
@@ -24,10 +24,11 @@ function initMap() {
     zoom: 5
   });
 
-  // Warstwa OSM
-  const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    maxZoom:18
-  });
+  // Warstwa OSM (podstawowa)
+  const osmLayer = L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom:18 }
+  );
   osmLayer.addTo(map);
 
   // Warstwa nawigacyjna (OpenSeaMap)
@@ -37,10 +38,11 @@ function initMap() {
   );
   openSeaMap.addTo(map);
 
+  // MarkerCluster
   markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
   map.addLayer(markerClusterGroup);
 
-  // UI
+  // UI eventy
   document.getElementById('vectorLengthSlider').addEventListener('input', e=>{
     vectorLength = parseInt(e.target.value) || 15;
     document.getElementById('vectorLengthValue').textContent = vectorLength;
@@ -60,7 +62,7 @@ function initMap() {
     clearSelectedShips();
   });
 
-  // Start
+  // Start fetch
   fetchShips();
   fetchCollisions();
 
@@ -68,7 +70,7 @@ function initMap() {
   collisionsInterval = setInterval(fetchCollisions, 60000);
 }
 
-// 1) Fetcowanie statków
+// =============== Fetcowanie statków ===============
 function fetchShips() {
   fetch(`/ships`)
     .then(r=>r.json())
@@ -76,7 +78,7 @@ function fetchShips() {
     .catch(err=>console.error("Error /ships:", err));
 }
 
-// 2) Fetcowanie kolizji
+// =============== Fetcowanie kolizji ===============
 function fetchCollisions() {
   fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
     .then(r=>r.json())
@@ -87,11 +89,12 @@ function fetchCollisions() {
     .catch(err=>console.error("Error /collisions:", err));
 }
 
-// 3) Update ships
+// =============== Uaktualnianie statków ===============
 function updateShips(shipsArray) {
+  // Zbiór MMSI z fetch
   let currentMmsiSet = new Set(shipsArray.map(s=>s.mmsi));
 
-  // usuwamy stare
+  // Usuwamy statki, których już nie ma
   for(let mmsi in shipMarkers) {
     if(!currentMmsiSet.has(parseInt(mmsi))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -103,13 +106,15 @@ function updateShips(shipsArray) {
     }
   }
 
+  // Dodaj/aktualizuj
   shipsArray.forEach(ship=>{
     const mmsi = ship.mmsi;
-    const length = ship.ship_length||null;
+    const length = ship.ship_length || null;
     const color = getShipColor(length);
-    const rotation = ship.cog||0;
+    const rotation = ship.cog || 0;
     const width=16, height=24;
 
+    // highlight?
     let highlightRect='';
     if(selectedShips.includes(mmsi)){
       highlightRect=`
@@ -118,6 +123,7 @@ function updateShips(shipsArray) {
               stroke-dasharray="5,5"/>
       `;
     }
+
     const shipSvg=`
       <polygon points="0,-8 6,8 -6,8"
                fill="${color}" stroke="black" stroke-width="1"/>
@@ -134,13 +140,13 @@ function updateShips(shipsArray) {
       iconAnchor:[width/2,height/2]
     });
 
-    let marker=shipMarkers[mmsi];
+    let marker = shipMarkers[mmsi];
     // tooltip
     const now=Date.now();
     const updatedAt=new Date(ship.timestamp).getTime();
-    const diffSec=Math.floor((now-updatedAt)/1000);
+    const diffSec=Math.floor((now - updatedAt)/1000);
     const diffMin=Math.floor(diffSec/60);
-    const diffS = diffSec%60;
+    const diffS=diffSec%60;
     const diffStr=`${diffMin}m ${diffS}s ago`;
 
     const tooltipHTML=`
@@ -151,8 +157,8 @@ function updateShips(shipsArray) {
       Updated:${diffStr}
     `;
 
-    if(!marker) {
-      marker=L.marker([ship.latitude, ship.longitude],{icon})
+    if(!marker){
+      marker=L.marker([ship.latitude, ship.longitude], {icon})
         .on('click', ()=>selectShip(mmsi));
       marker.bindTooltip(tooltipHTML,{direction:'top',sticky:true});
       shipMarkers[mmsi]=marker;
@@ -168,7 +174,7 @@ function updateShips(shipsArray) {
   updateSelectedShipsInfo(false);
 }
 
-// get color by length
+// =============== Kolory statków wg długości ===============
 function getShipColor(length){
   if(length===null) return 'grey';
   if(length<50) return 'green';
@@ -177,16 +183,16 @@ function getShipColor(length){
   return 'red';
 }
 
-// 4) Update collisions list
+// =============== Uaktualnianie listy kolizji ===============
 function updateCollisionsList() {
-  const collisionList=document.getElementById('collision-list');
+  const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML='';
 
-  // usuwamy stare markery
+  // Usuwamy stare kolizyjne markery
   collisionMarkers.forEach(m=>map.removeLayer(m));
   collisionMarkers=[];
 
-  if(!collisionsData || collisionsData.length===0) {
+  if(!collisionsData || collisionsData.length===0){
     let div=document.createElement('div');
     div.classList.add('collision-item');
     div.innerHTML='<i>No collisions found</i>';
@@ -194,51 +200,70 @@ function updateCollisionsList() {
     return;
   }
 
-  // usuwanie duplikatów
-  let colMap={};
-  collisionsData.forEach(c=>{
-    // klucz: (mmsi_a, mmsi_b) + np. zaokrąglenie do 1 min w timestamp
-    let tObj=c.timestamp ? new Date(c.timestamp):null;
-    let tMinKey='';
-    if(tObj){
-      let mins=Math.floor(tObj.getTime()/(60*1000)); // min-based
-      tMinKey=`${mins}`;
-    }
-    // ustalamy parę w rosnącej kolejności
-    let a= Math.min(c.mmsi_a,c.mmsi_b);
-    let b= Math.max(c.mmsi_a,c.mmsi_b);
-    let key=`${a}_${b}_${tMinKey}`;
+  // Filtrowanie starych kolizji (np. tcpa < 0) lub sprzed np. 2 minut
+  let nowMs=Date.now();
+  let filtered= collisionsData.filter(c=>{
+    // Mamy c.timestamp: jeżeli stary, to skip
+    if(!c.timestamp) return false;
+    let t=new Date(c.timestamp).getTime();
+    // np. odrzucamy, jeżeli t < now - 2min
+    if(t < nowMs - 2*60*1000) return false;
+    // odrzucamy jeżeli tcpa < 0
+    if(c.tcpa<0) return false;
+    // Mamy c.cpa i c.tcpa – jeżeli c.cpa>0.5 lub c.tcpa>10 – i tak by nie przeszło
+    // ale to i tak jest wyfiltrowane na backendzie parametrami.
+    return true;
+  });
 
-    // zapamiętujemy "najświeższe"
+  // Redukowanie duplikatów – np. klucz (mmsi_a,mmsi_b)
+  let colMap={};
+  filtered.forEach(c=>{
+    // ustalamy klucz dla pary
+    let a=Math.min(c.mmsi_a,c.mmsi_b);
+    let b=Math.max(c.mmsi_a,c.mmsi_b);
+
+    // opcjonalnie można round-ować timestamp do 1 min
+    let timeKey = Math.floor(new Date(c.timestamp).getTime()/(60*1000));
+    let key = `${a}_${b}_${timeKey}`;
     if(!colMap[key]){
       colMap[key]=c;
     } else {
-      // ewentualnie porównywać c.timestamp
+      // ewentualnie decyduj który bardziej aktualny
       // tu ignorujemy
     }
   });
-  let finalCollisions=Object.values(colMap);
+  let finalCollisions= Object.values(colMap);
+
+  if(finalCollisions.length===0){
+    let div=document.createElement('div');
+    div.classList.add('collision-item');
+    div.innerHTML='<i>No current collisions</i>';
+    collisionList.appendChild(div);
+    return;
+  }
 
   finalCollisions.forEach(c=>{
     const shipA=c.ship1_name||c.mmsi_a;
     const shipB=c.ship2_name||c.mmsi_b;
     const cpa=c.cpa.toFixed(2);
     const tcpa=c.tcpa.toFixed(2);
-    const item=document.createElement('div');
+
+    let item=document.createElement('div');
     item.classList.add('collision-item');
 
     // splitted circle
+    // UWAGA: w /collisions parametrach musisz mieć ship_length_a,b
+    // Tu zakładamy, że c zawiera te wartości
     let la=c.ship_length_a||0;
     let lb=c.ship_length_b||0;
     let colorA=getShipColor(la);
     let colorB=getShipColor(lb);
     let splittedCircle=createSplittedCircle(colorA,colorB);
 
-    // tooltip
     let timeStr='';
     if(c.timestamp){
       let dt=new Date(c.timestamp);
-      timeStr=dt.toLocaleTimeString('en-GB');
+      timeStr = dt.toLocaleTimeString('en-GB');
     }
 
     item.innerHTML=`
@@ -246,7 +271,7 @@ function updateCollisionsList() {
         <div>
           ${splittedCircle}
           <strong>${shipA} - ${shipB}</strong><br>
-          CPA:${cpa} nm, TCPA:${tcpa} min @ ${timeStr}
+          CPA: ${cpa} nm, TCPA: ${tcpa} min @ ${timeStr}
         </div>
         <button class="zoom-button">🔍</button>
       </div>
@@ -260,26 +285,27 @@ function updateCollisionsList() {
     let latC=(c.latitude_a + c.latitude_b)/2;
     let lonC=(c.longitude_a + c.longitude_b)/2;
 
-    // większa ikona
     const collisionIcon=L.divIcon({
       className:'',
       html:`
         <svg width="24" height="24" viewBox="-12 -12 24 24">
           <path d="M0,-7 7,7 -7,7 Z"
                 fill="yellow" stroke="red" stroke-width="2"/>
-          <text x="0" y="4" text-anchor="middle" font-size="8" fill="red">!</text>
+          <text x="0" y="4" text-anchor="middle" font-size="8"
+                fill="red">!</text>
         </svg>
       `,
       iconSize:[24,24],
       iconAnchor:[12,12]
     });
-    let marker=L.marker([latC,lonC],{icon:collisionIcon})
+    let marker = L.marker([latC,lonC], {icon:collisionIcon})
       .on('click',()=>zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
   });
 }
 
+// Tworzenie splitted circle
 function createSplittedCircle(colorA,colorB){
   return `
   <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:middle;margin-right:6px;">
@@ -289,6 +315,7 @@ function createSplittedCircle(colorA,colorB){
   `;
 }
 
+// Zoom do kolizji
 function zoomToCollision(c){
   let bounds=L.latLngBounds([
     [c.latitude_a,c.longitude_a],
@@ -301,7 +328,7 @@ function zoomToCollision(c){
 }
 
 // -------------------------------------------------------------------
-// Obsługa zaznaczonych statków
+// Obsługa statków zaznaczonych
 // -------------------------------------------------------------------
 function selectShip(mmsi) {
   if(!selectedShips.includes(mmsi)) {
@@ -350,6 +377,7 @@ function updateSelectedShipsInfo(selectionChanged){
     container.appendChild(div);
   });
 
+  // rysowanie wektora
   for(let m in overlayMarkers){
     overlayMarkers[m].forEach(o=>map.removeLayer(o));
   }
@@ -358,27 +386,28 @@ function updateSelectedShipsInfo(selectionChanged){
   selectedShips.forEach(m=>drawVector(m));
   reloadAllShipIcons();
 
+  // jeżeli mamy 2 statki, pobierz cpa/tcpa
   if(selectedShips.length===2){
-    let mA=selectedShips[0];
-    let mB=selectedShips[1];
-    let sortedPair=[mA,mB].sort((a,b)=>a-b);
-    // pobierz CPA/TCPA
-    fetch(`/calculate_cpa_tcpa?mmsi_a=${sortedPair[0]}&mmsi_b=${sortedPair[1]}`)
+    let [mA,mB]=[selectedShips[0],selectedShips[1]];
+    let sorted=[mA,mB].sort((a,b)=>a-b);
+    fetch(`/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`)
       .then(r=>r.json())
       .then(data=>{
         if(data.error){
-          document.getElementById('pair-info').innerHTML=`<b>CPA/TCPA:</b> N/A`;
-        } else {
-          let cpa= data.cpa>=9999?'n/a': data.cpa.toFixed(2);
-          let tcpa=data.tcpa<0?'n/a': data.tcpa.toFixed(2);
           document.getElementById('pair-info').innerHTML=`
-            <b>CPA/TCPA:</b> ${cpa} nm / ${tcpa} min
+            <b>CPA/TCPA:</b> n/a
+          `;
+        } else {
+          let cpaVal=(data.cpa>=9999)? 'n/a': data.cpa.toFixed(2);
+          let tcpaVal=(data.tcpa<0)? 'n/a': data.tcpa.toFixed(2);
+          document.getElementById('pair-info').innerHTML=`
+            <b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min
           `;
         }
       })
       .catch(err=>{
         console.error(err);
-        document.getElementById('pair-info').innerHTML=`<b>CPA/TCPA:</b> N/A`;
+        document.getElementById('pair-info').innerHTML='<b>CPA/TCPA:</b> n/a';
       });
   }
 }
@@ -387,9 +416,10 @@ function reloadAllShipIcons(){
   for(let m in shipMarkers){
     let marker=shipMarkers[m];
     let sd=marker.shipData;
-    let fillColor=getShipColor(sd.ship_length);
+    let color=getShipColor(sd.ship_length);
     let rotation=sd.cog||0;
     let width=16,height=24;
+
     let highlightRect='';
     if(selectedShips.includes(parseInt(m))){
       highlightRect=`
@@ -398,9 +428,10 @@ function reloadAllShipIcons(){
               stroke-dasharray="5,5"/>
       `;
     }
+
     const shipSvg=`
       <polygon points="0,-8 6,8 -6,8"
-               fill="${fillColor}" stroke="black" stroke-width="1"/>
+               fill="${color}" stroke="black" stroke-width="1"/>
     `;
     const icon=L.divIcon({
       className:'',
@@ -435,10 +466,12 @@ function drawVector(mmsi){
   let endLat=lat+deltaLat;
   let endLon=lon+deltaLon;
 
-  let line=L.polyline([[lat,lon],[endLat,endLon]],{color:'blue',dashArray:'4,4'});
+  let line=L.polyline([[lat,lon],[endLat,endLon]],
+                      {color:'blue',dashArray:'4,4'});
   line.addTo(map);
   if(!overlayMarkers[mmsi]) overlayMarkers[mmsi]=[];
   overlayMarkers[mmsi].push(line);
 }
 
+// Start
 document.addEventListener('DOMContentLoaded', initMap);
