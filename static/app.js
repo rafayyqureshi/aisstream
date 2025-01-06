@@ -1,5 +1,5 @@
 // ==========================
-// app.js (Moduł LIVE) – z filtrowaniem przeszłych kolizji
+// app.js (Moduł LIVE) – z poprawkami w splitted circle i ikonie mapy
 // ==========================
 let map;
 let markerClusterGroup;
@@ -24,7 +24,7 @@ function initMap() {
     zoom: 5
   });
 
-  // Warstwa OSM (podstawowa)
+  // Warstwa OSM
   const osmLayer = L.tileLayer(
     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     { maxZoom:18 }
@@ -203,34 +203,23 @@ function updateCollisionsList() {
   // Filtrowanie starych kolizji (np. tcpa < 0) lub sprzed np. 2 minut
   let nowMs=Date.now();
   let filtered= collisionsData.filter(c=>{
-    // Mamy c.timestamp: jeżeli stary, to skip
     if(!c.timestamp) return false;
     let t=new Date(c.timestamp).getTime();
-    // np. odrzucamy, jeżeli t < now - 2min
-    if(t < nowMs - 2*60*1000) return false;
+    // odrzucamy, jeżeli stary moment kolizji < (teraz - 2min)
+    if(t < nowMs - 120000) return false;
     // odrzucamy jeżeli tcpa < 0
     if(c.tcpa<0) return false;
-    // Mamy c.cpa i c.tcpa – jeżeli c.cpa>0.5 lub c.tcpa>10 – i tak by nie przeszło
-    // ale to i tak jest wyfiltrowane na backendzie parametrami.
     return true;
   });
 
   // Redukowanie duplikatów – np. klucz (mmsi_a,mmsi_b)
   let colMap={};
   filtered.forEach(c=>{
-    // ustalamy klucz dla pary
     let a=Math.min(c.mmsi_a,c.mmsi_b);
     let b=Math.max(c.mmsi_a,c.mmsi_b);
-
-    // opcjonalnie można round-ować timestamp do 1 min
-    let timeKey = Math.floor(new Date(c.timestamp).getTime()/(60*1000));
-    let key = `${a}_${b}_${timeKey}`;
-    if(!colMap[key]){
-      colMap[key]=c;
-    } else {
-      // ewentualnie decyduj który bardziej aktualny
-      // tu ignorujemy
-    }
+    let timeKey=Math.floor(new Date(c.timestamp).getTime()/(60*1000));
+    let key=`${a}_${b}_${timeKey}`;
+    if(!colMap[key]) colMap[key]=c;
   });
   let finalCollisions= Object.values(colMap);
 
@@ -251,9 +240,7 @@ function updateCollisionsList() {
     let item=document.createElement('div');
     item.classList.add('collision-item');
 
-    // splitted circle
-    // UWAGA: w /collisions parametrach musisz mieć ship_length_a,b
-    // Tu zakładamy, że c zawiera te wartości
+    // splitted circle – opieramy się o c.ship_length_a i c.ship_length_b
     let la=c.ship_length_a||0;
     let lb=c.ship_length_b||0;
     let colorA=getShipColor(la);
@@ -291,14 +278,19 @@ function updateCollisionsList() {
         <svg width="24" height="24" viewBox="-12 -12 24 24">
           <path d="M0,-7 7,7 -7,7 Z"
                 fill="yellow" stroke="red" stroke-width="2"/>
-          <text x="0" y="4" text-anchor="middle" font-size="8"
-                fill="red">!</text>
+          <text x="0" y="4" text-anchor="middle" font-size="8" fill="red">!</text>
         </svg>
       `,
       iconSize:[24,24],
       iconAnchor:[12,12]
     });
+
+    // tooltip (collision between X & Y in Z min)
+    const collisionTooltip=`
+      Collision between ${shipA} & ${shipB} in ${tcpa} min
+    `;
     let marker = L.marker([latC,lonC], {icon:collisionIcon})
+      .bindTooltip(collisionTooltip, {direction:'top', sticky:true})
       .on('click',()=>zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
