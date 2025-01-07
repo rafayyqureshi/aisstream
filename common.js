@@ -1,14 +1,12 @@
 //
 // common.js
-//
 // Shared map initialization & visual helpers for both "live" and "history" modules.
 //
 
 /**
  * Create the shared Leaflet map with base layers, seamarks, etc.
- * Returns an object containing { map, markerClusterGroup }.
- *
- * @param {string} elementId - The DOM element ID where the map is placed.
+ * @param {string} elementId - The DOM element ID (default: 'map').
+ * @returns {Object} { map, markerClusterGroup }
  */
 function initSharedMap(elementId = 'map') {
     // 1) Create the main Leaflet map
@@ -19,7 +17,7 @@ function initSharedMap(elementId = 'map') {
   
     // 2) Base OSM layer
     const osmLayer = L.tileLayer(
-      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', 
+      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
       { maxZoom: 18 }
     );
     osmLayer.addTo(map);
@@ -32,9 +30,7 @@ function initSharedMap(elementId = 'map') {
     openSeaMapLayer.addTo(map);
   
     // 4) MarkerCluster
-    const markerClusterGroup = L.markerClusterGroup({
-      maxClusterRadius: 1
-    });
+    const markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
     map.addLayer(markerClusterGroup);
   
     return { map, markerClusterGroup };
@@ -42,12 +38,11 @@ function initSharedMap(elementId = 'map') {
   
   /**
    * Returns a color string for a given ship length.
-   *
-   * @param {number|null} len - The ship length in meters (or null).
-   * @returns {string} - CSS color name or hex.
+   * @param {number|null} len - The ship length.
+   * @returns {string} - CSS color or hex code.
    */
   function getShipColor(len) {
-    if (len == null) return 'gray';
+    if (len === null) return 'gray';
     if (len < 50)   return 'green';
     if (len < 150)  return 'yellow';
     if (len < 250)  return 'orange';
@@ -55,12 +50,10 @@ function initSharedMap(elementId = 'map') {
   }
   
   /**
-   * Creates a splitted circle icon showing two halves of different colors,
-   * used in collisions to represent 2 different ship lengths, etc.
-   *
-   * @param {string} colorA - Left half color
-   * @param {string} colorB - Right half color
-   * @returns {string} - An inline SVG snippet
+   * Creates a splitted circle icon (inline SVG).
+   * @param {string} colorA - left half color
+   * @param {string} colorB - right half color
+   * @returns {string} inline SVG snippet
    */
   function createSplittedCircle(colorA, colorB) {
     return `
@@ -76,6 +69,7 @@ function initSharedMap(elementId = 'map') {
   
   /**
    * Creates a collision exclamation icon as a Leaflet DivIcon.
+   * @returns {L.DivIcon}
    */
   function createCollisionIcon() {
     return L.divIcon({
@@ -94,16 +88,15 @@ function initSharedMap(elementId = 'map') {
   }
   
   /**
-   * Creates a ship icon (Leaflet DivIcon) with rotation, color, highlight if selected, etc.
-   *
-   * @param {object} shipData - The AIS object with { cog, ship_length, ... } etc.
-   * @param {boolean} isSelected - True if we need a highlight rectangle.
-   * @returns {L.DivIcon} - A Leaflet DivIcon for the ship marker.
+   * Creates a ship icon with rotation, color, highlight, etc.
+   * @param {Object} shipData - AIS data
+   * @param {boolean} isSelected - highlight?
+   * @returns {L.DivIcon}
    */
   function createShipIcon(shipData, isSelected = false) {
     const len      = shipData.ship_length || null;
-    const fillColor = getShipColor(len);
-    const rotation  = shipData.cog || 0;
+    const fillColor= getShipColor(len);
+    const rotation = shipData.cog || 0;
   
     const width  = 16;
     const height = 24;
@@ -117,7 +110,6 @@ function initSharedMap(elementId = 'map') {
       `;
     }
   
-    // A simple triangle to represent the ship
     const shipSvg = `
       <polygon points="0,-8 6,8 -6,8"
                fill="${fillColor}" stroke="black" stroke-width="1"/>
@@ -135,33 +127,30 @@ function initSharedMap(elementId = 'map') {
       className: '',
       html: iconHtml,
       iconSize: [width, height],
-      iconAnchor: [width / 2, height / 2]
+      iconAnchor: [width/2, height/2]
     });
   }
   
   /**
-   * Draws a vector line (heading) from the ship's current position
-   * based on SOG/COG for the desired future time in minutes.
-   *
-   * @param {L.Map} map - The Leaflet map instance.
-   * @param {object} shipData - AIS data with {latitude, longitude, sog, cog}.
-   * @param {number} vectorLengthMin - How many minutes into the future.
-   * @returns {L.Polyline} - The new polyline object, or null if missing sog/cog.
+   * Draws a heading vector line from the ship's position for the given minutes.
+   * @param {L.Map} map
+   * @param {Object} shipData - AIS data (lat, lon, sog, cog)
+   * @param {number} vectorLengthMin
+   * @returns {L.Polyline|null}
    */
   function drawVectorLine(map, shipData, vectorLengthMin) {
     const lat = shipData.latitude;
     const lon = shipData.longitude;
     const sog = shipData.sog;
     const cog = shipData.cog;
-  
     if (!sog || !cog) return null;
   
-    const distanceNm = sog * (vectorLengthMin / 60.0); // (nm/h * minutes/60)
-    const cogRad = (cog * Math.PI) / 180.0;
+    const distanceNm = sog * (vectorLengthMin / 60.0);
+    const cogRad     = (cog * Math.PI)/180.0;
   
-    // Compute the end lat/lon, naive approximate
-    const deltaLat = (distanceNm / 60) * Math.cos(cogRad);
-    const deltaLon = (distanceNm / 60) * Math.sin(cogRad) / Math.cos(lat * Math.PI / 180);
+    // approximate
+    const deltaLat = (distanceNm/60) * Math.cos(cogRad);
+    const deltaLon = (distanceNm/60) * Math.sin(cogRad) / Math.cos(lat*Math.PI/180);
   
     const endLat = lat + deltaLat;
     const endLon = lon + deltaLon;
@@ -174,7 +163,7 @@ function initSharedMap(elementId = 'map') {
     return line;
   }
   
-  // Export or attach the functions to the window for usage:
+  // Expose them as global for usage in app.js
   window.initSharedMap       = initSharedMap;
   window.getShipColor        = getShipColor;
   window.createSplittedCircle= createSplittedCircle;

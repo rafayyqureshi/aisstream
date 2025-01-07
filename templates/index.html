@@ -17,7 +17,7 @@
 
   <!-- Leaflet / MarkerCluster JS -->
   <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
-  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.js"></script>
 </head>
 <body>
 
@@ -36,7 +36,7 @@
     <div id="pair-info" style="margin-top:10px; font-weight:bold;"></div>
   </div>
 
-  <!-- Map -->
+  <!-- The map container -->
   <div id="map"></div>
 
   <!-- Right panel -->
@@ -67,7 +67,7 @@
     </div>
   </div>
 
-  <!-- Our scripts -->
+  <!-- IMPORTANT: Load common.js FIRST, then app.js -->
   <script src="{{ url_for('static', filename='common.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
