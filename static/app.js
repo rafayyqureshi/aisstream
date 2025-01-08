@@ -24,7 +24,7 @@ let shipsInterval = null;
 let collisionsInterval = null;
 
 /**
- * Inicjalizacja (wywoływane po DOMContentLoaded).
+ * Funkcja inicjalizująca moduł LIVE (wywoływane po DOMContentLoaded).
  */
 function initLiveApp() {
   // 1) Inicjalizujemy mapę z common.js
@@ -38,6 +38,7 @@ function initLiveApp() {
   document.getElementById('vectorLengthSlider').addEventListener('input', e => {
     vectorLength = parseInt(e.target.value) || 15;
     document.getElementById('vectorLengthValue').textContent = vectorLength;
+    // Odświeżamy wektory i ewentualnie CPA/TCPA dla wybranych statków
     updateSelectedShipsInfo(true);
   });
   document.getElementById('cpaFilter').addEventListener('input', e => {
@@ -52,17 +53,17 @@ function initLiveApp() {
   });
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
 
-  // 4) Pierwsze pobranie
+  // 4) Pierwsze pobranie statków i kolizji
   fetchShips();
   fetchCollisions();
 
-  // 5) Odświeżaj co 60s
+  // 5) Odświeżaj co 60s (lub inny interwał)
   shipsInterval = setInterval(fetchShips, 60000);
   collisionsInterval = setInterval(fetchCollisions, 60000);
 }
 
 // ----------------------------------
-// 1) Statki
+// 1) Pobranie i aktualizacja statków
 // ----------------------------------
 function fetchShips() {
   fetch('/ships')
@@ -75,9 +76,10 @@ function updateShips(shipsArray) {
   // Zbiór MMSI, które mamy w nowym fetchu
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
-  // Usunięcie starych
+  // Usunięcie starych statków
   for (let mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi))) {
+      // Usuwamy marker i ewentualne linie wektorów
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
       delete shipMarkers[mmsi];
       if (overlayMarkers[mmsi]) {
@@ -87,41 +89,42 @@ function updateShips(shipsArray) {
     }
   }
 
-  // Dodanie / aktualizacja
+  // Dodanie / aktualizacja statków z bieżącego pobrania
   shipsArray.forEach(ship => {
     const mmsi = ship.mmsi;
     const isSelected = selectedShips.includes(mmsi);
 
+    // Ikona z common.js
     const icon = createShipIcon(ship, isSelected);
 
-    // tooltip
+    // Tekst do tooltipa
     const now = Date.now();
     const updTs = ship.timestamp ? new Date(ship.timestamp).getTime() : 0;
-    const diffSec = Math.floor((now - updTs)/1000);
-    const mm = Math.floor(diffSec/60);
+    const diffSec = Math.floor((now - updTs) / 1000);
+    const mm = Math.floor(diffSec / 60);
     const ss = diffSec % 60;
     const diffStr = `${mm}m ${ss}s ago`;
 
     const ttHTML = `
-      <b>${ship.ship_name||'Unknown'}</b><br>
+      <b>${ship.ship_name || 'Unknown'}</b><br>
       MMSI: ${mmsi}<br>
-      SOG: ${ship.sog||0} kn, COG: ${ship.cog||0}°<br>
-      Len: ${ship.ship_length||'N/A'}<br>
+      SOG: ${ship.sog || 0} kn, COG: ${ship.cog || 0}°<br>
+      Len: ${ship.ship_length || 'N/A'}<br>
       Updated: ${diffStr}
     `;
 
     let marker = shipMarkers[mmsi];
     if (!marker) {
-      // Nowy
+      // Nowy statek
       marker = L.marker([ship.latitude, ship.longitude], { icon })
         .on('click', () => selectShip(mmsi));
-      marker.bindTooltip(ttHTML, { direction:'top', sticky:true });
+      marker.bindTooltip(ttHTML, { direction: 'top', sticky: true });
       marker.shipData = ship;
 
       shipMarkers[mmsi] = marker;
       markerClusterGroup.addLayer(marker);
     } else {
-      // Aktualizacja
+      // Aktualizacja istniejącego
       marker.setLatLng([ship.latitude, ship.longitude]);
       marker.setIcon(icon);
       marker.setTooltipContent(ttHTML);
@@ -129,11 +132,12 @@ function updateShips(shipsArray) {
     }
   });
 
+  // Odświeżamy ewentualne zaznaczenia i wektory
   updateSelectedShipsInfo(false);
 }
 
 // ----------------------------------
-// 2) Kolizje
+// 2) Pobranie i aktualizacja kolizji
 // ----------------------------------
 function fetchCollisions() {
   fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
@@ -147,19 +151,20 @@ function fetchCollisions() {
 
 /**
  * updateCollisionsList():
- *  - Odfiltrowujemy kolizje, które są nieaktualne (tcpa <0 lub timestamp+tcpa < now).
- *  - Dla każdej pary statków bierzemy *najświeższy* wiersz (max timestamp).
- *  - Rysujemy w panelu + markery na mapie.
+ *  - Odfiltrowujemy kolizje nieaktualne (tcpa < 0, itp.).
+ *  - Dla każdej pary statków bierzemy najświeższy wiersz (max timestamp).
+ *  - Wyświetlamy w panelu + dodajemy markery na mapie.
+ *  - Dodajemy splitted circle (z common.js) na liście kolizji.
  */
 function updateCollisionsList() {
   const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML = '';
 
-  // Usuwamy stare markery kolizyjne
+  // Usuwamy stare markery kolizyjne z mapy
   collisionMarkers.forEach(m => map.removeLayer(m));
   collisionMarkers = [];
 
-  if (!collisionsData || collisionsData.length===0) {
+  if (!collisionsData || collisionsData.length === 0) {
     const noDiv = document.createElement('div');
     noDiv.classList.add('collision-item');
     noDiv.innerHTML = '<i>Brak bieżących kolizji</i>';
@@ -169,17 +174,15 @@ function updateCollisionsList() {
 
   const nowMs = Date.now();
 
-  // 1) Odfiltrowanie:
-  //   - c.tcpa < 0 => minęła się
-  //   - c.timestamp + (c.tcpa w ms) < nowMs => kolizja wydarzyła się w przeszłości
+  // 1) Odfiltrowanie kolizji, które już się skończyły
+  //    (tcpa <0 lub timestamp + tcpa*60k < now).
   let filtered = collisionsData.filter(c => {
-    if (c.tcpa < 0) return false;        // minęły się
-
+    if (c.tcpa < 0) return false;  // statki się rozminęły
     if (c.timestamp) {
-      let collTime = new Date(c.timestamp).getTime(); 
-      let futureCollMs = collTime + c.tcpa*60000; // tcpa w min -> ms
-      if (futureCollMs < nowMs) {
-        // kolizja „powinna była nastąpić” w przeszłości
+      let collTime = new Date(c.timestamp).getTime();
+      let futureMs = collTime + (c.tcpa * 60000); 
+      if (futureMs < nowMs) {
+        // kolizja powinna nastąpić w przeszłości => pomijamy
         return false;
       }
     }
@@ -194,26 +197,24 @@ function updateCollisionsList() {
     return;
   }
 
-  // 2) Grupujemy wg pary (A-B)
-  let mapPairs = {};
+  // 2) Grupowanie wg pary
+  let pairMap = {};
   filtered.forEach(c => {
     let a = Math.min(c.mmsi_a, c.mmsi_b);
     let b = Math.max(c.mmsi_a, c.mmsi_b);
     let key = `${a}_${b}`;
-
-    // Bierzemy wiersz z N A J Ś W I E Ż S Z Y M timestamp
-    if (!mapPairs[key]) {
-      mapPairs[key] = c;
+    if (!pairMap[key]) {
+      pairMap[key] = c;
     } else {
-      // porównaj timestamp
-      let oldT = new Date(mapPairs[key].timestamp).getTime();
+      // Wybieramy nowszy (większy timestamp)
+      let oldT = new Date(pairMap[key].timestamp).getTime();
       let newT = new Date(c.timestamp).getTime();
       if (newT > oldT) {
-        mapPairs[key] = c;  // nowszy wiersz
+        pairMap[key] = c;
       }
     }
   });
-  let finalCollisions = Object.values(mapPairs);
+  const finalCollisions = Object.values(pairMap);
 
   if (finalCollisions.length === 0) {
     const d2 = document.createElement('div');
@@ -223,27 +224,37 @@ function updateCollisionsList() {
     return;
   }
 
-  // 3) Wyświetlamy
+  // 3) Wyświetlenie w panelu + markery
   finalCollisions.forEach(c => {
     let shipA = c.ship1_name || c.mmsi_a;
     let shipB = c.ship2_name || c.mmsi_b;
     let cpaStr = c.cpa.toFixed(2);
     let tcpaStr= c.tcpa.toFixed(2);
 
+    // Splitted circle: kolory wg ship_length_a i ship_length_b
+    const la = c.ship_length_a || 0;
+    const lb = c.ship_length_b || 0;
+    const colorA = getShipColor(la);
+    const colorB = getShipColor(lb);
+    const splittedCircle = createSplittedCircle(colorA, colorB);
+
     let timeStr = '';
     if (c.timestamp) {
       let d = new Date(c.timestamp);
+      // Godzina wg pl-PL, 24h
       timeStr = d.toLocaleTimeString('pl-PL', { hour12:false });
     }
 
+    // Tworzymy item
     const item = document.createElement('div');
     item.classList.add('collision-item');
     item.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
+          ${splittedCircle}
           <strong>${shipA} – ${shipB}</strong><br>
           CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min
-          ${timeStr ? '@ ' + timeStr : ''}
+          ${ timeStr ? '@ ' + timeStr : '' }
         </div>
         <button class="zoom-button">🔍</button>
       </div>
@@ -255,12 +266,12 @@ function updateCollisionsList() {
       zoomToCollision(c);
     });
 
-    // Ikona kolizji
-    let latC = (c.latitude_a + c.latitude_b)/2;
-    let lonC = (c.longitude_a + c.longitude_b)/2;
+    // Marker kolizji
+    let latC = (c.latitude_a + c.latitude_b) / 2;
+    let lonC = (c.longitude_a + c.longitude_b) / 2;
 
     const collisionIcon = L.divIcon({
-      className:'',
+      className: '',
       html: `
         <svg width="24" height="24" viewBox="-12 -12 24 24">
           <path d="M0,-7 7,7 -7,7 Z"
@@ -269,8 +280,8 @@ function updateCollisionsList() {
                 font-size="8" fill="red">!</text>
         </svg>
       `,
-      iconSize: [24,24],
-      iconAnchor: [12,12]
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
     });
 
     const tip = `Możliwa kolizja: ${shipA} & ${shipB}, w ok. ${tcpaStr} min`;
@@ -336,10 +347,10 @@ function updateSelectedShipsInfo(selectionChanged) {
   sData.forEach(sd => {
     let div = document.createElement('div');
     div.innerHTML = `
-      <b>${sd.ship_name||'Unknown'}</b><br>
+      <b>${sd.ship_name || 'Unknown'}</b><br>
       MMSI: ${sd.mmsi}<br>
-      SOG: ${sd.sog||0} kn, COG: ${sd.cog||0}°<br>
-      Len: ${sd.ship_length||'N/A'}
+      SOG: ${sd.sog || 0} kn, COG: ${sd.cog || 0}°<br>
+      Len: ${sd.ship_length || 'N/A'}
     `;
     panel.appendChild(div);
   });
@@ -365,8 +376,8 @@ function updateSelectedShipsInfo(selectionChanged) {
             `<b>CPA/TCPA:</b> N/A (${data.error})`;
         } else {
           let cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
-          let tcpaVal= (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
-          document.getElementById('pair-info').innerHTML=`
+          let tcpaVal = (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
+          document.getElementById('pair-info').innerHTML = `
             <b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min
           `;
         }
@@ -391,16 +402,17 @@ function drawVector(mmsi) {
   let sog = sd.sog;  // nm/h
   let cogDeg = sd.cog;
 
-  let distNm = sog * (vectorLength/60);
-  let cogRad = (cogDeg*Math.PI)/180;
-  let dLat = (distNm/60)*Math.cos(cogRad);
-  let dLon = (distNm/60)*Math.sin(cogRad)/Math.cos(lat*Math.PI/180);
+  let distNm = sog * (vectorLength / 60);
+  let cogRad = (cogDeg * Math.PI) / 180;
+  let dLat = (distNm / 60) * Math.cos(cogRad);
+  let dLon = (distNm / 60) * Math.sin(cogRad) / Math.cos(lat * Math.PI / 180);
 
   let endLat = lat + dLat;
   let endLon = lon + dLon;
 
-  let line = L.polyline([[lat,lon],[endLat,endLon]], {
-    color:'blue', dashArray:'4,4'
+  let line = L.polyline([[lat, lon], [endLat, endLon]], {
+    color: 'blue',
+    dashArray: '4,4'
   });
   line.addTo(map);
   if (!overlayMarkers[mmsi]) overlayMarkers[mmsi] = [];
