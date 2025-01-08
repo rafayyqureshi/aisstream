@@ -240,8 +240,12 @@ def run():
         )
 
         # 6) (opcjonalnie) publikacja do PubSub collisions-topic...
-        # collisions_str = collisions | beam.Map(lambda x: json.dumps(x).encode("utf-8"))
-        # collisions_str | beam.io.WriteToPubSub( ... )
+     
+        collisions_str = (
+            collisions
+            | "CollisionsToJson" >> beam.Map(lambda c: json.dumps(c).encode("utf-8"))
+        )
+        collisions_str | "PublishCollisions" >> beam.io.WriteToPubSub(topic=collisions_topic)
 
 if __name__ == "__main__":
     run()
