@@ -121,10 +121,10 @@ function createSplittedCircle(colorA, colorB) {
     <svg width="16" height="16" viewBox="0 0 16 16" 
          style="vertical-align:middle; margin-right:6px;">
       <!-- lewa połówka -->
-      <path d="M8,8 m-8,0 a8,8 0 0,1 16,0 z" fill="${colorA}"/>
+      <path d="M8,8 m0-8 a8,8 0 0,1 0,16 z" fill="${colorA}"/>
       <!-- prawa połówka -->
-      <path d="M8,8 m8,0 a8,8 0 0,1 -16,0 z" fill="${colorB}"/>
-    </svg>
+      <path d="M8,8 m0,8 a8,8 0 0,1 0,-16 z" fill="${colorB}"/>
+      </svg>
   `;
 }
 

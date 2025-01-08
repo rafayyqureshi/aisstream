@@ -297,7 +297,21 @@ function zoomToCollision(c) {
     [c.latitude_a, c.longitude_a],
     [c.latitude_b, c.longitude_b]
   ]);
-  map.fitBounds(bounds, { padding:[20,20] });
+
+  // 1) Mniejszy padding i/lub maxZoom
+  map.fitBounds(bounds, {
+    padding: [15, 15],
+    maxZoom: 13  // przykładowo
+  });
+
+  // 2) Jeśli c.tcpa > 0, ustawiamy vectorLength
+  if (c.tcpa && c.tcpa > 0 && c.tcpa < 9999) {
+    vectorLength = Math.round(c.tcpa);
+    // wywołujemy update, aby wektory się zaktualizowały
+    updateSelectedShipsInfo(true);
+  }
+
+  // 3) Reszta bez zmian
   clearSelectedShips();
   selectShip(c.mmsi_a);
   selectShip(c.mmsi_b);

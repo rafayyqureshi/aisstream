@@ -8,15 +8,16 @@ import datetime
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
+from google.cloud import bigquery
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
 # Parametry kolizji
-CPA_THRESHOLD = 0.5       # mile morskie
-TCPA_THRESHOLD = 10.0     # minuty
-STATE_RETENTION_SEC = 30  # ile sekund pamiętamy statki w danym geohash
-OLD_COLLISION_MINUTES = 5 # od ilu minut uznajemy kolizje za starą
+CPA_THRESHOLD = 0.5         # mile morskie
+TCPA_THRESHOLD = 10.0       # minuty
+STATE_RETENTION_SEC = 120   # wydłużamy do 120s (2 min), by potok dłużej śledził parę
+# OLD_COLLISION_MINUTES = 5 # usuwamy/wyłączamy, żeby BQ nie „obcinał” starych wierszy
 
 def parse_ais(record: bytes):
     """
@@ -44,7 +45,7 @@ def parse_ais(record: bytes):
                 pass
         data["ship_length"] = ship_len
 
-        # geohash – do stateful detection (nie zapisujemy w BQ)
+        # geohash – do stateful detection
         data["geohash"] = data.get("geohash", "none")
 
         return data
@@ -54,7 +55,7 @@ def parse_ais(record: bytes):
 def compute_cpa_tcpa(a, b):
     """
     Oblicza (cpa, tcpa).
-    Zwraca (9999, -1) jeśli statki <50m lub tcpa <0.
+    Zwraca (9999, -1) jeśli statki <50m lub tcpa < 0.
     """
     try:
         la = float(a.get("ship_length") or 0)
@@ -93,7 +94,7 @@ def compute_cpa_tcpa(a, b):
     dvy_mpm = (vyA - vyB) * speed_scale
 
     VV = dvx_mpm**2 + dvy_mpm**2
-    PV = dx*dvx_mpm + dy*dvy_mpm
+    PV = dx * dvx_mpm + dy * dvy_mpm
 
     if VV == 0:
         tcpa = 0.0
@@ -103,6 +104,7 @@ def compute_cpa_tcpa(a, b):
     if tcpa < 0:
         return (9999, -1)
 
+    # Pozycje przy CPA
     vxA_mpm = vxA * speed_scale
     vyA_mpm = vyA * speed_scale
     vxB_mpm = vxB * speed_scale
@@ -124,20 +126,19 @@ class CollisionDoFn(beam.DoFn):
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.FastPrimitivesCoder())
 
     def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
-        geohash, ship = element
+        gh, ship = element
         now_sec = time.time()
 
         # Dodaj nowy statek do stanu
         records_state.add((ship, now_sec))
 
-        # Przeczytaj stan
+        # Odczyt stanu
         old_list = list(records_state.read())
         fresh = []
         for (s, t) in old_list:
             if (now_sec - t) <= STATE_RETENTION_SEC:
                 fresh.append((s, t))
 
-        # Wyczyść i zapisz tylko świeże
         records_state.clear()
         for (s, t) in fresh:
             records_state.add((s, t))
@@ -163,35 +164,10 @@ class CollisionDoFn(beam.DoFn):
                 }
 
 def remove_geohash(row):
+    # Usuwamy klucz "geohash" przed zapisem do ships_positions
     new_row = dict(row)
     new_row.pop("geohash", None)
     return new_row
-
-def filter_old_collisions(row):
-    """
-    Odrzucamy kolizje, które:
-      - mają timestamp starszy niż X minut (np. 5) od 'teraz'
-      - mają tcpa <0 (czyli statki rozminęły się)
-    """
-    try:
-        # parse timestamp do obiektu datetime
-        ts_str = row["timestamp"]
-        coll_ts = datetime.datetime.fromisoformat(ts_str.replace("Z",""))
-        now = datetime.datetime.utcnow()
-
-        # ile minut od 'teraz' do coll_ts
-        diff_min = (now - coll_ts).total_seconds() / 60.0
-        if diff_min > OLD_COLLISION_MINUTES:
-            return False
-
-        # jeśli cpa i tcpa > 0, sprawdzimy
-        if row.get("tcpa", -1) < 0:
-            return False
-    except:
-        # w razie błędu – odrzucamy
-        return False
-
-    return True
 
 def run():
     logging.getLogger().setLevel(logging.INFO)
@@ -200,14 +176,14 @@ def run():
 
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
     dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
-    input_sub = os.getenv("INPUT_SUBSCRIPTION",
+    input_sub = os.getenv("INPUT_SUBSCRIPTION", 
                           "projects/ais-collision-detection/subscriptions/ais-data-sub")
 
     table_positions = f"{project_id}:{dataset}.ships_positions"
     table_collisions = f"{project_id}:{dataset}.collisions"
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # 1) Odczyt PubSub
+        # 1) Odczyt AIS z PubSub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
         # 2) Parsowanie
@@ -217,7 +193,7 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 3) Zapis do BQ -> ships_positions
+        # 3) Zapis statków do BQ
         parsed_for_bq = parsed | "RemoveGeoHash" >> beam.Map(remove_geohash)
         parsed_for_bq | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
@@ -234,17 +210,15 @@ def run():
             create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             additional_bq_parameters={"location": "us-east1"},
-            custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
         )
 
-        # 4) Detekcja kolizji
+        # 4) Wykrywanie kolizji
         keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
-        collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
+        collisions = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
+        # Uwaga: rezygnujemy z filtra starych kolizji, by BQ mogło gromadzić
+        # i będziemy filtrować dopiero w front-endzie
 
-        # 5) Filtrowanie kolizji starych / nieaktualnych
-        collisions = collisions_raw | "FilterOldCollisions" >> beam.Filter(filter_old_collisions)
-
-        # 6) Zapis do BQ -> collisions
+        # 5) Zapis kolizji do BQ
         collisions | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
             schema=(
@@ -263,12 +237,11 @@ def run():
             create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             additional_bq_parameters={"location": "us-east1"},
-            custom_gcs_temp_location="gs://ais-collision-detection-bucket/temp_bq"
         )
 
-        # (opcjonalnie) Publikacja do PubSub collisions-topic
-        # collisions_str = collisions | "CollisionsToJson" >> beam.Map(lambda x: json.dumps(x).encode("utf-8"))
-        # collisions_str | "PublishCollisions" >> beam.io.WriteToPubSub(topic="projects/XXX/topics/collisions-topic")
+        # 6) (opcjonalnie) publikacja do PubSub collisions-topic...
+        # collisions_str = collisions | beam.Map(lambda x: json.dumps(x).encode("utf-8"))
+        # collisions_str | beam.io.WriteToPubSub( ... )
 
 if __name__ == "__main__":
     run()
