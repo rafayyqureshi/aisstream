@@ -231,11 +231,18 @@ function updateCollisionsList() {
     let cpaStr = c.cpa.toFixed(2);
     let tcpaStr= c.tcpa.toFixed(2);
 
-    // Splitted circle: kolory wg ship_length_a i ship_length_b
-    const la = c.ship_length_a || 0;
-    const lb = c.ship_length_b || 0;
+    // Spróbujmy zapewnić, że mamy liczby
+    const la = (typeof c.ship_length_a === 'number')
+                 ? c.ship_length_a
+                 : parseFloat(c.ship_length_a) || 0;
+    const lb = (typeof c.ship_length_b === 'number')
+                 ? c.ship_length_b
+                 : parseFloat(c.ship_length_b) || 0;
+
+    // Kolory z getShipColor
     const colorA = getShipColor(la);
     const colorB = getShipColor(lb);
+    // splitted circle
     const splittedCircle = createSplittedCircle(colorA, colorB);
 
     let timeStr = '';
@@ -245,7 +252,6 @@ function updateCollisionsList() {
       timeStr = d.toLocaleTimeString('pl-PL', { hour12:false });
     }
 
-    // Tworzymy item
     const item = document.createElement('div');
     item.classList.add('collision-item');
     item.innerHTML = `

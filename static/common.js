@@ -41,7 +41,7 @@ function initSharedMap(mapContainerId) {
  *    Zwraca kolor (string) zależny od długości statku.
  */
 function getShipColor(lengthValue) {
-  if (lengthValue === null) return 'gray';  // brak info
+  if (lengthValue === null || Number.isNaN(lengthValue)) return 'gray';  // brak info
   if (lengthValue < 50)   return 'green';
   if (lengthValue < 150)  return 'yellow';
   if (lengthValue < 250)  return 'orange';
@@ -69,7 +69,12 @@ function getShipScaleByColor(color) {
  *    i ewentualnym highlightem, jeśli isSelected=true.
  */
 function createShipIcon(shipData, isSelected) {
-  const color = getShipColor(shipData.ship_length || null);
+  // Upewnijmy się, że mamy liczbę
+  const lenVal = (typeof shipData.ship_length === 'number')
+                   ? shipData.ship_length
+                   : parseFloat(shipData.ship_length) || null;
+
+  const color = getShipColor(lenVal);
   const scaleFactor = getShipScaleByColor(color);
 
   // Główny kształt (trójkąt “w górę”)
@@ -117,18 +122,13 @@ function createShipIcon(shipData, isSelected) {
 
 /**
  * createSplittedCircle(colorA, colorB)
- *    Generuje kod SVG z kółkiem podzielonym na dwie połówki:
- *    lewą w kolorze colorA i prawą w kolorze colorB.
- *    Zwraca HTML (string), który można wstawić do item.innerHTML.
- *
- * @param {string} colorA - kolor lewej połówki
- * @param {string} colorB - kolor prawej połówki
- * @returns {string} - kod SVG
+ *    Tworzy małe kółko podzielone na pół pionowo, wypełnione colorA i colorB.
+ *    Używane np. w liście kolizji, aby pokazać kolory (długości) dwóch statków.
  */
 function createSplittedCircle(colorA, colorB) {
   return `
     <svg width="16" height="16" viewBox="0 0 16 16"
-         style="vertical-align:middle; margin-right:6px;">
+         style="vertical-align:middle;margin-right:6px;">
       <!-- lewa połówka -->
       <path d="M8,8 m-8,0 a8,8 0 0,1 16,0 z" fill="${colorA}"/>
       <!-- prawa połówka -->
@@ -137,8 +137,8 @@ function createSplittedCircle(colorA, colorB) {
   `;
 }
 
-// Eksportujemy do globalnego obiektu:
+// Eksport symboli w globalnym obiekcie (jeśli używasz script <script>):
 window.initSharedMap = initSharedMap;
 window.createShipIcon = createShipIcon;
-window.getShipColor = getShipColor;
+window.getShipColor   = getShipColor;
 window.createSplittedCircle = createSplittedCircle;
