@@ -225,33 +225,132 @@ function updateCollisionsList() {
   }
 
   // 3) Wyświetlenie w panelu + markery
+  // ==========================
+// app.js (moduł LIVE)
+// ==========================
+
+document.addEventListener('DOMContentLoaded', initLiveApp);
+
+let map;
+let markerClusterGroup;
+let shipMarkers = {};       // klucz: mmsi -> L.marker
+let overlayMarkers = {};    // klucz: mmsi -> [list of polylines]
+let selectedShips = [];
+
+// Tablica kolizji i markerów kolizyjnych
+let collisionsData = [];
+let collisionMarkers = [];
+
+// Parametry suwaków
+let vectorLength = 15;
+let cpaFilter = 0.5;
+let tcpaFilter = 10;
+
+// Interval
+let shipsInterval = null;
+let collisionsInterval = null;
+
+function initLiveApp() {
+  // 1) Mapa z common.js
+  map = initSharedMap('map');
+
+  // 2) Warstwa klastrująca
+  markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
+  map.addLayer(markerClusterGroup);
+
+  // 3) UI
+  document.getElementById('vectorLengthSlider').addEventListener('input', e => {
+    vectorLength = parseInt(e.target.value) || 15;
+    document.getElementById('vectorLengthValue').textContent = vectorLength;
+    updateSelectedShipsInfo(true);
+  });
+  document.getElementById('cpaFilter').addEventListener('input', e => {
+    cpaFilter = parseFloat(e.target.value) || 0.5;
+    document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
+    fetchCollisions();
+  });
+  document.getElementById('tcpaFilter').addEventListener('input', e => {
+    tcpaFilter = parseFloat(e.target.value) || 10;
+    document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
+    fetchCollisions();
+  });
+  document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
+
+  // 4) Startowe fetch
+  fetchShips();
+  fetchCollisions();
+
+  // 5) Interval
+  shipsInterval = setInterval(fetchShips, 60000);
+  collisionsInterval = setInterval(fetchCollisions, 60000);
+}
+
+// (reszta fetchShips / updateShips identyczna jak wcześniej) 
+// ...
+
+function fetchCollisions() {
+  fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
+    .then(r => r.json())
+    .then(data => {
+      collisionsData = data || [];
+      updateCollisionsList();
+    })
+    .catch(err => console.error("Błąd /collisions:", err));
+}
+
+function updateCollisionsList() {
+  const collisionList = document.getElementById('collision-list');
+  collisionList.innerHTML = '';
+  collisionMarkers.forEach(m => map.removeLayer(m));
+  collisionMarkers = [];
+
+  if (!collisionsData || collisionsData.length===0) {
+    let noItem = document.createElement('div');
+    noItem.classList.add('collision-item');
+    noItem.innerHTML = '<i>Brak bieżących kolizji</i>';
+    collisionList.appendChild(noItem);
+    return;
+  }
+
+  // Filtr, grupowanie wg pary itd. (jak w Twoim kodzie)
+  // ... np. finalCollisions to tablica
+  let finalCollisions = doYourFilteringAndGrouping(collisionsData);
+
+  if (finalCollisions.length===0) {
+    let divNo = document.createElement('div');
+    divNo.classList.add('collision-item');
+    divNo.innerHTML = '<i>Brak bieżących kolizji</i>';
+    collisionList.appendChild(divNo);
+    return;
+  }
+
   finalCollisions.forEach(c => {
-    let shipA = c.ship1_name || c.mmsi_a;
-    let shipB = c.ship2_name || c.mmsi_b;
-    let cpaStr = c.cpa.toFixed(2);
-    let tcpaStr= c.tcpa.toFixed(2);
+    const shipA = c.ship1_name || c.mmsi_a;
+    const shipB = c.ship2_name || c.mmsi_b;
+    const cpaStr = c.cpa.toFixed(2);
+    const tcpaStr= c.tcpa.toFixed(2);
 
-    // Spróbujmy zapewnić, że mamy liczby
-    const la = (typeof c.ship_length_a === 'number')
-                 ? c.ship_length_a
-                 : parseFloat(c.ship_length_a) || 0;
-    const lb = (typeof c.ship_length_b === 'number')
-                 ? c.ship_length_b
-                 : parseFloat(c.ship_length_b) || 0;
+    // Ustalmy splitted circle, wykorzystując getCollisionSplitCircle z common.js
+    // Przekazujemy:
+    //  - mmsi_a, mmsi_b
+    //  - fallbackLenA, fallbackLenB (np. c.ship_length_a, c.ship_length_b)
+    //  - shipMarkers (z tego pliku)
+    const splittedCircle = getCollisionSplitCircle(
+      c.mmsi_a,
+      c.mmsi_b,
+      c.ship_length_a,
+      c.ship_length_b,
+      shipMarkers
+    );
 
-    // Kolory z getShipColor
-    const colorA = getShipColor(la);
-    const colorB = getShipColor(lb);
-    // splitted circle
-    const splittedCircle = createSplittedCircle(colorA, colorB);
-
-    let timeStr = '';
+    // Czas
+    let timeStr='';
     if (c.timestamp) {
       let d = new Date(c.timestamp);
-      // Godzina wg pl-PL, 24h
       timeStr = d.toLocaleTimeString('pl-PL', { hour12:false });
     }
 
+    // Tworzymy item
     const item = document.createElement('div');
     item.classList.add('collision-item');
     item.innerHTML = `
@@ -260,12 +359,45 @@ function updateCollisionsList() {
           ${splittedCircle}
           <strong>${shipA} – ${shipB}</strong><br>
           CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min
-          ${ timeStr ? '@ ' + timeStr : '' }
+          ${timeStr ? '@ '+ timeStr : ''}
         </div>
         <button class="zoom-button">🔍</button>
       </div>
     `;
     collisionList.appendChild(item);
+
+    // Zoom onclick
+    item.querySelector('.zoom-button').addEventListener('click',()=>{
+      zoomToCollision(c);
+    });
+
+    // Marker kolizji
+    let latC = (c.latitude_a + c.latitude_b)/2;
+    let lonC = (c.longitude_a + c.longitude_b)/2;
+
+    const collisionIcon = L.divIcon({
+      className:'',
+      html: `
+        <svg width="24" height="24" viewBox="-12 -12 24 24">
+          <path d="M0,-7 7,7 -7,7 Z"
+                fill="yellow" stroke="red" stroke-width="2"/>
+          <text x="0" y="4" text-anchor="middle"
+                font-size="8" fill="red">!</text>
+        </svg>
+      `,
+      iconSize:[24,24],
+      iconAnchor:[12,12]
+    });
+
+    const tip = `Możliwa kolizja: ${shipA} & ${shipB} (TCPA: ${tcpaStr} min)`;
+    const marker = L.marker([latC, lonC], { icon: collisionIcon })
+      .bindTooltip(tip, { direction:'top', sticky:true })
+      .on('click', () => zoomToCollision(c));
+    marker.addTo(map);
+    collisionMarkers.push(marker);
+  });
+}
+
 
     // Zoom
     item.querySelector('.zoom-button').addEventListener('click', () => {
@@ -296,8 +428,7 @@ function updateCollisionsList() {
       .on('click', () => zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
-  });
-}
+  }
 
 // ------------------ Zoom do kolizji ------------------
 function zoomToCollision(c) {

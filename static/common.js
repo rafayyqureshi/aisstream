@@ -1,17 +1,14 @@
 //
 // common.js
 //
-// Ten plik zawiera wspólny kod związany z mapą (wizualne aspekty, style, ikony statków itd.)
-// używany zarówno przez moduł “live”, jak i “history”.
+// Zawiera wspólne funkcje i logikę wizualizacji, 
+// używane przez "live" (app.js) i w przyszłości przez "history".
 //
 
 /**
- * initSharedMap(mapContainerId)
- *    Funkcja pomocnicza do inicjalizacji mapy Leaflet
- *    z domyślnymi warstwami (OSM, OpenSeaMap).
- *
- * @param {string} mapContainerId - ID elementu DOM dla mapy
- * @returns {L.Map} - obiekt mapy Leaflet
+ * Inicjalizacja mapy Leaflet z warstwami bazowymi OSM i OpenSeaMap.
+ * @param {string} mapContainerId - ID elementu DOM, w którym osadzamy mapę
+ * @returns {L.Map} - obiekt mapy
  */
 function initSharedMap(mapContainerId) {
   const map = L.map(mapContainerId, {
@@ -26,7 +23,7 @@ function initSharedMap(mapContainerId) {
   );
   osmLayer.addTo(map);
 
-  // Opcjonalna warstwa nawigacyjna (OpenSeaMap)
+  // Warstwa nawigacyjna (OpenSeaMap) - opcjonalna
   const openSeaMapLayer = L.tileLayer(
     'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
     { maxZoom: 18, opacity: 0.8 }
@@ -37,11 +34,11 @@ function initSharedMap(mapContainerId) {
 }
 
 /**
- * getShipColor(lengthValue)
- *    Zwraca kolor (string) zależny od długości statku.
+ * getShipColor(lengthValue):
+ *  Zwraca kolor zależny od długości (green, yellow, orange, red, grey).
  */
 function getShipColor(lengthValue) {
-  if (lengthValue === null || Number.isNaN(lengthValue)) return 'gray';  // brak info
+  if (lengthValue === null || isNaN(lengthValue)) return 'gray';
   if (lengthValue < 50)   return 'green';
   if (lengthValue < 150)  return 'yellow';
   if (lengthValue < 250)  return 'orange';
@@ -49,8 +46,8 @@ function getShipColor(lengthValue) {
 }
 
 /**
- * getShipScaleByColor(color)
- *    Zwraca współczynnik skalowania ikony zależnie od koloru.
+ * getShipScaleByColor(color):
+ *  Zwraca skalę rysowania ikony statku zależną od koloru
  */
 function getShipScaleByColor(color) {
   switch (color) {
@@ -58,32 +55,26 @@ function getShipScaleByColor(color) {
     case 'yellow': return 1.0;
     case 'orange': return 1.2;
     case 'red':    return 1.4;
-    case 'gray':
-    default:       return 1.0;
+    default:       return 1.0; // 'gray'
   }
 }
 
 /**
- * createShipIcon(shipData, isSelected)
- *    Tworzy ikonę (L.DivIcon) statku z kolorem zależnym od długości
- *    i ewentualnym highlightem, jeśli isSelected=true.
+ * createShipIcon(shipData, isSelected):
+ *  Tworzy ikonę statku (L.DivIcon) z kolorem zależnym od shipData.ship_length.
+ *  Jeśli isSelected=true, dodaje highlight rectangle wokół statku.
  */
 function createShipIcon(shipData, isSelected) {
-  // Upewnijmy się, że mamy liczbę
-  const lenVal = (typeof shipData.ship_length === 'number')
-                   ? shipData.ship_length
-                   : parseFloat(shipData.ship_length) || null;
-
-  const color = getShipColor(lenVal);
+  const lengthVal = parseFloat(shipData.ship_length) || null;  
+  const color = getShipColor(lengthVal);
   const scaleFactor = getShipScaleByColor(color);
 
-  // Główny kształt (trójkąt “w górę”)
   const rotationDeg = shipData.cog || 0;
-  const baseTrianglePoints = "0,-8 6,8 -6,8";
+  const basePoints = "0,-8 6,8 -6,8";  // trójkąt
 
-  // Dodatkowe highlight, jeśli zaznaczony
   let highlightRect = '';
   if (isSelected) {
+    // bounding box o wielkości ~16x16 (skalowane scaleFactor)
     const halfW = 8 * scaleFactor;
     const rectX = -halfW - 2;
     const rectSize = (halfW * 2) + 4;
@@ -97,38 +88,38 @@ function createShipIcon(shipData, isSelected) {
     `;
   }
 
-  const svgWidth = 32, svgHeight = 32;
+  const svgW = 32, svgH = 32;
   const halfSvg = 16;
-
   const svgHTML = `
-    <svg width="${svgWidth}" height="${svgHeight}" viewBox="0 0 32 32">
+    <svg width="${svgW}" height="${svgH}" viewBox="0 0 32 32">
       <g transform="translate(16,16) scale(${scaleFactor}) rotate(${rotationDeg})">
         ${highlightRect}
         <polygon
-          points="${baseTrianglePoints}"
-          fill="${color}" stroke="black" stroke-width="1"
+          points="${basePoints}"
+          fill="${color}"
+          stroke="black"
+          stroke-width="1"
         />
       </g>
     </svg>
   `;
-
   return L.divIcon({
     className: '',
     html: svgHTML,
-    iconSize: [svgWidth, svgHeight],
+    iconSize: [svgW, svgH],
     iconAnchor: [halfSvg, halfSvg]
   });
 }
 
 /**
- * createSplittedCircle(colorA, colorB)
- *    Tworzy małe kółko podzielone na pół pionowo, wypełnione colorA i colorB.
- *    Używane np. w liście kolizji, aby pokazać kolory (długości) dwóch statków.
+ * createSplittedCircle(colorA, colorB):
+ *  Generuje kod SVG okręgu podzielonego pionowo na dwie połówki w barwach colorA i colorB.
+ *  Używamy do listy kolizji. 
  */
 function createSplittedCircle(colorA, colorB) {
   return `
-    <svg width="16" height="16" viewBox="0 0 16 16"
-         style="vertical-align:middle;margin-right:6px;">
+    <svg width="16" height="16" viewBox="0 0 16 16" 
+         style="vertical-align:middle; margin-right:6px;">
       <!-- lewa połówka -->
       <path d="M8,8 m-8,0 a8,8 0 0,1 16,0 z" fill="${colorA}"/>
       <!-- prawa połówka -->
@@ -137,8 +128,36 @@ function createSplittedCircle(colorA, colorB) {
   `;
 }
 
-// Eksport symboli w globalnym obiekcie (jeśli używasz script <script>):
+/**
+ * getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers):
+ *  Funkcja tworząca splitted circle dla pary statków:
+ *   - Najpierw próbuje pobrać faktyczny "ship_length" z shipMarkers[mmsi] (jeśli istnieje).
+ *   - W razie braku / undefined fallback do fallbackLenA/B (z collisions).
+ *   - Zwraca gotowy HTML splitted circle.
+ */
+function getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers) {
+  let lenA = parseFloat(fallbackLenA) || 0;
+  let lenB = parseFloat(fallbackLenB) || 0;
+
+  // Jeśli dany statek istnieje w shipMarkers => bierzemy stamtąd
+  if (shipMarkers && shipMarkers[mmsiA] && shipMarkers[mmsiA].shipData) {
+    const lA = parseFloat(shipMarkers[mmsiA].shipData.ship_length);
+    if (!isNaN(lA)) lenA = lA;
+  }
+  if (shipMarkers && shipMarkers[mmsiB] && shipMarkers[mmsiB].shipData) {
+    const lB = parseFloat(shipMarkers[mmsiB].shipData.ship_length);
+    if (!isNaN(lB)) lenB = lB;
+  }
+
+  // Kolory
+  const colorA = getShipColor(lenA);
+  const colorB = getShipColor(lenB);
+
+  // Gotowy splitted circle
+  return createSplittedCircle(colorA, colorB);
+}
+
+// Eksportujemy w global scope
 window.initSharedMap = initSharedMap;
 window.createShipIcon = createShipIcon;
-window.getShipColor   = getShipColor;
-window.createSplittedCircle = createSplittedCircle;
+window.getCollisionSplitCircle = getCollisionSplitCircle;
