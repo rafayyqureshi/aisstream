@@ -178,10 +178,10 @@ function updateCollisionsList() {
   let filtered = collisionsData.filter(c => {
     if (c.tcpa < 0) return false;        // statki minęły się
     if (c.cpa > 0.5) return false;       // powyżej progu
-    if (c.timestamp) {
-      let tColl = new Date(c.timestamp).getTime();
-      if (tColl < nowMs) return false;   // kolizja w przeszłości
-    }
+   // if (c.timestamp) {
+   //   let tColl = new Date(c.timestamp).getTime();
+   //   if (tColl < nowMs) return false;   // kolizja w przeszłości
+   // }
     return true;
   });
 
