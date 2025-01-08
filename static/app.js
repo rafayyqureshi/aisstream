@@ -297,21 +297,29 @@ function zoomToCollision(c) {
     [c.latitude_a, c.longitude_a],
     [c.latitude_b, c.longitude_b]
   ]);
-
-  // 1) Mniejszy padding i/lub maxZoom
+  // Dopasowanie do kolizji z mniejszym padding i przykładowym maxZoom
   map.fitBounds(bounds, {
     padding: [15, 15],
-    maxZoom: 13  // przykładowo
+    maxZoom: 13
   });
 
-  // 2) Jeśli c.tcpa > 0, ustawiamy vectorLength
+  // Ustawiamy vectorLength na zaokrągloną wartość tcpa, jeśli sensowna
   if (c.tcpa && c.tcpa > 0 && c.tcpa < 9999) {
     vectorLength = Math.round(c.tcpa);
-    // wywołujemy update, aby wektory się zaktualizowały
+
+    // --- 1) Ustawiamy slider na tę wartość ---
+    const vectorLengthSlider = document.getElementById('vectorLengthSlider');
+    vectorLengthSlider.value = vectorLength.toString();
+
+    // --- 2) Ustawiamy label z aktualną wartością (np. obok suwaka) ---
+    const vectorLengthValue = document.getElementById('vectorLengthValue');
+    vectorLengthValue.textContent = vectorLength;
+
+    // --- 3) Odświeżamy wektory na mapie (statki zaznaczone) ---
     updateSelectedShipsInfo(true);
   }
 
-  // 3) Reszta bez zmian
+  // Reszta logiki: zaznaczenie statków
   clearSelectedShips();
   selectShip(c.mmsi_a);
   selectShip(c.mmsi_b);
