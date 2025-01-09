@@ -1,331 +1,396 @@
 // ======================
 // history_app.js
+// (Moduł obsługujący prezentację historycznych kolizji)
 // ======================
-let map;
-let collisionMarkers = [];
 
-let currentDay = 0; 
+// Zmienne globalne
+let map;                 // Obiekt mapy Leaflet
+let collisionMarkers = [];  // Markery kolizji na mapie
+
+// Sterowanie dniem (z "slider" lub przyciskami)
+let currentDay = 0;      
 const minDay = -7;
 const maxDay = 0;
 
-let cpaFilter = 0.5;   
+// Filtr CPA (suwak)
+let cpaFilter = 0.5;  
+
+// Animacja
 let isPlaying = false;
-let animationData = []; 
-let animationIndex = 0;
+let animationData = [];   // Pełna tablica klatek
+let animationIndex = 0;   
 let animationInterval = null;
 
-let inSituationView = false; 
-let shipMarkersOnMap = [];
+let inSituationView = false;  // Czy jesteśmy w trybie "podglądu kolizji"
+let shipMarkersOnMap = [];    // Markery statków w danej klatce animacji
 
+/**
+ * Inicjalizacja mapy i interfejsu.
+ */
 function initMap() {
-  map = L.map('map').setView([50.0, 0.0], 5);
-
-  // Warstwa bazowa
-  const osmLayer = L.tileLayer(
-    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { maxZoom: 18 }
-  );
-  osmLayer.addTo(map);
-
-  // (opcjonalnie) warstwa morska
-  // const openSeaMapLayer = L.tileLayer(
-  //   'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
-  //   { maxZoom:18, opacity:0.7 }
-  // );
-  // openSeaMapLayer.addTo(map);
+  // Zakładamy, że w common.js mamy np. initSharedMap
+  // Zamiast L.map(...) ->:
+  map = initSharedMap("map"); 
 
   updateDayLabel();
-  fetchCollisionsData();
   setupUI();
+  fetchCollisionsData();
 
-  // Klik = exit
-  map.on('click', ()=>{
-    if(inSituationView) {
+  // Kliknięcie na pustej mapie = wyjście z widoku kolizji
+  map.on('click', () => {
+    if (inSituationView) {
       exitSituationView();
     }
   });
 }
 
+/**
+ * setupUI() – konfiguracja przycisków i suwaków
+ */
 function setupUI() {
-  document.getElementById('prevDay').addEventListener('click', ()=>{
-    if(currentDay>minDay) {
+  // Nawigacja po dniach
+  document.getElementById('prevDay').addEventListener('click', () => {
+    if (currentDay > minDay) {
       currentDay--;
       updateDayLabel();
       fetchCollisionsData();
     }
   });
-  document.getElementById('nextDay').addEventListener('click', ()=>{
-    if(currentDay<maxDay) {
+  document.getElementById('nextDay').addEventListener('click', () => {
+    if (currentDay < maxDay) {
       currentDay++;
       updateDayLabel();
       fetchCollisionsData();
     }
   });
 
-  document.getElementById('playPause').addEventListener('click', ()=>{
-    if(isPlaying) stopAnimation();
+  // Sterowanie animacją
+  document.getElementById('playPause').addEventListener('click', () => {
+    if (isPlaying) stopAnimation();
     else startAnimation();
   });
-  document.getElementById('stepForward').addEventListener('click', ()=> stepAnimation(1));
-  document.getElementById('stepBack').addEventListener('click', ()=> stepAnimation(-1));
+  document.getElementById('stepForward').addEventListener('click', () => stepAnimation(1));
+  document.getElementById('stepBack').addEventListener('click', () => stepAnimation(-1));
 
-  document.getElementById('cpaFilter').addEventListener('input', (e)=>{
+  // Filtr CPA
+  document.getElementById('cpaFilter').addEventListener('input', (e) => {
     cpaFilter = parseFloat(e.target.value) || 0.5;
     document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
     fetchCollisionsData();
   });
 }
 
+/**
+ * updateDayLabel() – wyświetla aktualnie wybrany dzień
+ */
 function updateDayLabel() {
   const now = new Date();
   let targetDate = new Date(now);
   targetDate.setDate(now.getDate() + currentDay);
-  const dateStr = targetDate.toISOString().slice(0,10);
 
+  const dateStr = targetDate.toISOString().slice(0, 10);
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
-  document.getElementById('prevDay').disabled = (currentDay<=minDay);
-  document.getElementById('nextDay').disabled = (currentDay>=maxDay);
+
+  document.getElementById('prevDay').disabled = (currentDay <= minDay);
+  document.getElementById('nextDay').disabled = (currentDay >= maxDay);
 }
 
+/**
+ * fetchCollisionsData() – pobiera kolizje z /history_collisions
+ * i przekazuje do displayCollisions().
+ */
 function fetchCollisionsData() {
   clearCollisions();
+
   fetch(`/history_collisions?day=${currentDay}&max_cpa=${cpaFilter}`)
-    .then(r=>r.json())
-    .then(data=> displayCollisions(data))
-    .catch(err=>console.error("Error fetching collisions:", err));
+    .then(r => r.json())
+    .then(data => displayCollisions(data))
+    .catch(err => console.error("Error fetching collisions:", err));
 }
 
+/**
+ * displayCollisions(collisions) – wyświetla listę kolizji w panelu
+ * i rysuje markery na mapie.
+ */
 function displayCollisions(collisions) {
-  const list = document.getElementById('collision-list');
-  list.innerHTML = '';
+  const listContainer = document.getElementById('collision-list');
+  listContainer.innerHTML = '';
 
-  if(!collisions || collisions.length===0) {
+  if (!collisions || collisions.length === 0) {
     const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML= `<div style="padding:10px; font-style:italic;">
-      No collisions for this day.</div>`;
-    list.appendChild(noItem);
+    noItem.innerHTML = `<div style="padding:10px;font-style:italic;">
+      No collisions for this day.
+    </div>`;
+    listContainer.appendChild(noItem);
     return;
   }
 
-  // ewentualnie usuwanie duplikatów
+  // Ewentualne usuwanie duplikatów
   let uniqueMap = {};
-  collisions.forEach(c=>{
-    if(!c.collision_id) {
-      c.collision_id = `${c.mmsi_a}_${c.mmsi_b}_${c.timestamp||''}`;
+  collisions.forEach(c => {
+    if (!c.collision_id) {
+      // awaryjne generowanie
+      c.collision_id = `${c.mmsi_a}_${c.mmsi_b}_${c.timestamp || ''}`;
     }
-    if(!uniqueMap[c.collision_id]) {
+    if (!uniqueMap[c.collision_id]) {
       uniqueMap[c.collision_id] = c;
     }
   });
+
   let finalCollisions = Object.values(uniqueMap);
 
-  finalCollisions.forEach(c=>{
+  // Tworzenie elementów listy i markerów
+  finalCollisions.forEach(c => {
     const item = document.createElement('div');
     item.classList.add('collision-item');
 
-    // tu możesz dodać ship1_name i ship2_name, jeśli dołączysz je w data
+    // Domyślne nazwy
     let shipA = c.ship1_name || c.mmsi_a;
     let shipB = c.ship2_name || c.mmsi_b;
-    let timeStr = (c.timestamp)
-      ? new Date(c.timestamp).toLocaleTimeString('en-GB')
-      : 'unknown';
 
-    item.innerHTML=`
+    // Czas
+    let timeStr = 'unknown';
+    if (c.timestamp) {
+      timeStr = new Date(c.timestamp).toLocaleTimeString('en-GB');
+    }
+
+    // Wpis w panelu
+    item.innerHTML = `
       <div class="collision-header">
         <strong>${shipA} - ${shipB}</strong><br>
-        CPA: ${Number(c.cpa).toFixed(2)} nm at ${timeStr}
+        CPA: ${Number(c.cpa).toFixed(2)} nm @ ${timeStr}
         <button class="zoom-button">🔍</button>
       </div>
     `;
-    item.querySelector('.zoom-button').addEventListener('click',()=>{
+    listContainer.appendChild(item);
+
+    // Obsługa kliknięcia (zoom + wczytanie animacji)
+    item.querySelector('.zoom-button').addEventListener('click', () => {
       zoomToCollision(c);
     });
-    list.appendChild(item);
 
-    // Marker
-    let lat = (c.latitude_a + c.latitude_b)/2;
-    let lon = (c.longitude_a + c.longitude_b)/2;
+    // Marker kolizyjny
+    let latC = (c.latitude_a + c.latitude_b) / 2;
+    let lonC = (c.longitude_a + c.longitude_b) / 2;
 
+    // Ikona – można użyć np. splitted circle lub prostą ikonkę
+    // Ale tu na szybko:
     const collisionIcon = L.divIcon({
-      className:'',
-      html:`<svg width="15" height="15" viewBox="-7.5 -7.5 15 15">
-              <polygon points="0,-5 5,5 -5,5"
-                       fill="yellow" stroke="red" stroke-width="2"/>
-              <text x="0" y="2" text-anchor="middle" font-size="8"
-                    fill="red">!</text>
-            </svg>`
+      className: '',
+      html: `
+        <svg width="20" height="20" viewBox="-10 -10 20 20">
+          <polygon points="0,-6 6,6 -6,6"
+                   fill="yellow" stroke="red" stroke-width="2"/>
+          <text x="0" y="3" text-anchor="middle"
+                font-size="8" fill="red">!</text>
+        </svg>
+      `,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10]
     });
-    let marker = L.marker([lat,lon], {icon: collisionIcon})
-      .on('click', ()=> zoomToCollision(c));
+
+    const marker = L.marker([latC, lonC], { icon: collisionIcon })
+      .on('click', () => zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
   });
 }
 
+/**
+ * zoomToCollision(c) – przybliża mapę do danej kolizji
+ * i wczytuje animację z /history_data?collision_id=...
+ */
 function zoomToCollision(c) {
-  const bounds = L.latLngBounds([
+  let bounds = L.latLngBounds([
     [c.latitude_a, c.longitude_a],
     [c.latitude_b, c.longitude_b]
   ]);
-  map.fitBounds(bounds, {padding:[20,20]});
+  map.fitBounds(bounds, { padding: [40, 40] });
+
   loadCollisionData(c.collision_id);
 }
 
+/**
+ * loadCollisionData(collision_id) – pobieramy dane animacji (klatek)
+ * i rozpoczynamy prezentację.
+ */
 function loadCollisionData(collision_id) {
-  // Możesz wczytywać z /history_data?collision_id=...
-  // Albo z GCS – zależy od implementacji
-  // Poniżej – wersja z endpointem Flask:
   fetch(`/history_data?collision_id=${collision_id}`)
-    .then(r=>r.json())
-    .then(data=>{
-      animationData = data;
-      animationIndex=0;
-      stopAnimation();
-      inSituationView=true;
+    .then(r => r.json())
+    .then(data => {
+      animationData = data || [];
+      animationIndex = 0;
+      stopAnimation(); // na wszelki wypadek
+      inSituationView = true;
 
-      document.getElementById('left-panel').style.display='block';
-      document.getElementById('bottom-center-bar').style.display='block';
+      // Pokaż panele
+      document.getElementById('left-panel').style.display = 'block';
+      document.getElementById('bottom-center-bar').style.display = 'block';
 
       updateMapFrame();
-      // dopasowanie do klatki 9
-      if(animationData.length===10 && animationData[9].shipPositions?.length===2) {
-        let sA = animationData[9].shipPositions[0];
-        let sB = animationData[9].shipPositions[1];
-        let b = L.latLngBounds([[sA.lat,sA.lon],[sB.lat,sB.lon]]);
-        map.fitBounds(b,{padding:[20,20]});
+
+      // Jeżeli chcemy dopasować do np. klatki 9
+      // (jeśli jest wystarczająco klatek)
+      if (animationData.length >= 10 && animationData[9].shipPositions?.length >= 1) {
+        let boundingPoints = [];
+        animationData[9].shipPositions.forEach(sp => {
+          boundingPoints.push([sp.lat, sp.lon]);
+        });
+        if (boundingPoints.length > 0) {
+          let b = L.latLngBounds(boundingPoints);
+          map.fitBounds(b, { padding: [20, 20] });
+        }
       }
     })
-    .catch(err=>console.error("Error /history_data:", err));
+    .catch(err => console.error("Error /history_data:", err));
 }
 
+/**
+ * startAnimation() – uruchamiamy animację
+ */
 function startAnimation() {
-  if(!animationData || animationData.length===0) return;
-  isPlaying=true;
-  document.getElementById('playPause').textContent='Pause';
-  animationInterval = setInterval(()=> stepAnimation(1), 1000);
+  if (!animationData || animationData.length === 0) return;
+  isPlaying = true;
+  document.getElementById('playPause').textContent = 'Pause';
+  animationInterval = setInterval(() => stepAnimation(1), 1000);
 }
+
+/**
+ * stopAnimation() – zatrzymujemy animację
+ */
 function stopAnimation() {
-  isPlaying=false;
-  document.getElementById('playPause').textContent='Play';
-  if(animationInterval) clearInterval(animationInterval);
-  animationInterval=null;
+  isPlaying = false;
+  document.getElementById('playPause').textContent = 'Play';
+  if (animationInterval) {
+    clearInterval(animationInterval);
+    animationInterval = null;
+  }
 }
+
+/**
+ * stepAnimation(step) – zmiana klatki o 'step'
+ */
 function stepAnimation(step) {
-  animationIndex+=step;
-  if(animationIndex<0) animationIndex=0;
-  if(animationIndex>=animationData.length) animationIndex=animationData.length-1;
+  animationIndex += step;
+  if (animationIndex < 0) animationIndex = 0;
+  if (animationIndex >= animationData.length) {
+    animationIndex = animationData.length - 1;
+  }
   updateMapFrame();
 }
+
+/**
+ * updateMapFrame() – wyświetla aktualną klatkę animacji
+ */
 function updateMapFrame() {
   const frameIndicator = document.getElementById('frameIndicator');
-  frameIndicator.textContent = `${animationIndex+1}/${animationData.length}`;
+  frameIndicator.textContent = `${animationIndex + 1}/${animationData.length}`;
 
-  // czyścimy stare
-  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-  shipMarkersOnMap=[];
+  // Usuwamy stare markery
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
 
-  if(!animationData || animationData.length===0) return;
+  if (!animationData || animationData.length === 0) return;
+
   let frame = animationData[animationIndex];
-  let ships = frame.shipPositions||[];
+  let ships = frame.shipPositions || [];
 
+  // Rysujemy markery statków
   ships.forEach(s => {
-    let marker = L.marker([s.lat, s.lon], {
-      icon: createShipIcon(s)
-    });
-    let nm = s.name||s.mmsi;
-    let toolTip=`
+    // createShipIcon() lub splitted circle z common.js
+    let icon = createShipIcon(s, false);  
+    // np.: createShipIcon(s, false) — jeśli jest odpowiednia sygnatura w common.js
+
+    let marker = L.marker([s.lat, s.lon], { icon });
+    // Tooltip z info
+    let nm = s.name || s.mmsi;
+    let toolTip = `
       <b>${nm}</b><br>
-      COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)} kn<br>
-      Len:${s.ship_length||'Unknown'}
+      COG: ${Math.round(s.cog)}°, SOG: ${s.sog.toFixed(1)} kn<br>
+      Len: ${s.ship_length || 'Unknown'}
     `;
-    marker.bindTooltip(toolTip, {direction:'top', sticky:true});
+    marker.bindTooltip(toolTip, { direction: 'top', sticky: true });
     marker.addTo(map);
     shipMarkersOnMap.push(marker);
   });
 
-  let leftPanel=document.getElementById('selected-ships-info');
-  leftPanel.innerHTML='';
-  let pairInfo=document.getElementById('pair-info');
-  pairInfo.innerHTML='';
+  // Możemy też wyświetlać info w panelu po lewej
+  const leftPanel = document.getElementById('selected-ships-info');
+  leftPanel.innerHTML = '';
+  const pairInfo = document.getElementById('pair-info');
+  pairInfo.innerHTML = '';
 
-  if(ships.length===2) {
-    let sA=ships[0];
-    let sB=ships[1];
-    // compute cpa/tcpa in JS
+  // Jeśli jest dokładnie 2 statki, obliczamy cpa/tcpa w JS:
+  if (ships.length === 2) {
+    let sA = ships[0];
+    let sB = ships[1];
     let { cpa, tcpa } = compute_cpa_tcpa_js(sA, sB);
 
-    let tObj=new Date(frame.time);
-    let hh=tObj.getHours().toString().padStart(2,'0');
-    let mm=tObj.getMinutes().toString().padStart(2,'0');
-    let ss=tObj.getSeconds().toString().padStart(2,'0');
-    let timeStr=`${hh}:${mm}:${ss}`;
+    let tObj = new Date(frame.time);
+    let hh = tObj.getHours().toString().padStart(2, '0');
+    let mm = tObj.getMinutes().toString().padStart(2, '0');
+    let ss = tObj.getSeconds().toString().padStart(2, '0');
+    let timeStr = `${hh}:${mm}:${ss}`;
 
-    if(animationIndex>6) {
-      pairInfo.innerHTML=`
+    // Przykładowa logika
+    if (animationIndex > 6) {
+      pairInfo.innerHTML = `
         Time: ${timeStr}<br>
-        Distance now: ${cpa.toFixed(2)} nm
-        (Ships are moving apart)
+        Distance now: ${cpa.toFixed(2)} nm (ships are moving apart)
       `;
     } else {
-      pairInfo.innerHTML=`
+      pairInfo.innerHTML = `
         Time: ${timeStr}<br>
         CPA: ${cpa.toFixed(2)} nm, TCPA: ${tcpa.toFixed(2)} min
       `;
     }
 
-    leftPanel.innerHTML=`
-      <b>${sA.name||sA.mmsi}</b><br>
+    // Info w lewym panelu
+    leftPanel.innerHTML = `
+      <b>${sA.name || sA.mmsi}</b><br>
       SOG:${sA.sog.toFixed(1)} kn, COG:${Math.round(sA.cog)}°, L:${sA.ship_length||'N/A'}<br><br>
-      <b>${sB.name||sB.mmsi}</b><br>
+      <b>${sB.name || sB.mmsi}</b><br>
       SOG:${sB.sog.toFixed(1)} kn, COG:${Math.round(sB.cog)}°, L:${sB.ship_length||'N/A'}
     `;
   }
 }
 
-function createShipIcon(s) {
-  let fillColor = getShipColor(s.ship_length);
-  let rotation = s.cog||0;
-  return L.divIcon({
-    className:'',
-    html: `<svg width="18" height="24" viewBox="-9 -9 18 18"
-                style="transform:rotate(${rotation}deg)">
-             <polygon points="0,-7 5,7 -5,7"
-                      fill="${fillColor}" stroke="black" stroke-width="1"/>
-           </svg>`,
-    iconSize:[18,24],
-    iconAnchor:[9,9]
-  });
+/**
+ * compute_cpa_tcpa_js(a, b) – uproszczone obliczenia CPA/TCPA w JS
+ * (opcjonalnie, można skopiować z modułu live)
+ */
+function compute_cpa_tcpa_js(a, b) {
+  // Zwraca np. { cpa: ..., tcpa: ... }
+  // Tu placeholder:
+  return { cpa: 0.35, tcpa: 4.5 };
 }
 
-// prosty cpa/tcpa w JS
-function compute_cpa_tcpa_js(a,b) {
-  // np. identyczny jak w live, tutaj pomijam
-  return { cpa: 0.20, tcpa: 5.0 };
-}
-
-function getShipColor(len) {
-  if(!len) return 'gray';
-  if(len<50) return 'green';
-  if(len<150) return 'yellow';
-  if(len<250) return 'orange';
-  return 'red';
-}
-
+/**
+ * exitSituationView() – powrót do trybu „listy kolizji”
+ */
 function exitSituationView() {
-  inSituationView=false;
-  document.getElementById('left-panel').style.display='none';
-  document.getElementById('bottom-center-bar').style.display='none';
+  inSituationView = false;
+  document.getElementById('left-panel').style.display = 'none';
+  document.getElementById('bottom-center-bar').style.display = 'none';
   stopAnimation();
-  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-  shipMarkersOnMap=[];
-  animationData=[];
-  animationIndex=0;
+
+  // Usunięcie markerów statków
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
+
+  // Czyścimy animację
+  animationData = [];
+  animationIndex = 0;
 }
 
+/**
+ * clearCollisions() – usuwa markery kolizyjne z mapy
+ */
 function clearCollisions() {
-  collisionMarkers.forEach(m=>map.removeLayer(m));
-  collisionMarkers=[];
+  collisionMarkers.forEach(m => map.removeLayer(m));
+  collisionMarkers = [];
 }
 
+// Start
 document.addEventListener('DOMContentLoaded', initMap);
