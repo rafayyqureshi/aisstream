@@ -8,15 +8,17 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
 
-# UWAGA: Importujemy *nazwy* z fileio bezpośrednio
+# Importy z fileio (by uniknąć NameError):
 from apache_beam.io.fileio import WriteToFiles, FileSink
 
-# ========================================
-# Funkcja pomocnicza: interpolacja klatek
-# ========================================
+# ------------------------------------------------------------
+# Funkcja pomocnicza: Prosta interpolacja klatek
+# ------------------------------------------------------------
 def interpolate_positions(records, step_seconds=60):
     if not records:
         return []
+
+    # Sortujemy rosnąco po timestamp
     records.sort(key=lambda x: x[0])
     start_t = records[0][0]
     end_t   = records[-1][0]
@@ -26,15 +28,19 @@ def interpolate_positions(records, step_seconds=60):
     idx = 0
 
     while current_t <= end_t:
+        # szukamy segmentu [records[idx], records[idx+1]] zawierającego current_t
         while idx < len(records) - 1 and records[idx+1][0] < current_t:
             idx += 1
+
         if idx == len(records) - 1:
+            # koniec listy
             t_last, la, lo, sg, cg = records[-1]
             out.append((current_t, la, lo, sg, cg))
         else:
             tA, laA, loA, sgA, cgA = records[idx]
             tB, laB, loB, sgB, cgB = records[idx+1]
             if current_t < tA:
+                # jeszcze przed tA
                 out.append((current_t, laA, loA, sgA, cgA))
             else:
                 dt = (tB - tA).total_seconds()
@@ -42,38 +48,54 @@ def interpolate_positions(records, step_seconds=60):
                     out.append((current_t, laA, loA, sgA, cgA))
                 else:
                     ratio = (current_t - tA).total_seconds() / dt
-                    lat_i = laA + (laB - laA)*ratio
-                    lon_i = loA + (loB - loA)*ratio
-                    sog_i = sgA + (sgB - sgA)*ratio
-                    cog_i = cgA + (cgB - cgA)*ratio
+                    lat_i = laA + (laB - laA) * ratio
+                    lon_i = loA + (loB - loA) * ratio
+                    sog_i = sgA + (sgB - sgA) * ratio
+                    cog_i = cgA + (cgB - cgA) * ratio
                     out.append((current_t, lat_i, lon_i, sog_i, cog_i))
+
         current_t += datetime.timedelta(seconds=step_seconds)
+
     return out
 
-# ========================================
-# DoFn: Rozwijamy kolizje w klatki animacji
-# ========================================
+# ------------------------------------------------------------
+# DoFn: rozwijamy wpisy kolizji w klatki animacji
+# ------------------------------------------------------------
 class ProcessCollisionsFn(beam.DoFn):
     def setup(self):
         self.bq_client = bigquery.Client()
 
     def process(self, collision_row):
-        collision_id = collision_row.collision_id
-        mmsi_a       = collision_row.mmsi_a
-        mmsi_b       = collision_row.mmsi_b
-        cpa_val      = collision_row.cpa
-        tcpa_val     = collision_row.tcpa
-        ts_coll      = collision_row.timestamp
+        """
+        collision_row jest dict-em zwróconym z BigQuery, np.:
+          {
+            'collision_id': '...',
+            'mmsi_a': 123,
+            'mmsi_b': 456,
+            'timestamp': datetime,
+            'cpa': 0.23,
+            'tcpa': 5.0,
+            ...
+          }
+        """
+        # Naprawa: używamy kluczy ['...'] zamiast .kropki
+        collision_id = collision_row['collision_id']
+        mmsi_a       = collision_row['mmsi_a']
+        mmsi_b       = collision_row['mmsi_b']
+        cpa_val      = collision_row['cpa']
+        tcpa_val     = collision_row['tcpa']
+        ts_coll      = collision_row['timestamp']  # datetime
 
-        if cpa_val >= 0.5:
+        # Filtry proste
+        if cpa_val is None or cpa_val >= 0.5:
             return
-        if tcpa_val < 0 or tcpa_val > 10:
+        if tcpa_val is None or tcpa_val > 10 or tcpa_val < 0:
             return
 
-        # Zakres [T -20min, T +10min], przykładowo
+        # Zakres [T -20 min, T +5 min], do animacji
         coll_time = ts_coll
         start_t = coll_time - datetime.timedelta(minutes=20)
-        end_t   = coll_time + datetime.timedelta(minutes=10)
+        end_t   = coll_time + datetime.timedelta(minutes=5)
 
         query = f"""
         SELECT
@@ -83,20 +105,21 @@ class ProcessCollisionsFn(beam.DoFn):
           longitude,
           sog,
           cog,
-          ANY_VALUE(ship_name) as ship_name,
-          ANY_VALUE(ship_length) as ship_length
+          ANY_VALUE(ship_name) AS ship_name,
+          ANY_VALUE(ship_length) AS ship_length
         FROM `ais_dataset_us.ships_positions`
         WHERE mmsi IN ({mmsi_a}, {mmsi_b})
           AND timestamp BETWEEN '{start_t.isoformat()}' AND '{end_t.isoformat()}'
         GROUP BY mmsi, timestamp, latitude, longitude, sog, cog
         ORDER BY timestamp
         """
+
         rows = list(self.bq_client.query(query).result())
 
         data_a = []
         data_b = []
         for r in rows:
-            t = r.timestamp
+            t  = r.timestamp
             la = float(r.latitude or 0.0)
             lo = float(r.longitude or 0.0)
             sg = float(r.sog or 0.0)
@@ -109,15 +132,17 @@ class ProcessCollisionsFn(beam.DoFn):
             else:
                 data_b.append((t, la, lo, sg, cg, nm, ln))
 
-        def strip_for_interp(x):
+        # Przygotowujemy do interpolacji
+        def stripped(x):
             return (x[0], x[1], x[2], x[3], x[4])  # (ts, lat, lon, sog, cog)
 
-        data_a_stripped = [strip_for_interp(x) for x in data_a]
-        data_b_stripped = [strip_for_interp(x) for x in data_b]
+        data_a_stripped = [stripped(x) for x in data_a]
+        data_b_stripped = [stripped(x) for x in data_b]
 
         interp_a = interpolate_positions(data_a_stripped, 60)
         interp_b = interpolate_positions(data_b_stripped, 60)
 
+        # Nazwy/długości bierzemy z ostatniego wiersza, ewentualnie
         name_a = data_a[-1][5] if data_a else None
         len_a  = data_a[-1][6] if data_a else None
         name_b = data_b[-1][5] if data_b else None
@@ -128,14 +153,14 @@ class ProcessCollisionsFn(beam.DoFn):
 
         def add_ships(interp_list, mmsi_val, name_val, length_val):
             for (ts, la, lo, sg, cg) in interp_list:
-                key_ts = ts.replace(microsecond=0)
+                key_ts = ts.replace(microsecond=0)  # upraszczamy
                 time_map[key_ts].append({
                     "mmsi": mmsi_val,
                     "lat": la,
                     "lon": lo,
                     "sog": sg,
                     "cog": cg,
-                    "ship_name": name_val,
+                    "name": name_val,
                     "ship_length": length_val
                 })
 
@@ -144,10 +169,9 @@ class ProcessCollisionsFn(beam.DoFn):
 
         frames = []
         for tstamp in sorted(time_map.keys()):
-            shipPos = time_map[tstamp]
             frames.append({
                 "time": tstamp.isoformat(),
-                "shipPositions": shipPos
+                "shipPositions": time_map[tstamp]
             })
 
         collision_obj = {
@@ -161,11 +185,15 @@ class ProcessCollisionsFn(beam.DoFn):
         }
         yield collision_obj
 
+# ------------------------------------------------------------
+# Funkcja do konwersji listy kolizji → JSON
+# ------------------------------------------------------------
 def combine_collisions_into_single_json(items):
     arr = list(items)
     big_dict = {"collisions": arr}
     return json.dumps(big_dict, default=str, indent=2)
 
+# Sink do zapisu
 class SingleJSONSink(FileSink):
     def open(self, fh):
         return fh
@@ -186,6 +214,7 @@ def run():
         now = datetime.datetime.utcnow()
         start_time = now - datetime.timedelta(minutes=lookback_minutes)
 
+        # Zwróćmy z BQ dict z kluczami, w tym 'collision_id'
         query = f"""
         SELECT
           CONCAT(CAST(mmsi_a AS STRING), '_',
@@ -209,18 +238,22 @@ def run():
             | "ReadCollisionsBQ" >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
         )
 
+        # Rozwijamy w animacje
         expanded = collisions | "ProcessCollisions" >> beam.ParDo(ProcessCollisionsFn())
 
-        collisions_pcoll = expanded | "ToList" >> beam.combiners.ToList()
-        single_json_str = collisions_pcoll | "ToSingleJson" >> beam.Map(combine_collisions_into_single_json)
+        # Zbieramy do listy, łączymy w duży JSON
+        collisions_pcoll = expanded | "GroupToList" >> beam.combiners.ToList()
+        single_json_str  = collisions_pcoll | "ToSingleJson" >> beam.Map(combine_collisions_into_single_json)
 
+        # Nazwa pliku
         timestamp_str = now.strftime("%Y%m%d%H%M%S")
         filename = f"{output_prefix}/collisions_{timestamp_str}.json"
 
-        ( single_json_str
+        (
+            single_json_str
             | "WriteSingleFile" >> WriteToFiles(
                 path=filename,
-                file_naming=lambda x, _: ".json",  # lub destination_prefix_naming, w zależności od preferencji
+                file_naming=lambda _, __: "part.json",  # ustalamy 1 plik
                 max_writers_per_bundle=1,
                 sink=SingleJSONSink()
             )
