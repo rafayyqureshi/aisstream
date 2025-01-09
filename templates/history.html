@@ -6,22 +6,40 @@
   <title>AIS Collision History</title>
 
   <!-- Leaflet CSS -->
-  <link rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" crossorigin=""/>
-  <link rel="stylesheet"
-    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
-  <link rel="stylesheet"
-    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
-  <link rel="stylesheet"
-    href="{{ url_for('static', filename='styles.css') }}"/>
-  
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
+    crossorigin=""
+  />
+  <!-- MarkerCluster CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
+  />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
+  />
+
+  <!-- Twoje style -->
+  <link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='styles.css') }}"
+  />
+
   <!-- Leaflet JS -->
-  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
-  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script
+    src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
+    crossorigin=""
+  ></script>
+  <!-- MarkerCluster JS -->
+  <script
+    src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"
+  ></script>
 </head>
 <body>
 
-  <!-- Górny panel: Wybór dnia -->
+  <!-- Górny panel: wybór dnia -->
   <div id="top-center-bar">
     <h2>Historical Mode</h2>
     <div id="day-controls">
@@ -31,13 +49,13 @@
     </div>
   </div>
 
-  <!-- Lewy panel: dane o statkach i cpa/tcpa w danym momencie -->
+  <!-- Lewy panel: info o statkach / cpa/tcpa (ukryty dopóki nie włączymy animacji) -->
   <div id="left-panel" style="display:none;">
-      <div id="selected-ships-info"></div>
-      <div id="pair-info"></div>
+    <div id="selected-ships-info"></div>
+    <div id="pair-info"></div>
   </div>
 
-  <!-- Mapa na środku -->
+  <!-- Kontener na mapę -->
   <div id="map"></div>
 
   <!-- Prawy panel: lista kolizji historycznych -->
@@ -45,13 +63,20 @@
     <h2>Collisions (History)</h2>
     <div id="collision-filters">
       <label for="cpaFilter">Max CPA (Nm):</label>
-      <input type="range" id="cpaFilter" min="0" max="0.5" step="0.01" value="0.5">
+      <input
+        type="range"
+        id="cpaFilter"
+        min="0"
+        max="0.5"
+        step="0.01"
+        value="0.5"
+      />
       <span id="cpaValue">0.50</span>
     </div>
     <div id="collision-list"></div>
   </div>
 
-  <!-- Dolny panel: klatkowanie / animacja -->
+  <!-- Dolny panel: sterowanie klatkami / animacja (domyślnie ukryty) -->
   <div id="bottom-center-bar" style="display:none;">
     <button id="stepBack">&lt;</button>
     <button id="playPause">Play</button>
@@ -59,7 +84,8 @@
     <span id="frameIndicator"></span>
   </div>
 
-  <!-- Kod JS (moduł history) -->
+  <!-- Najpierw ładujemy common.js, potem history_app.js -->
+  <script src="{{ url_for('static', filename='common.js') }}"></script>
   <script src="{{ url_for('static', filename='history_app.js') }}"></script>
 
 </body>
