@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AIS Collision History</title>
+  <title>AIS Collision Detection – History</title>
 
   <!-- Leaflet CSS -->
   <link
@@ -11,7 +11,7 @@
     href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
     crossorigin=""
   />
-  <!-- MarkerCluster CSS -->
+  <!-- MarkerCluster CSS (opcjonalnie) -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
@@ -44,39 +44,39 @@
     <h2>Historical Mode</h2>
     <div id="day-controls">
       <button id="prevDay">Day -</button>
-      <span id="currentDayLabel">Date: ...</span>
+      <span id="currentDayLabel">Date: ?</span>
       <button id="nextDay">Day +</button>
     </div>
   </div>
 
-  <!-- Lewy panel: info o statkach / cpa/tcpa (ukryty dopóki nie włączymy animacji) -->
+  <!-- Lewy panel: (schowany na starcie) -->
   <div id="left-panel" style="display:none;">
     <div id="selected-ships-info"></div>
     <div id="pair-info"></div>
   </div>
 
-  <!-- Kontener na mapę -->
+  <!-- Mapa -->
   <div id="map"></div>
 
   <!-- Prawy panel: lista kolizji historycznych -->
   <div id="right-panel">
     <h2>Collisions (History)</h2>
     <div id="collision-filters">
-      <label for="cpaFilter">Max CPA (Nm):</label>
+      <label for="cpaFilter">Max Dist (Nm):</label>
       <input
         type="range"
         id="cpaFilter"
         min="0"
         max="0.5"
-        step="0.01"
+        step="0.1"
         value="0.5"
       />
-      <span id="cpaValue">0.50</span>
+      <span id="cpaValue">0.5</span>
     </div>
     <div id="collision-list"></div>
   </div>
 
-  <!-- Dolny panel: sterowanie klatkami / animacja (domyślnie ukryty) -->
+  <!-- Dolny panel: animacja (też schowany na starcie) -->
   <div id="bottom-center-bar" style="display:none;">
     <button id="stepBack">&lt;</button>
     <button id="playPause">Play</button>
@@ -84,9 +84,8 @@
     <span id="frameIndicator"></span>
   </div>
 
-  <!-- Najpierw ładujemy common.js, potem history_app.js -->
+  <!-- common.js (najpierw), potem history_app.js -->
   <script src="{{ url_for('static', filename='common.js') }}"></script>
   <script src="{{ url_for('static', filename='history_app.js') }}"></script>
-
 </body>
 </html>

@@ -1,33 +1,34 @@
 // history_app.js
-// Moduł “History”: wyświetlanie historycznych sytuacji kolizyjnych,
-// z możliwością animacji i klatkowego przeglądu.
+// Moduł “History”: prezentacja historycznych kolizji, wraz z animacją i trybem klatkowym.
 
 document.addEventListener('DOMContentLoaded', initHistoryApp);
 
-/** Zmienne globalne dla modułu history */
 let map;
-let collisionMarkers = [];        // Ikony kolizyjne na mapie
-let currentDay = 0;               // Przesunięcie daty (np. day=0 -> dzisiaj, day=-1 -> wczoraj)
+let collisionMarkers = [];  // Jedna ikona kolizji na mapie
+let currentDay = 0;
 const minDay = -7;
 const maxDay = 0;
 
-let distFilter = 0.5;            // Filtr minimalnego dystansu (zamiast cpaFilter)
-let isPlaying = false;           // Czy trwa animacja
-let animationData = [];          // Tablica z klatkami
+// Filtr dystansu (zamiast cpaFilter)
+let distFilter = 0.5;
+
+// Animacja
+let isPlaying = false;
+let animationData = [];
 let animationIndex = 0;
 let animationInterval = null;
 
-let inSituationView = false;     // Czy jesteśmy w trybie odtwarzania sytuacji
-let shipMarkersOnMap = [];       // Markerki statków w animacji
+let inSituationView = false;  // Czy jesteśmy w trybie szczegółowej animacji
+let shipMarkersOnMap = [];
 
-/** 
- * Inicjalizacja modułu history (wywoływana po DOMContentLoaded).
+/**
+ * Inicjalizacja modułu history (po załadowaniu DOM).
  */
 function initHistoryApp() {
   // 1) Tworzymy mapę (z common.js)
   map = initSharedMap("map");
 
-  // 2) Obsługa UI (przyciski, suwak filtrujący distance)
+  // 2) Ustawienia UI
   document.getElementById('prevDay').addEventListener('click', () => {
     if (currentDay > minDay) {
       currentDay--;
@@ -42,32 +43,32 @@ function initHistoryApp() {
       fetchCollisionsData();
     }
   });
-
-  document.getElementById('playPause').addEventListener('click', () => {
-    if(isPlaying) stopAnimation(); else startAnimation();
-  });
-  document.getElementById('stepForward').addEventListener('click', ()=> stepAnimation(1));
-  document.getElementById('stepBack').addEventListener('click', ()=> stepAnimation(-1));
-
-  // Filtr minimalnego dystansu
-  document.getElementById('cpaFilter').addEventListener('input', (e) => {
+  document.getElementById('cpaFilter').addEventListener('input', e => {
     distFilter = parseFloat(e.target.value) || 0.5;
     document.getElementById('cpaValue').textContent = distFilter.toFixed(2);
     fetchCollisionsData();
   });
 
-  // Wyjście z trybu animacji po kliknięciu w mapę (opcjonalne)
+  document.getElementById('playPause').addEventListener('click', () => {
+    if (isPlaying) stopAnimation(); else startAnimation();
+  });
+  document.getElementById('stepForward').addEventListener('click', () => stepAnimation(1));
+  document.getElementById('stepBack').addEventListener('click', () => stepAnimation(-1));
+
+  // Klik w mapę -> wyjście z animacji (opcjonalnie)
   map.on('click', () => {
-    if(inSituationView) exitSituationView();
+    if (inSituationView) {
+      exitSituationView();
+    }
   });
 
-  // 3) Ustawiamy początkową datę i pobieramy kolizje
+  // 3) Pobierz kolizje
   updateDayLabel();
   fetchCollisionsData();
 }
 
 /**
- * updateDayLabel() – wyświetla aktualnie wybrany dzień w #currentDayLabel
+ * updateDayLabel(): wyświetlamy wybrany dzień w #currentDayLabel
  */
 function updateDayLabel() {
   const now = new Date();
@@ -76,108 +77,120 @@ function updateDayLabel() {
   const dateStr = target.toISOString().slice(0,10);
 
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
-  document.getElementById('prevDay').disabled = (currentDay<=minDay);
-  document.getElementById('nextDay').disabled = (currentDay>=maxDay);
+  document.getElementById('prevDay').disabled = (currentDay <= minDay);
+  document.getElementById('nextDay').disabled = (currentDay >= maxDay);
 }
 
 /**
- * Pobiera listę kolizji historycznych z /history_collisions
+ * Pobiera listę kolizji z /history_collisions?day=...&max_cpa=...
  */
 function fetchCollisionsData() {
-  clearCollisions();
-  // Zakładam endpoint: /history_collisions?day=...&max_dist=...
-  // lub w Twoim kodzie: ?max_cpa=... – dostosuj do faktycznego backendu
-  fetch(`/history_collisions?day=${currentDay}&max_cpa=${distFilter}`)
+  clearCollisionMarkers();
+
+  let url = `/history_collisions?day=${currentDay}&max_cpa=${distFilter}`;
+  fetch(url)
     .then(r => r.json())
     .then(data => displayCollisions(data))
-    .catch(err => console.error("Error fetching collisions:", err));
+    .catch(err => console.error("Error /history_collisions:", err));
 }
 
 /**
- * Usuwa poprzednie markery kolizyjne z mapy
+ * clearCollisionMarkers(): usuwa poprzednie markery kolizyjne
  */
-function clearCollisions() {
+function clearCollisionMarkers() {
   collisionMarkers.forEach(m => map.removeLayer(m));
   collisionMarkers = [];
 }
 
 /**
- * Wyświetla listę kolizji w #collision-list, tworzy markery na mapie.
+ * Wyświetla listę kolizji i tworzy JEDEN marker na kolizję.
  */
 function displayCollisions(collisions) {
   const list = document.getElementById('collision-list');
   list.innerHTML = '';
 
-  if(!collisions || collisions.length===0) {
-    const noItem = document.createElement('div');
+  if (!collisions || collisions.length === 0) {
+    let noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML = `<div style="padding:10px; font-style:italic;">
-      No collisions for this day.</div>`;
+    noItem.innerHTML = '<i style="padding:10px; font-style:italic;">No collisions for this day.</i>';
     list.appendChild(noItem);
     return;
   }
 
-  // Ewentualnie usuwanie duplikatów (collision_id)
+  // 1) Eliminacja duplikatów (jedna kolizja => collision_id)
   let uniqueMap = {};
   collisions.forEach(c => {
     let cid = c.collision_id || `${c.mmsi_a}_${c.mmsi_b}_${c.timestamp||''}`;
-    if(!uniqueMap[cid]) uniqueMap[cid] = c;
-    // w przeciwnym razie decyduj, czy wolisz nowszy/ starszy
+    if (!uniqueMap[cid]) {
+      uniqueMap[cid] = c;
+    } else {
+      // Jeżeli chcesz brać nowszy timestamp
+      let oldT = new Date(uniqueMap[cid].timestamp).getTime();
+      let newT = new Date(c.timestamp).getTime();
+      if (newT > oldT) {
+        uniqueMap[cid] = c;
+      }
+    }
   });
   let finalCollisions = Object.values(uniqueMap);
+  if(finalCollisions.length === 0) {
+    let noItem = document.createElement('div');
+    noItem.classList.add('collision-item');
+    noItem.innerHTML = '<i>No collisions for this day.</i>';
+    list.appendChild(noItem);
+    return;
+  }
 
+  // 2) Rysowanie listy i markerów
   finalCollisions.forEach(c => {
-    // Nazwy statków, fallback do mmsi
+    // Nazwy statków (fallback do mmsi)
     let shipA = c.ship1_name || `#${c.mmsi_a}`;
     let shipB = c.ship2_name || `#${c.mmsi_b}`;
-    // Minimalny dystans (np. c.min_dist)
-    let minDist = c.min_dist ? c.min_dist.toFixed(2) : (c.cpa||0).toFixed(2);
-    
-    // Rozmiary statków -> splitted circle
-    // (common.js: getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, markers) 
-    //  lub prosto createSplittedCircle(getShipColor(...), getShipColor(...))
+
+    // Zamiast cpa – minimalny dystans (np. c.cpa)
+    let distStr = c.cpa ? c.cpa.toFixed(2) : '???';
+
+    // Splitted circle
     let splittedHTML = createSplittedCircle(
       getShipColor(c.ship_length_a||0),
       getShipColor(c.ship_length_b||0)
     );
 
-    // Czas minimalnego zbliżenia
+    // Czas
     let timeStr = '???';
-    if(c.timestamp) {
-      let d = new Date(c.timestamp);
-      timeStr = d.toLocaleTimeString('en-GB');
+    if (c.timestamp) {
+      let dt = new Date(c.timestamp);
+      timeStr = dt.toLocaleTimeString('en-GB');
     }
 
-    // Tworzymy element w liście
-    const item = document.createElement('div');
+    // Tworzymy entry w liście
+    let item = document.createElement('div');
     item.classList.add('collision-item');
     item.innerHTML = `
-      <div class="collision-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <div style="flex:1;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
           ${splittedHTML}
           <strong>${shipA} – ${shipB}</strong><br>
-          Distance: ${minDist} nm @ ${timeStr}
+          Distance: ${distStr} nm @ ${timeStr}
         </div>
         <button class="zoom-button">🔍</button>
       </div>
     `;
     list.appendChild(item);
 
-    // Klik w lupkę -> zoom do kolizji + odtworzenie
-    item.querySelector('.zoom-button').addEventListener('click', ()=>{
-      zoomToCollision(c);
-    });
+    // Event – klik w lupę
+    item.querySelector('.zoom-button')
+      .addEventListener('click', ()=> zoomToCollision(c));
 
-    // Marker na mapie w miejscu minimalnego dystansu
-    // Zakładam c.min_lat, c.min_lon. Jeśli nie masz, to uśrednij:
-    let latC = (c.latitude_a + c.latitude_b)/2;    // np. (min_lat ? c.min_lat : ...)
+    // Marker – jedna ikona
+    let latC = (c.latitude_a + c.latitude_b)/2;
     let lonC = (c.longitude_a + c.longitude_b)/2;
 
     const collisionIcon = L.divIcon({
       className:'',
       html: `
         <svg width="24" height="24" viewBox="-12 -12 24 24">
-          <path d="M0,-7 7,7 -7,7 Z" 
+          <path d="M0,-7 7,7 -7,7 Z"
                 fill="yellow" stroke="red" stroke-width="2"/>
           <text x="0" y="4" text-anchor="middle" font-size="8" fill="red">!</text>
         </svg>
@@ -185,13 +198,16 @@ function displayCollisions(collisions) {
       iconSize:[24,24],
       iconAnchor:[12,12]
     });
-    const tipHTML = `
-      <b>Collision:</b> ${shipA} &amp; ${shipB}<br>
-      Dist: ${minDist} nm<br>
+
+    let tipText = `
+      <b>Collision</b><br>
+      ${shipA} &amp; ${shipB}<br>
+      Dist: ${distStr} nm<br>
       Time: ${timeStr}
     `;
+
     let marker = L.marker([latC, lonC], { icon: collisionIcon })
-      .bindTooltip(tipHTML, { direction:'top', sticky:true })
+      .bindTooltip(tipText, {direction:'top',sticky:true})
       .on('click', ()=> zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
@@ -199,47 +215,45 @@ function displayCollisions(collisions) {
 }
 
 /**
- * Po kliknięciu w kolizję – zoom + wczytanie animacji
+ * zoomToCollision(c) – dopasowuje mapę i wywołuje loadCollisionData
  */
 function zoomToCollision(c) {
-  // Zakładam c.min_lat/lon lub c.latitude_a,b
-  let latC = (c.latitude_a + c.latitude_b)/2;
-  let lonC = (c.longitude_a + c.longitude_b)/2;
   let bounds = L.latLngBounds([
     [c.latitude_a, c.longitude_a],
     [c.latitude_b, c.longitude_b]
   ]);
-  map.fitBounds(bounds, {padding:[20,20]});
+  map.fitBounds(bounds, { padding:[20,20] });
 
-  // Wczytanie pliku /history_data?collision_id=..., odtworzenie animacji
   loadCollisionData(c.collision_id);
 }
 
 /**
  * loadCollisionData(collision_id):
- *  pobiera klatki z serwera i przygotowuje do animacji
+ *  - pobiera klatki animacji z /history_data
+ *  - pokazuje panele
+ *  - rysuje klatki
  */
 function loadCollisionData(collision_id) {
   fetch(`/history_data?collision_id=${collision_id}`)
     .then(r => r.json())
     .then(data => {
       animationData = data || [];
-      animationIndex=0;
+      animationIndex = 0;
       stopAnimation();
-      inSituationView=true;
+      inSituationView = true;
 
-      // Pokazujemy panele
+      // Odsłaniamy panele
       document.getElementById('left-panel').style.display='block';
       document.getElementById('bottom-center-bar').style.display='block';
 
       updateMapFrame();
 
-      // Dopasowanie mapy do pierwszej klatki (opcjonalnie)
-      if(animationData.length>0) {
-        let firstShips = animationData[0].shipPositions||[];
-        if(firstShips.length>0) {
-          let latLngs = firstShips.map(s=>[s.lat, s.lon]);
-          let b = L.latLngBounds(latLngs);
+      // Dopasowanie do statków 1. klatki (opcjonalnie)
+      if (animationData.length>0) {
+        let ships = animationData[0].shipPositions||[];
+        if (ships.length>0) {
+          let latlngs = ships.map(s=>[s.lat,s.lon]);
+          let b = L.latLngBounds(latlngs);
           map.fitBounds(b, {padding:[20,20]});
         }
       }
@@ -247,9 +261,7 @@ function loadCollisionData(collision_id) {
     .catch(err => console.error("Error loading collision data:", err));
 }
 
-/**
- * start/stop animacji i klatkowanie
- */
+/** start/stop animacji */
 function startAnimation() {
   if(!animationData || animationData.length===0) return;
   isPlaying=true;
@@ -270,78 +282,70 @@ function stepAnimation(step){
 }
 
 /**
- * updateMapFrame – wyświetla statki dla danej klatki
+ * updateMapFrame(): rysuje statki klatki animationData[animationIndex]
  */
-function updateMapFrame(){
-  const frameIndicator = document.getElementById('frameIndicator');
-  frameIndicator.textContent = `${animationIndex+1}/${animationData.length}`;
+function updateMapFrame() {
+  let frameIndicator=document.getElementById('frameIndicator');
+  frameIndicator.textContent=`${animationIndex+1}/${animationData.length}`;
 
-  // Usuwanie starych statków z mapy
-  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
   shipMarkersOnMap=[];
 
   if(!animationData || animationData.length===0) return;
-  let frame = animationData[animationIndex];
-  let ships = frame.shipPositions||[];
+  let frame=animationData[animationIndex];
+  let ships=frame.shipPositions||[];
 
   ships.forEach(s => {
-    // createShipIcon z common.js
     let marker = L.marker([s.lat, s.lon], {
       icon: createShipIcon(s, false)
     });
-    let nm = s.name||s.mmsi;
+    let nm = s.ship_name || `#${s.mmsi}`;
     let tip=`
       <b>${nm}</b><br>
-      COG:${Math.round(s.cog||0)}°, SOG:${(s.sog||0).toFixed(1)} kn<br>
-      Len:${s.ship_length||'Unknown'}
+      COG:${Math.round(s.cog||0)}°, 
+      SOG:${(s.sog||0).toFixed(1)} kn<br>
+      Len:${s.ship_length||'N/A'}
     `;
     marker.bindTooltip(tip,{direction:'top',sticky:true});
     marker.addTo(map);
     shipMarkersOnMap.push(marker);
   });
 
-  // Lewy panel
+  // Lewy panel = info
   let leftPanel=document.getElementById('selected-ships-info');
-  leftPanel.innerHTML='';
   let pairInfo=document.getElementById('pair-info');
+  leftPanel.innerHTML='';
   pairInfo.innerHTML='';
 
-  if(ships.length>=2){
-    let sA=ships[0], sB=ships[1];
-    let { cpa, tcpa } = compute_cpa_tcpa_js(sA,sB); // Jeśli chcesz w JS
+  if(ships.length>=2) {
+    let sA=ships[0];
+    let sB=ships[1];
+    // Oblicz np. dystans w JS (opcjonalnie)
+    let dist=0.2, tcpa=4.0; // stub
     let tObj=new Date(frame.time||Date.now());
-    let hh = tObj.getHours().toString().padStart(2,'0');
-    let mm = tObj.getMinutes().toString().padStart(2,'0');
-    let ss = tObj.getSeconds().toString().padStart(2,'0');
+    let hh=tObj.getHours().toString().padStart(2,'0');
+    let mm=tObj.getMinutes().toString().padStart(2,'0');
+    let ss=tObj.getSeconds().toString().padStart(2,'0');
     let timeStr=`${hh}:${mm}:${ss}`;
 
     pairInfo.innerHTML=`
       Time: ${timeStr}<br>
-      Dist now: ${cpa.toFixed(2)} nm, 
+      Dist now: ${dist.toFixed(2)} nm, 
       TCPA: ${tcpa.toFixed(2)} min
     `;
     leftPanel.innerHTML=`
-      <b>${sA.name||sA.mmsi}</b><br>
-      SOG:${(sA.sog||0).toFixed(1)} kn, COG:${Math.round(sA.cog||0)}°, L:${sA.ship_length||'N/A'}<br><br>
-      <b>${sB.name||sB.mmsi}</b><br>
-      SOG:${(sB.sog||0).toFixed(1)} kn, COG:${Math.round(sB.cog||0)}°, L:${sB.ship_length||'N/A'}
+      <b>${sA.ship_name||sA.mmsi}</b><br>
+      SOG:${(sA.sog||0).toFixed(1)} kn, COG:${Math.round(sA.cog||0)}°, 
+      Len:${sA.ship_length||'N/A'}<br><br>
+      <b>${sB.ship_name||sB.mmsi}</b><br>
+      SOG:${(sB.sog||0).toFixed(1)} kn, COG:${Math.round(sB.cog||0)}°, 
+      Len:${sB.ship_length||'N/A'}
     `;
   }
 }
 
-/**
- * compute_cpa_tcpa_js – prosta lokalna implementacja, 
- *  lub pusta, jeśli niepotrzebna.
- */
-function compute_cpa_tcpa_js(a,b) {
-  // np. mock:
-  return { cpa: 0.25, tcpa: 4.7 };
-}
-
-/**
- * exitSituationView – wyjście z trybu animacji
- */
-function exitSituationView(){
+/** Wyjście z trybu animacji */
+function exitSituationView() {
   inSituationView=false;
   document.getElementById('left-panel').style.display='none';
   document.getElementById('bottom-center-bar').style.display='none';
