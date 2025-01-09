@@ -27,6 +27,12 @@ let shipMarkersOnMap = [];
  * Inicjalizacja mapy i interfejsu po załadowaniu DOM.
  */
 function initHistoryApp() {
+  // Sprawdzamy, czy mamy initSharedMap w global scope:
+  if (typeof initSharedMap !== 'function') {
+    console.error("initSharedMap is not defined. Did you load common.js first?");
+    return;
+  }
+
   // 1) Inicjalizacja mapy (z common.js)
   map = initSharedMap("map"); // Musi istnieć <div id="map"> w HTML
 
@@ -211,6 +217,7 @@ function displayCollisions(collisions) {
     let latC = (c.latitude_a + c.latitude_b) / 2;
     let lonC = (c.longitude_a + c.longitude_b) / 2;
 
+    // Możemy użyć np. zwykłej ikony / kolizji
     const collisionIcon = L.divIcon({
       className: '',
       html: `
@@ -264,8 +271,10 @@ function loadCollisionData(collision_id) {
       inSituationView = true;
 
       // Pokaż panele animacji
-      document.getElementById('left-panel').style.display = 'block';
-      document.getElementById('bottom-center-bar').style.display = 'block';
+      const leftPanel = document.getElementById('left-panel');
+      const bottomBar = document.getElementById('bottom-center-bar');
+      if (leftPanel) leftPanel.style.display = 'block';
+      if (bottomBar) bottomBar.style.display = 'block';
 
       updateMapFrame();
 
@@ -292,7 +301,8 @@ function loadCollisionData(collision_id) {
 function startAnimation() {
   if (!animationData || animationData.length === 0) return;
   isPlaying = true;
-  document.getElementById('playPause').textContent = 'Pause';
+  const ppBtn = document.getElementById('playPause');
+  if (ppBtn) ppBtn.textContent = 'Pause';
   animationInterval = setInterval(() => stepAnimation(1), 1000);
 }
 
@@ -301,10 +311,9 @@ function startAnimation() {
  */
 function stopAnimation() {
   isPlaying = false;
-  const btn = document.getElementById('playPause');
-  if (btn) {
-    btn.textContent = 'Play';
-  }
+  const ppBtn = document.getElementById('playPause');
+  if (ppBtn) ppBtn.textContent = 'Play';
+
   if (animationInterval) {
     clearInterval(animationInterval);
     animationInterval = null;
@@ -364,6 +373,7 @@ function updateMapFrame() {
   if (leftPanel) leftPanel.innerHTML = '';
   if (pairInfo) pairInfo.innerHTML = '';
 
+  // Prosty case: 2 statki -> oblicz cpa/tcpa
   if (ships.length === 2) {
     let sA = ships[0];
     let sB = ships[1];
@@ -398,6 +408,7 @@ function updateMapFrame() {
  */
 function compute_cpa_tcpa_js(a, b) {
   // Prosta „mockowa” logika
+  // w realnym scenariuszu wstaw prawdziwe obliczenia
   return { cpa: 0.3, tcpa: 5.0 };
 }
 
@@ -406,8 +417,10 @@ function compute_cpa_tcpa_js(a, b) {
  */
 function exitSituationView() {
   inSituationView = false;
-  document.getElementById('left-panel').style.display = 'none';
-  document.getElementById('bottom-center-bar').style.display = 'none';
+  const leftPanel = document.getElementById('left-panel');
+  const bottomBar = document.getElementById('bottom-center-bar');
+  if (leftPanel) leftPanel.style.display = 'none';
+  if (bottomBar) bottomBar.style.display = 'none';
   stopAnimation();
 
   shipMarkersOnMap.forEach(m => map.removeLayer(m));
