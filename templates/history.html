@@ -11,7 +11,7 @@
     href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
     crossorigin=""
   />
-  <!-- MarkerCluster CSS (opcjonalnie) -->
+  <!-- MarkerCluster (opcjonalnie, jeśli używasz) -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
@@ -32,35 +32,37 @@
     src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
     crossorigin=""
   ></script>
-  <!-- MarkerCluster JS -->
+  <!-- MarkerCluster JS (opcjonalnie) -->
   <script
     src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"
   ></script>
 </head>
 <body>
 
-  <!-- Górny panel: wybór dnia -->
+  <!-- Górny panel: Wybór dnia, nagłówek “History Mode” -->
   <div id="top-center-bar">
     <h2>Historical Mode</h2>
     <div id="day-controls">
       <button id="prevDay">Day -</button>
-      <span id="currentDayLabel">Date: ?</span>
+      <span id="currentDayLabel">Date: ...</span>
       <button id="nextDay">Day +</button>
     </div>
   </div>
 
-  <!-- Lewy panel: (schowany na starcie) -->
+  <!-- Lewy panel: Info o statkach/animacja (na starcie ukryty) -->
   <div id="left-panel" style="display:none;">
+    <h3>Selected Ships / Collision Info</h3>
     <div id="selected-ships-info"></div>
-    <div id="pair-info"></div>
+    <div id="pair-info" style="margin-top:10px; font-weight:bold;"></div>
   </div>
 
-  <!-- Mapa -->
+  <!-- Kontener na mapę -->
   <div id="map"></div>
 
   <!-- Prawy panel: lista kolizji historycznych -->
   <div id="right-panel">
-    <h2>Collisions (History)</h2>
+    <h2>Historical Collisions</h2>
+    <!-- Filtry -->
     <div id="collision-filters">
       <label for="cpaFilter">Max Dist (Nm):</label>
       <input
@@ -76,7 +78,7 @@
     <div id="collision-list"></div>
   </div>
 
-  <!-- Dolny panel: animacja (też schowany na starcie) -->
+  <!-- Dolny panel do sterowania animacją klatkową -->
   <div id="bottom-center-bar" style="display:none;">
     <button id="stepBack">&lt;</button>
     <button id="playPause">Play</button>
@@ -84,7 +86,7 @@
     <span id="frameIndicator"></span>
   </div>
 
-  <!-- common.js (najpierw), potem history_app.js -->
+  <!-- common.js (najpierw) -> potem history_app.js -->
   <script src="{{ url_for('static', filename='common.js') }}"></script>
   <script src="{{ url_for('static', filename='history_app.js') }}"></script>
 </body>
