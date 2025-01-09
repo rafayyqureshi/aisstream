@@ -8,8 +8,9 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
 
-# Importy z fileio (by uniknąć NameError):
+# Koniecznie import z fileio
 from apache_beam.io.fileio import WriteToFiles, FileSink
+
 
 # ------------------------------------------------------------
 # Funkcja pomocnicza: Prosta interpolacja klatek
@@ -28,7 +29,7 @@ def interpolate_positions(records, step_seconds=60):
     idx = 0
 
     while current_t <= end_t:
-        # szukamy segmentu [records[idx], records[idx+1]] zawierającego current_t
+        # Znajdujemy segment [records[idx], records[idx+1]] w którym mieści się current_t
         while idx < len(records) - 1 and records[idx+1][0] < current_t:
             idx += 1
 
@@ -40,7 +41,6 @@ def interpolate_positions(records, step_seconds=60):
             tA, laA, loA, sgA, cgA = records[idx]
             tB, laB, loB, sgB, cgB = records[idx+1]
             if current_t < tA:
-                # jeszcze przed tA
                 out.append((current_t, laA, loA, sgA, cgA))
             else:
                 dt = (tB - tA).total_seconds()
@@ -48,18 +48,19 @@ def interpolate_positions(records, step_seconds=60):
                     out.append((current_t, laA, loA, sgA, cgA))
                 else:
                     ratio = (current_t - tA).total_seconds() / dt
-                    lat_i = laA + (laB - laA) * ratio
-                    lon_i = loA + (loB - loA) * ratio
-                    sog_i = sgA + (sgB - sgA) * ratio
-                    cog_i = cgA + (cgB - cgA) * ratio
+                    lat_i = laA + (laB - laA)*ratio
+                    lon_i = loA + (loB - loA)*ratio
+                    sog_i = sgA + (sgB - sgA)*ratio
+                    cog_i = cgA + (cgB - cgA)*ratio
                     out.append((current_t, lat_i, lon_i, sog_i, cog_i))
 
         current_t += datetime.timedelta(seconds=step_seconds)
 
     return out
 
+
 # ------------------------------------------------------------
-# DoFn: rozwijamy wpisy kolizji w klatki animacji
+# DoFn, który rozwija wpisy kolizji w klatki animacji
 # ------------------------------------------------------------
 class ProcessCollisionsFn(beam.DoFn):
     def setup(self):
@@ -78,7 +79,6 @@ class ProcessCollisionsFn(beam.DoFn):
             ...
           }
         """
-        # Naprawa: używamy kluczy ['...'] zamiast .kropki
         collision_id = collision_row['collision_id']
         mmsi_a       = collision_row['mmsi_a']
         mmsi_b       = collision_row['mmsi_b']
@@ -86,17 +86,18 @@ class ProcessCollisionsFn(beam.DoFn):
         tcpa_val     = collision_row['tcpa']
         ts_coll      = collision_row['timestamp']  # datetime
 
-        # Filtry proste
+        # Filtry – chcemy faktyczne kolizje
         if cpa_val is None or cpa_val >= 0.5:
             return
         if tcpa_val is None or tcpa_val > 10 or tcpa_val < 0:
             return
 
-        # Zakres [T -20 min, T +5 min], do animacji
+        # Zakres animacji: od 20 min przed do 5 min po
         coll_time = ts_coll
         start_t = coll_time - datetime.timedelta(minutes=20)
         end_t   = coll_time + datetime.timedelta(minutes=5)
 
+        # Wyciągamy dane AIS z BQ (możemy dołączyć ANY_VALUE(ship_name) i ship_length)
         query = f"""
         SELECT
           mmsi,
@@ -113,7 +114,6 @@ class ProcessCollisionsFn(beam.DoFn):
         GROUP BY mmsi, timestamp, latitude, longitude, sog, cog
         ORDER BY timestamp
         """
-
         rows = list(self.bq_client.query(query).result())
 
         data_a = []
@@ -132,17 +132,17 @@ class ProcessCollisionsFn(beam.DoFn):
             else:
                 data_b.append((t, la, lo, sg, cg, nm, ln))
 
-        # Przygotowujemy do interpolacji
+        # Stript do interpolacji
         def stripped(x):
             return (x[0], x[1], x[2], x[3], x[4])  # (ts, lat, lon, sog, cog)
 
-        data_a_stripped = [stripped(x) for x in data_a]
-        data_b_stripped = [stripped(x) for x in data_b]
+        data_a_str = [stripped(x) for x in data_a]
+        data_b_str = [stripped(x) for x in data_b]
 
-        interp_a = interpolate_positions(data_a_stripped, 60)
-        interp_b = interpolate_positions(data_b_stripped, 60)
+        interp_a = interpolate_positions(data_a_str, 60)
+        interp_b = interpolate_positions(data_b_str, 60)
 
-        # Nazwy/długości bierzemy z ostatniego wiersza, ewentualnie
+        # Nazwy i długości bierzemy z ostatniego wiersza
         name_a = data_a[-1][5] if data_a else None
         len_a  = data_a[-1][6] if data_a else None
         name_b = data_b[-1][5] if data_b else None
@@ -153,7 +153,7 @@ class ProcessCollisionsFn(beam.DoFn):
 
         def add_ships(interp_list, mmsi_val, name_val, length_val):
             for (ts, la, lo, sg, cg) in interp_list:
-                key_ts = ts.replace(microsecond=0)  # upraszczamy
+                key_ts = ts.replace(microsecond=0)
                 time_map[key_ts].append({
                     "mmsi": mmsi_val,
                     "lat": la,
@@ -185,28 +185,42 @@ class ProcessCollisionsFn(beam.DoFn):
         }
         yield collision_obj
 
+
 # ------------------------------------------------------------
-# Funkcja do konwersji listy kolizji → JSON
+# Funkcja łącząca listę kolizji w pojedynczy JSON
 # ------------------------------------------------------------
 def combine_collisions_into_single_json(items):
     arr = list(items)
     big_dict = {"collisions": arr}
     return json.dumps(big_dict, default=str, indent=2)
 
-# Sink do zapisu
+
+# ------------------------------------------------------------
+# Poprawny FileSink
+# ------------------------------------------------------------
 class SingleJSONSink(FileSink):
+    """
+    Klasa SingleJSONSink musi mieć sygnaturę write(self, element),
+    bo Beam w nowszych wersjach wywołuje sink.write(element).
+    """
     def open(self, fh):
-        return fh
-    def write(self, fh, element):
-        fh.write(element.encode("utf-8"))
-    def flush(self, fh):
+        # Zachowujemy uchwyt pliku w polu klasy
+        self._fh = fh
+
+    def write(self, element):
+        # Otrzymujemy TYLKO 'element'
+        self._fh.write(element.encode("utf-8"))
+        self._fh.write(b"\n")
+
+    def flush(self):
         pass
+
 
 def run():
     pipeline_options = PipelineOptions()
     pipeline_options.view_as(StandardOptions).streaming = False
 
-    lookback_minutes = int(os.getenv('LOOKBACK_MINUTES','60'))
+    lookback_minutes = int(os.getenv('LOOKBACK_MINUTES', '60'))
     output_prefix = os.getenv('HISTORY_OUTPUT_PREFIX',
                               'gs://ais-collision-detection-bucket/history_collisions/hourly')
 
@@ -214,7 +228,6 @@ def run():
         now = datetime.datetime.utcnow()
         start_time = now - datetime.timedelta(minutes=lookback_minutes)
 
-        # Zwróćmy z BQ dict z kluczami, w tym 'collision_id'
         query = f"""
         SELECT
           CONCAT(CAST(mmsi_a AS STRING), '_',
@@ -238,26 +251,29 @@ def run():
             | "ReadCollisionsBQ" >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
         )
 
-        # Rozwijamy w animacje
+        # Tworzymy obiekty animacji
         expanded = collisions | "ProcessCollisions" >> beam.ParDo(ProcessCollisionsFn())
 
-        # Zbieramy do listy, łączymy w duży JSON
-        collisions_pcoll = expanded | "GroupToList" >> beam.combiners.ToList()
-        single_json_str  = collisions_pcoll | "ToSingleJson" >> beam.Map(combine_collisions_into_single_json)
+        # Łączymy do listy
+        collisions_list = expanded | "GroupToList" >> beam.combiners.ToList()
 
-        # Nazwa pliku
+        # Konwertujemy do jednego JSON-a
+        single_json_str = collisions_list | "ToSingleJson" >> beam.Map(combine_collisions_into_single_json)
+
+        # Nazwa pliku = collisions_YYYYmmddHHMMSS.json
         timestamp_str = now.strftime("%Y%m%d%H%M%S")
         filename = f"{output_prefix}/collisions_{timestamp_str}.json"
 
+        # Zapis
         (
             single_json_str
             | "WriteSingleFile" >> WriteToFiles(
                 path=filename,
-                file_naming=lambda _, __: "part.json",  # ustalamy 1 plik
                 max_writers_per_bundle=1,
                 sink=SingleJSONSink()
             )
         )
+
 
 if __name__ == "__main__":
     run()
