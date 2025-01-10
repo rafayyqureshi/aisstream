@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
-from google.cloud import storage  # ← Potrzebne do obsługi GCS (zainstaluj google-cloud-storage)
+from google.cloud import storage  # ← do obsługi GCS (zainstaluj: pip install google-cloud-storage)
 
 app = Flask(
     __name__,
@@ -23,7 +23,7 @@ GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bu
 GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
 
 # ------------------------------------------------------------
-# 2) Funkcje pomocnicze (moduł live) – nie ruszamy
+# 2) Funkcje pomocnicze (moduł live) – NIE RUSZAMY
 # ------------------------------------------------------------
 def compute_cpa_tcpa(ship_a, ship_b):
     """
@@ -65,7 +65,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
     dvy = (vyA - vyB) * speedScale
 
     VV = dvx**2 + dvy**2
-    PV = dx * dvx + dy * dvy
+    PV = dx*dvx + dy*dvy
 
     if VV == 0:
         tcpa = 0.0
@@ -82,6 +82,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
     dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
     distNm = dist_m / 1852.0
     return (distNm, tcpa)
+
 
 # ------------------------------------------------------------
 # 3) Endpointy live – NIE RUSZAMY
@@ -239,9 +240,8 @@ def calculate_cpa_tcpa():
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
 # ------------------------------------------------------------
-# 4) Moduł history – nowa, plikowa wersja GCS
+# 4) Moduł history – plikowa wersja GCS
 # ------------------------------------------------------------
-
 @app.route('/history')
 def history():
     """Rendery frontend history (templates/history.html)."""
@@ -250,26 +250,38 @@ def history():
 @app.route("/history_filelist")
 def history_filelist():
     """
-    Zwraca listę plików z GCS (np. z ostatnich X dni),
+    Zwraca listę plików z GCS (ostatnich X dni),
     generowanych przez pipeline history.
     Domyślnie: 7 dni wstecz.
     """
     days_back = int(request.args.get("days", 7))
-    cutoff = datetime.utcnow() - timedelta(days=days_back)
+    # Zamiast offset-aware datetimes, używajmy standardu bez TZ:
+    # i porównujmy total_seconds(). W razie problemów z naive vs aware
+    # zmuśmy wszystko do UTC.
+    cutoff_utc = datetime.utcnow() - timedelta(days=days_back)
 
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
-
     prefix = GCS_HISTORY_PREFIX.rstrip("/") + "/"
-    blobs = list(bucket.list_blobs(prefix=prefix))
+
+    try:
+        blobs = list(bucket.list_blobs(prefix=prefix))
+    except Exception as e:
+        return jsonify({"error": f"Error listing blobs: {str(e)}"}), 500
 
     files = []
     for blob in blobs:
-        if blob.time_created and blob.time_created >= cutoff:
+        # Konwersja: blob.time_created to "aware" datetime, cutoff_utc to naive → sprowadźmy do naive UTC
+        if not blob.time_created:
+            continue
+        # Przykład konwersji:
+        blob_t_utc = blob.time_created.replace(tzinfo=None)
+        if blob_t_utc >= cutoff_utc:
             files.append({
                 "name": blob.name,
                 "time_created": blob.time_created.isoformat()
             })
+
     # Sortuj chronologicznie
     files.sort(key=lambda f: f["time_created"])
     return jsonify({"files": files})
@@ -278,8 +290,8 @@ def history_filelist():
 def history_file():
     """
     Zwraca zawartość konkretnego pliku JSON z GCS,
-    generowanego przez pipeline history.
-    Format pliku (przykład):
+    generowanego przez pipeline history (pipeline tworzy np. collisions_xxx.json).
+    Format pliku:
       {
         "collisions": [
           {
@@ -301,11 +313,19 @@ def history_file():
     bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
     blob = bucket.blob(filename)
 
-    if not blob.exists():
-        return jsonify({"error": f"File not found: {filename}"}), 404
+    # Sprawdzamy, czy istnieje:
+    try:
+        if not blob.exists():
+            return jsonify({"error": f"File not found: {filename}"}), 404
+    except Exception as e:
+        return jsonify({"error": f"Error checking if blob exists: {str(e)}"}), 500
 
-    data_str = blob.download_as_text(encoding="utf-8")
-    # Zwracamy surowy JSON:
+    # Pobieramy treść
+    try:
+        data_str = blob.download_as_text(encoding="utf-8")
+    except Exception as e:
+        return jsonify({"error": f"Error downloading blob: {str(e)}"}), 500
+
     return app.response_class(
         data_str,
         mimetype="application/json"
