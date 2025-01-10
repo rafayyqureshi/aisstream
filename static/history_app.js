@@ -1,367 +1,421 @@
-document.addEventListener('DOMContentLoaded', initHistoryApp);
+// ==========================
+// history_app.js
+// ==========================
 
 let map;
-let allCollisions = []; // przechowujemy kolizje z wielu plików GCS
-let collisionMarkers = [];
+let scenarioMarkers = [];       // ikony scenariuszy na mapie
+let currentScenarios = [];      // wszystkie wczytane scenariusze (z wielu plików)
+let scenarioGroups = {};        // np. hour -> [scenarios]
+let selectedScenario = null;    // aktualnie wybrany scenariusz
+let animationData = null;       // trzymamy klatki frames
+let animationIndex = 0;
+let animationInterval = null;
+let isPlaying = false;
 
+let shipMarkersOnMap = [];      // statki w aktualnej klatce
+let inSituationView = false;    // czy jesteśmy w trybie odtwarzania
+
+// Parametry filtra cpa (opcjonalnie)
+let cpaFilter = 0.5;
+
+// Day offset (jeśli mamy przyciski nextDay/prevDay)
 let currentDay = 0;
 const minDay = -7;
 const maxDay = 0;
-let cpaFilter = 0.5;
 
-// animacja
-let isPlaying = false;
-let animationData = [];
-let animationIndex = 0;
-let animationInterval = null;
-let inSituationView = false;
-let shipMarkersOnMap = [];
-
+// Główna inicjalizacja
 function initHistoryApp() {
-  map = initSharedMap('map'); // z common.js
+  // Tworzymy mapę
+  map = initSharedMap('map');
 
-  setupUI();
-  fetchFileListAndLoadCollisions();
+  // UI
+  setupDayUI();
+  setupBottomUI();
+
+  // Start
+  fetchFileListAndLoadScenarios();
+  
+  // Możemy ewentualnie nasłuchiwać klik w mapę => exitSituationView
+  map.on('click', () => {
+    if (inSituationView) {
+      exitSituationView();
+    }
+  });
 }
 
-// ----- UI -----
-function setupUI() {
+// -------------------------
+// 1) Obsługa day offset
+// -------------------------
+function setupDayUI() {
   document.getElementById('prevDay').addEventListener('click', () => {
     if (currentDay > minDay) {
       currentDay--;
       updateDayLabel();
-      filterAndDisplayCollisions();
+      clearAllScenarios();
+      fetchFileListAndLoadScenarios();
     }
   });
   document.getElementById('nextDay').addEventListener('click', () => {
     if (currentDay < maxDay) {
       currentDay++;
       updateDayLabel();
-      filterAndDisplayCollisions();
+      clearAllScenarios();
+      fetchFileListAndLoadScenarios();
     }
   });
-
-  const cpaSlider = document.getElementById('cpaFilter');
-  cpaSlider.addEventListener('input', e => {
-    cpaFilter = parseFloat(e.target.value) || 0.5;
-    document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
-    filterAndDisplayCollisions();
-  });
-
-  // animacja
-  document.getElementById('playPause').addEventListener('click', () => {
-    if (isPlaying) stopAnimation(); 
-    else startAnimation();
-  });
-  document.getElementById('stepForward').addEventListener('click', () => {
-    stepAnimation(1);
-  });
-  document.getElementById('stepBack').addEventListener('click', () => {
-    stepAnimation(-1);
-  });
-
   updateDayLabel();
 }
-
 function updateDayLabel() {
   const now = new Date();
-  let targetDate = new Date(now);
-  targetDate.setDate(now.getDate() + currentDay);
-  const dateStr = targetDate.toISOString().slice(0, 10);
-
+  let d = new Date(now);
+  d.setDate(now.getDate() + currentDay);
+  const dateStr = d.toISOString().slice(0, 10);
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
-  document.getElementById('prevDay').disabled = (currentDay <= minDay);
-  document.getElementById('nextDay').disabled = (currentDay >= maxDay);
 }
 
-// ----- POBIERANIE LISTY Z GCS -----
-function fetchFileListAndLoadCollisions() {
-  fetch('/history_filelist')
+// -------------------------
+// 2) Fetch plików GCS + parse
+// -------------------------
+function fetchFileListAndLoadScenarios() {
+  const dayOffsetParam = currentDay; // lub np. param “days=7”, w zależności od Twojej implementacji
+  // np. /history_filelist?days=7, ale można też rozbić to na inny param
+  const url = `/history_filelist?days=${7 + (currentDay>=0 ? currentDay : 0)}`;
+  // (powyższy 7 to przykładowy – dostosuj jak chcesz)
+
+  fetch(url)
     .then(res => {
-      if (!res.ok) throw new Error(`HTTP status ${res.status} - ${res.statusText}`);
+      if (!res.ok) {
+        throw new Error(`HTTP status ${res.status} - ${res.statusText}`);
+      }
       return res.json();
     })
-    .then(json => {
-      if (!json.files) {
-        throw new Error("No 'files' in /history_filelist response");
+    .then(data => {
+      const files = data.files || [];
+      if (files.length === 0) {
+        console.log('Brak plików w GCS dla day=', currentDay);
+        updateCollisionListUI();
+        return;
       }
-      loadAllFiles(json.files);
+      // Wczytujemy każdy plik po kolei
+      return loadAllScenarioFiles(files);
     })
     .catch(err => {
       console.error("Błąd fetchFileList:", err);
-      showErrorInCollisionList(`Error fetching file list: ${err.message}`);
     });
 }
 
-/** 
- * Wypisuje błąd w #collision-list 
- */
-function showErrorInCollisionList(msg) {
-  const clist = document.getElementById('collision-list');
-  clist.innerHTML = `<div class="collision-item" style="color:red;">
-    <b>Error:</b> ${msg}
-  </div>`;
-}
+function loadAllScenarioFiles(fileList) {
+  // Oczyszczamy
+  currentScenarios = [];
+  scenarioGroups = {};
+  scenarioMarkers.forEach(m => map.removeLayer(m));
+  scenarioMarkers = [];
 
-/**
- * Ładujemy wszystkie pliki z listy w łańcuchu Promise,
- * a następnie filtrujemy i wyświetlamy.
- */
-function loadAllFiles(fileArr) {
-  if (!fileArr.length) {
-    showErrorInCollisionList("No files found (history is empty).");
-    return;
-  }
-  let chain = Promise.resolve();
-  fileArr.forEach(fileObj => {
-    chain = chain.then(() => loadOneFile(fileObj.name));
+  // Ładujemy pliki sekwencyjnie (dla uproszczenia Promise chain)
+  const promises = fileList.map(f => {
+    const fname = f.name;
+    return fetch(`/history_file?file=${encodeURIComponent(fname)}`)
+      .then(r => {
+        if (!r.ok) {
+          throw new Error(`HTTP status ${r.status} - ${r.statusText}`);
+        }
+        return r.json();
+      })
+      .then(jsonData => {
+        // Plik ma: { "scenarios": [ ... ] }
+        if (!jsonData.scenarios) {
+          console.warn(`Plik ${fname} nie zawiera "scenarios". Pomijam...`);
+          return;
+        }
+        jsonData.scenarios.forEach(sc => {
+          // Dla uproszczenia doklejamy 'fileName' i 'timeCreated'?
+          sc.fileName = fname;
+          currentScenarios.push(sc);
+        });
+      })
+      .catch(err => {
+        console.error("Błąd loadOneFile:", err);
+      });
   });
-  chain.then(() => {
-    console.log("Załadowano wszystkie pliki. allCollisions.length:", allCollisions.length);
-    filterAndDisplayCollisions();
-  });
-}
 
-function loadOneFile(fileName) {
-  const url = `/history_file?file=${encodeURIComponent(fileName)}`;
-  return fetch(url)
-    .then(res => {
-      if (!res.ok) {
-        throw new Error(`HTTP status ${res.status} for file ${fileName}`);
-      }
-      return res.json();
-    })
-    .then(jsonData => {
-      if (!jsonData.collisions) {
-        console.warn("Brak .collisions w pliku:", fileName, jsonData);
-        return; // pomijamy
-      }
-      allCollisions.push(...jsonData.collisions);
-    })
-    .catch(err => {
-      console.error("Błąd loadOneFile:", fileName, err);
-      // nie przerywamy
+  // Gdy wszystkie pliki wczytane
+  return Promise.all(promises)
+    .then(() => {
+      console.log(`Załadowano wszystkie pliki. currentScenarios.length:`, currentScenarios.length);
+      groupScenariosByHour();
+      updateCollisionListUI();
+      drawScenarioMarkers();
     });
 }
 
-// ---- FILTR I PREZENTACJA NA MAPIE ----
-function filterAndDisplayCollisions() {
-  clearCollisions();
+// 3) Grupowanie po “godzinach” – np. wyciągamy z nazwy pliku "YYYYmmddHH"
+function groupScenariosByHour() {
+  scenarioGroups = {};  // np. key = "2025010914" (2025-01-09 14)
+  currentScenarios.forEach(sc => {
+    // scenario_id np. "scenario_123456789_111_222"
+    // plik np. "multiship_20250109143512.json"
+    const fname = sc.fileName || "";
+    // wycinamy datę/godzinę z nazwy pliku
+    // Przykład: collisions_20250109143512.json => hourKey = "2025010914"
+    const match = fname.match(/(\d{4}\d{2}\d{2}\d{2})\d{2}\d{2}\.json$/);
+    let hourKey = "unknown";
+    if (match) {
+      hourKey = match[1]; // e.g. "2025010914"
+    }
 
-  if (!allCollisions || !allCollisions.length) {
-    const clist = document.getElementById('collision-list');
-    clist.innerHTML = `<div class="collision-item"><i>No collisions loaded</i></div>`;
-    return;
-  }
-
-  // Filtr day
-  const now = new Date();
-  let targetDate = new Date(now);
-  targetDate.setDate(now.getDate() + currentDay);
-  let dateStr = targetDate.toISOString().slice(0, 10);
-
-  // Filtr cpa
-  let finalList = allCollisions.filter(c => {
-    // c.timestamp to moment kolizji
-    if (!c.timestamp) return false;
-    let dayOfCollision = c.timestamp.slice(0, 10);
-    if (dayOfCollision !== dateStr) return false;
-    // cpa
-    let cpaVal = c.cpa || 99;
-    return cpaVal <= cpaFilter;
+    if (!scenarioGroups[hourKey]) {
+      scenarioGroups[hourKey] = [];
+    }
+    scenarioGroups[hourKey].push(sc);
   });
-
-  displayCollisions(finalList);
 }
 
-function clearCollisions() {
-  collisionMarkers.forEach(m => map.removeLayer(m));
-  collisionMarkers = [];
-  let clist = document.getElementById('collision-list');
-  if (clist) clist.innerHTML = '';
-}
+// -------------------------
+// 4) Generowanie listy w prawym panelu
+// -------------------------
+function updateCollisionListUI() {
+  const listDiv = document.getElementById('collision-list');
+  listDiv.innerHTML = '';
 
-/**
- * Wyświetla listę kolizji w panelu i rysuje marker (tylko 1) na mapie
- */
-function displayCollisions(collisions) {
-  const clist = document.getElementById('collision-list');
-  if (!collisions.length) {
-    clist.innerHTML = `<div class="collision-item"><i>No collisions for selected filters</i></div>`;
+  if (Object.keys(scenarioGroups).length === 0) {
+    const noItem = document.createElement('div');
+    noItem.classList.add('collision-item');
+    noItem.innerHTML = '<i>No collision scenarios found</i>';
+    listDiv.appendChild(noItem);
     return;
   }
 
-  // aby nie tworzyć duplikatów, używamy collision_id
-  let usedIds = new Set();
+  // Sortuj klucze
+  const hourKeys = Object.keys(scenarioGroups).sort();
+  hourKeys.forEach(hourKey => {
+    // Tworzymy dropDown
+    const hourBlock = document.createElement('div');
+    hourBlock.classList.add('hour-block');
 
-  collisions.forEach(c => {
-    if (!c.collision_id) return;
-    if (usedIds.has(c.collision_id)) return;
-    usedIds.add(c.collision_id);
+    const hourTitle = document.createElement('div');
+    hourTitle.classList.add('hour-title');
+    hourTitle.textContent = `Hour: ${hourKey}`;
+    hourBlock.appendChild(hourTitle);
 
-    // nazwy statków
-    let shipA = c.mmsi_a;
-    let shipB = c.mmsi_b;
-    // jeśli pipeline history zapisał nazwy statków w innym polu, to tu można je wstawić
-    // tu jest minimalny fallback:
-    shipA = c.ship1_name || `MMSI:${c.mmsi_a}`;
-    shipB = c.ship2_name || `MMSI:${c.mmsi_b}`;
+    // Lista scenariuszy
+    const scList = scenarioGroups[hourKey];
+    scList.forEach(sc => {
+      const item = document.createElement('div');
+      item.classList.add('collision-item');
+      const scID = sc.scenario_id;
 
-    let distNm = (c.cpa || 0).toFixed(2);
-    let dtStr = c.timestamp ? new Date(c.timestamp).toLocaleTimeString('en-GB') : '---';
+      // Jak opisać? Np. “scenario_id” + liczbę statków + liczbę frames
+      const shipsCount = (sc.ships_involved || []).length;
+      const framesCount = (sc.frames || []).length;
 
-    // Tworzymy item
-    let div = document.createElement('div');
-    div.classList.add('collision-item');
-    div.innerHTML = `
-      <div class="collision-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <strong>${shipA} - ${shipB}</strong><br>
-          Min Dist: ${distNm} nm @ ${dtStr}
-        </div>
+      item.innerHTML = `
+        <strong>${scID}</strong><br>
+        Ships: ${shipsCount}, Frames: ${framesCount}
         <button class="zoom-button">🔍</button>
-      </div>
-    `;
+      `;
 
-    clist.appendChild(div);
+      // Po kliknięciu w “lupę” => zoom do scenariusza / wczytaj animację
+      item.querySelector('.zoom-button').addEventListener('click', () => {
+        onSelectScenario(sc);
+      });
 
-    div.querySelector('.zoom-button').addEventListener('click', () => {
-      zoomToCollision(c);
+      hourBlock.appendChild(item);
     });
 
-    // Marker
-    let latC = ((c.latitude_a||0) + (c.latitude_b||0))/2;
-    let lonC = ((c.longitude_a||0) + (c.longitude_b||0))/2;
-    const collisionIcon = L.divIcon({
-      className: '',
-      html: `
-        <svg width="24" height="24" viewBox="-12 -12 24 24">
-          <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
-          <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">!</text>
-        </svg>
-      `,
-      iconSize: [24,24],
-      iconAnchor: [12,12]
-    });
-    let tip = `Collision: ${shipA}&${shipB}\nDist: ${distNm} nm @ ${dtStr}`;
-    let marker = L.marker([latC, lonC], {icon: collisionIcon})
-      .bindTooltip(tip.replace(/\n/g, "<br>"), {sticky:true})
-      .on('click', () => zoomToCollision(c));
-    marker.addTo(map);
-    collisionMarkers.push(marker);
+    listDiv.appendChild(hourBlock);
   });
 }
 
-/**
- * Po kliknięciu w lupę / marker -> wczytujemy plik JSON z klatkami i animujemy
- */
-function zoomToCollision(c) {
-  // minimalne zbliżenie
-  let latC = ((c.latitude_a||0) + (c.latitude_b||0))/2;
-  let lonC = ((c.longitude_a||0) + (c.longitude_b||0))/2;
-  map.setView([latC, lonC], 10);
+// 5) Rysujemy jedną ikonę na mapie dla scenariusza
+function drawScenarioMarkers() {
+  // Usuwamy stare
+  scenarioMarkers.forEach(m => map.removeLayer(m));
+  scenarioMarkers = [];
 
-  document.getElementById('left-panel').style.display='block';
-  document.getElementById('bottom-center-bar').style.display='block';
+  Object.keys(scenarioGroups).forEach(hourKey => {
+    const scList = scenarioGroups[hourKey];
+    scList.forEach(sc => {
+      // Ustalmy “pozycję” scenariusza -> np. bierzemy average (latitude, longitude)
+      // z collisions_in_scenario[0] - w nowym potoku mamy “collisions_in_scenario”?
+      // Albo bierzemy 1. klatkę frames[0], average statków.
 
-  stopAnimation();
-  animationData=[];
-  animationIndex=0;
+      let latSum = 0, lonSum = 0, count = 0;
+      if (sc.frames && sc.frames.length > 0) {
+        // Weźmy 1. klatkę
+        const firstFrame = sc.frames[0];
+        const ships = firstFrame.shipPositions || [];
+        ships.forEach(s => {
+          latSum += s.lat;
+          lonSum += s.lon;
+          count++;
+        });
+      }
+      if (count === 0) {
+        // fallback
+        return;
+      }
+      let latC = latSum / count;
+      let lonC = lonSum / count;
 
-  let url=`/history_file?file=${encodeURIComponent(c.collision_file||'')}`;
-  // ALE: pipeline history często generuje "collisions_yyyymmddHHMMSS.json" 
-  // c.collision_file mogłoby być kluczem do pliku. 
-  // Ewentualnie c.collision_id -> kluczem w aggregatorze. 
-  // Twój pipeline w pliku:
-  // {
-  //   collisions: [{ collision_id, frames:[...]}]
-  // }
-  // w `c` może być brak 'collision_file'.
-  if(!c.collision_file) {
-    console.warn("Brak collision_file w obiekcie kolizji. Nie można wczytać animacji.");
+      // Marker
+      const iconHTML = `
+        <svg width="20" height="20" viewBox="-10 -10 20 20">
+          <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
+          <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">S</text>
+        </svg>
+      `;
+      const scenarioIcon = L.divIcon({
+        className: '',
+        html: iconHTML,
+        iconSize: [20,20],
+        iconAnchor: [10,10]
+      });
+
+      const marker = L.marker([latC, lonC], { icon: scenarioIcon })
+        .bindTooltip(`Scenario: ${sc.scenario_id}`, {direction:'top'})
+        .on('click', () => {
+          onSelectScenario(sc);
+        });
+      marker.addTo(map);
+      scenarioMarkers.push(marker);
+    });
+  });
+}
+
+// Gdy wybieramy scenariusz z listy lub z mapy
+function onSelectScenario(scenario) {
+  selectedScenario = scenario;
+  // Zoom do bounding box (wszystkie statki we wszystkich frames?), lub wystarczy 1. klatka
+  if (!scenario.frames || scenario.frames.length===0) {
+    console.warn("Scenario has no frames");
     return;
   }
 
-  fetch(url)
-    .then(r=>{
-      if(!r.ok) throw new Error(`HTTP ${r.status} - cannot load collision frames`);
-      return r.json();
-    })
-    .then(jsonData=>{
-      if(!jsonData.collisions){
-        console.warn("Brak .collisions w pliku animacji");
-        return;
-      }
-      // Znajdź w pliku collisions[] nasz collision_id
-      let theOne = jsonData.collisions.find(x=> x.collision_id===c.collision_id);
-      if(!theOne){
-        console.warn("Nie znaleziono collision_id w pliku");
-        return;
-      }
-      if(!theOne.frames){
-        console.warn("Brak frames");
-        return;
-      }
-      inSituationView=true;
-      animationData=theOne.frames;
-      animationIndex=0;
-      updateMapFrame();
-    })
-    .catch(err=>{
-      console.error("Błąd zoomToCollision fetch:", err);
-    });
+  const firstFrame = scenario.frames[0];
+  const ships = firstFrame.shipPositions || [];
+  if (ships.length === 0) {
+    console.warn("No ships in first frame");
+    return;
+  }
+
+  let latLngs = ships.map(s => [s.lat, s.lon]);
+  let bounds = L.latLngBounds(latLngs);
+  map.fitBounds(bounds, {padding:[30,30], maxZoom:13});
+
+  // Otwieramy panel animacji
+  loadScenarioAnimation(scenario);
 }
 
-// ---- ANIMACJA ----
-function startAnimation(){
-  if(!animationData||!animationData.length)return;
-  isPlaying=true;
-  document.getElementById('playPause').textContent='Pause';
-  animationInterval=setInterval(()=>stepAnimation(1),1000);
-}
-function stopAnimation(){
-  isPlaying=false;
-  document.getElementById('playPause').textContent='Play';
-  if(animationInterval) clearInterval(animationInterval);
-  animationInterval=null;
-}
-function stepAnimation(step){
-  animationIndex+=step;
-  if(animationIndex<0) animationIndex=0;
-  if(animationIndex>=animationData.length) animationIndex=animationData.length-1;
+// ---------------------------
+// 6) Animacja scenariusza
+// ---------------------------
+function loadScenarioAnimation(scenario) {
+  animationData = scenario.frames || [];
+  animationIndex = 0;
+  stopAnimation();
+  inSituationView = true;
+
+  // Pokaż panele
+  document.getElementById('left-panel').style.display = 'block';
+  document.getElementById('bottom-center-bar').style.display = 'block';
+
   updateMapFrame();
 }
 
-/**
- * Uaktualnia klatkę
- */
-function updateMapFrame(){
-  let frameIndicator=document.getElementById('frameIndicator');
-  frameIndicator.textContent=`${animationIndex+1}/${animationData.length}`;
-  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-  shipMarkersOnMap=[];
+function startAnimation() {
+  if (!animationData || animationData.length===0) return;
+  isPlaying = true;
+  document.getElementById('playPause').textContent = 'Pause';
+  animationInterval = setInterval(() => stepAnimation(1), 1000);
+}
+function stopAnimation() {
+  isPlaying = false;
+  document.getElementById('playPause').textContent = 'Play';
+  if (animationInterval) clearInterval(animationInterval);
+  animationInterval = null;
+}
+function stepAnimation(step) {
+  animationIndex += step;
+  if (animationIndex < 0) animationIndex = 0;
+  if (animationIndex >= animationData.length) animationIndex = animationData.length-1;
+  updateMapFrame();
+}
+function updateMapFrame() {
+  const frameIndicator = document.getElementById('frameIndicator');
+  frameIndicator.textContent = `${animationIndex+1}/${animationData.length}`;
 
-  if(!animationData||!animationData.length)return;
-  let frame=animationData[animationIndex];
-  let ships=frame.shipPositions||[];
+  // czyścimy stare
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
 
-  ships.forEach(s=>{
-    let fakeShipData={
-      cog:s.cog||0,
-      ship_length:s.ship_length||0
-    };
-    let icon=createShipIcon(fakeShipData,false);
-    let marker=L.marker([s.lat,s.lon],{icon});
-    let nm=s.name||`MMSI:${s.mmsi}`;
-    let sogV=(s.sog||0).toFixed(1);
-    let cogDeg=Math.round(s.cog||0);
-    let tip=`
+  if (!animationData || animationData.length===0) return;
+  let frame = animationData[animationIndex];
+  let ships = frame.shipPositions || [];
+
+  ships.forEach(s => {
+    let marker = L.marker([s.lat, s.lon], {
+      icon: createShipIcon(s, false) // z common.js
+    });
+    const nm = s.name || s.mmsi;
+    const tooltip = `
       <b>${nm}</b><br>
-      SOG:${sogV} kn, COG:${cogDeg}°<br>
-      Len:${s.ship_length||0}
+      COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)} kn<br>
+      Len:${s.ship_length || 'Unknown'}
     `;
-    marker.bindTooltip(tip,{sticky:true});
+    marker.bindTooltip(tooltip, { direction:'top', sticky:true });
     marker.addTo(map);
     shipMarkersOnMap.push(marker);
   });
+
+  // Można tu też wypełnić panel “selected-ships-info” => 
+  const leftPanel = document.getElementById('selected-ships-info');
+  leftPanel.innerHTML = '';
+  const pairInfo = document.getElementById('pair-info');
+  pairInfo.innerHTML = '';
+
+  // Ponieważ w scenario może być n statków, wyświetlamy np. spis:
+  let html = `<b>Frame time:</b> ${frame.time}<br>`;
+  ships.forEach(s => {
+    html += `
+      <div>
+        <b>${s.name || s.mmsi}</b> 
+        [COG:${Math.round(s.cog)}, SOG:${s.sog.toFixed(1)} kn, L:${s.ship_length||'?'}]
+      </div>
+    `;
+  });
+  leftPanel.innerHTML = html;
 }
+
+function exitSituationView() {
+  inSituationView = false;
+  document.getElementById('left-panel').style.display = 'none';
+  document.getElementById('bottom-center-bar').style.display = 'none';
+  stopAnimation();
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
+  animationData = null;
+  animationIndex = 0;
+}
+
+function clearAllScenarios() {
+  // czyścimy listę i marker i panel
+  currentScenarios = [];
+  scenarioGroups = {};
+  scenarioMarkers.forEach(m => map.removeLayer(m));
+  scenarioMarkers = [];
+  document.getElementById('collision-list').innerHTML = '';
+}
+
+function setupBottomUI() {
+  document.getElementById('playPause').addEventListener('click', () => {
+    if (isPlaying) stopAnimation();
+    else startAnimation();
+  });
+  document.getElementById('stepForward').addEventListener('click', () => stepAnimation(1));
+  document.getElementById('stepBack').addEventListener('click', () => stepAnimation(-1));
+}
+
+// ---------------
+// init
+// ---------------
+document.addEventListener('DOMContentLoaded', initHistoryApp);

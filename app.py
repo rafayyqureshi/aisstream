@@ -240,24 +240,21 @@ def calculate_cpa_tcpa():
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
 # ------------------------------------------------------------
-# 4) Moduł history – plikowa wersja GCS
+# 4) MODUŁ HISTORY – plikowa wersja GCS
 # ------------------------------------------------------------
 @app.route('/history')
 def history():
     """Rendery frontend history (templates/history.html)."""
     return render_template('history.html')
 
+
 @app.route("/history_filelist")
 def history_filelist():
     """
-    Zwraca listę plików z GCS (ostatnich X dni),
-    generowanych przez pipeline history.
-    Domyślnie: 7 dni wstecz.
+    Zwraca listę plików w GCS w prefix=GCS_HISTORY_PREFIX
+    z ostatnich X dni (domyślnie 7).
     """
     days_back = int(request.args.get("days", 7))
-    # Zamiast offset-aware datetimes, używajmy standardu bez TZ:
-    # i porównujmy total_seconds(). W razie problemów z naive vs aware
-    # zmuśmy wszystko do UTC.
     cutoff_utc = datetime.utcnow() - timedelta(days=days_back)
 
     storage_client = storage.Client()
@@ -271,10 +268,8 @@ def history_filelist():
 
     files = []
     for blob in blobs:
-        # Konwersja: blob.time_created to "aware" datetime, cutoff_utc to naive → sprowadźmy do naive UTC
         if not blob.time_created:
             continue
-        # Przykład konwersji:
         blob_t_utc = blob.time_created.replace(tzinfo=None)
         if blob_t_utc >= cutoff_utc:
             files.append({
@@ -282,28 +277,17 @@ def history_filelist():
                 "time_created": blob.time_created.isoformat()
             })
 
-    # Sortuj chronologicznie
+    # sort rosnąco
     files.sort(key=lambda f: f["time_created"])
     return jsonify({"files": files})
+
 
 @app.route("/history_file")
 def history_file():
     """
-    Zwraca zawartość konkretnego pliku JSON z GCS,
-    generowanego przez pipeline history (pipeline tworzy np. collisions_xxx.json).
-    Format pliku:
-      {
-        "collisions": [
-          {
-            "collision_id": "...",
-            "frames": [
-               { "time": "...", "shipPositions": [...] },
-               ...
-            ]
-          },
-          ...
-        ]
-      }
+    Zwraca zawartość *konkretnego* pliku .json z GCS,
+    generowanego przez pipeline history (np. multiship_YYYYmmddHHMMSS.json).
+    Format pliku: { "scenarios": [ { "scenario_id":..., "frames":[...], ... }, ... ] }
     """
     filename = request.args.get("file", "")
     if not filename:
@@ -313,28 +297,22 @@ def history_file():
     bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
     blob = bucket.blob(filename)
 
-    # Sprawdzamy, czy istnieje:
     try:
         if not blob.exists():
             return jsonify({"error": f"File not found: {filename}"}), 404
     except Exception as e:
-        return jsonify({"error": f"Error checking if blob exists: {str(e)}"}), 500
+        return jsonify({"error": f"Error checking blob: {str(e)}"}), 500
 
-    # Pobieramy treść
     try:
         data_str = blob.download_as_text(encoding="utf-8")
     except Exception as e:
         return jsonify({"error": f"Error downloading blob: {str(e)}"}), 500
 
-    return app.response_class(
-        data_str,
-        mimetype="application/json"
-    )
+    return app.response_class(data_str, mimetype="application/json")
+
 
 # ------------------------------------------------------------
-# 5) Uruchom serwer
+# 5) URUCHOM SERWER
 # ------------------------------------------------------------
 if __name__ == '__main__':
-    # Upewnij się, że zainstalowałeś google-cloud-storage:
-    #   pip install google-cloud-storage
     app.run(host='0.0.0.0', port=5000, debug=True)
