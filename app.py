@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
+from google.cloud import storage  # ← Potrzebne do obsługi GCS (zainstaluj google-cloud-storage)
 
 app = Flask(
     __name__,
@@ -12,18 +13,18 @@ app = Flask(
     template_folder='templates'
 )
 
-# Klient BigQuery (moduł live i ewentualnie “old” history)
-client = bigquery.Client()
+# ------------------------------------------------------------
+# 1) Konfiguracja – parametry / klienci
+# ------------------------------------------------------------
+client = bigquery.Client()  # do obsługi modułu live
 
-# Parametry – np. nazwa bucketu z plikami generowanymi przez pipeline history
-# Możesz to ustawić w zmiennej środowiskowej, np. GCS_HISTORY_BUCKET="..."
+# Parametry dotyczące GCS (do modułu history)
 GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bucket")
 GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
 
-########################################################################
-# Funkcje pomocnicze (dla modułu live), NIE USUWAMY
-########################################################################
-
+# ------------------------------------------------------------
+# 2) Funkcje pomocnicze (moduł live) – nie ruszamy
+# ------------------------------------------------------------
 def compute_cpa_tcpa(ship_a, ship_b):
     """
     Oblicza (CPA, TCPA) przybliżoną metodą geograficzną.
@@ -64,7 +65,7 @@ def compute_cpa_tcpa(ship_a, ship_b):
     dvy = (vyA - vyB) * speedScale
 
     VV = dvx**2 + dvy**2
-    PV = dx*dvx + dy*dvy
+    PV = dx * dvx + dy * dvy
 
     if VV == 0:
         tcpa = 0.0
@@ -82,13 +83,12 @@ def compute_cpa_tcpa(ship_a, ship_b):
     distNm = dist_m / 1852.0
     return (distNm, tcpa)
 
-########################################################################
-# ENDPOINTY MODUŁU LIVE – NIE ZMIENIAMY
-########################################################################
-
+# ------------------------------------------------------------
+# 3) Endpointy live – NIE RUSZAMY
+# ------------------------------------------------------------
 @app.route('/')
 def index():
-    """Strona główna – live map."""
+    """Strona główna – live map (index.html)."""
     return render_template('index.html')
 
 @app.route('/ships')
@@ -238,77 +238,25 @@ def calculate_cpa_tcpa():
     cpa, tcpa = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
     return jsonify({'cpa': cpa, 'tcpa': tcpa})
 
-########################################################################
-# HISTORY – dawny endpoint w BQ (opcjonalnie zostawiamy)
-########################################################################
+# ------------------------------------------------------------
+# 4) Moduł history – nowa, plikowa wersja GCS
+# ------------------------------------------------------------
 
 @app.route('/history')
 def history():
-    """Strona startowa dla modułu history – wczytuje history.html"""
+    """Rendery frontend history (templates/history.html)."""
     return render_template('history.html')
-
-@app.route('/history_collisions')
-def history_collisions():
-    """
-    Stary /history_collisions – z BQ, ewentualnie do wycofania.
-    Pozostawiamy, bo był w poprzedniej wersji.
-    """
-    day_offset = int(request.args.get('day', 0))
-    max_cpa = float(request.args.get('max_cpa', 0.5))
-    the_date = (datetime.utcnow() + timedelta(days=day_offset)).date()
-
-    query = f"""
-    WITH base AS (
-      SELECT
-        c.mmsi_a, c.mmsi_b, c.timestamp AS coll_ts,
-        c.cpa, c.tcpa,
-        c.latitude_a, c.longitude_a,
-        c.latitude_b, c.longitude_b
-      FROM `ais_dataset_us.collisions` c
-      WHERE DATE(c.timestamp) = '{the_date}'
-        AND c.cpa <= {max_cpa}
-        AND c.tcpa >= 0
-        AND c.tcpa <= 10
-    )
-    SELECT *,
-      CONCAT(CAST(mmsi_a AS STRING), '_', CAST(mmsi_b AS STRING), '_',
-             FORMAT_TIMESTAMP('%Y%m%d%H%M%S', coll_ts)) AS collision_id
-    FROM base
-    ORDER BY coll_ts DESC
-    LIMIT 200
-    """
-    rows = list(client.query(query).result())
-    result = []
-    for r in rows:
-        result.append({
-            'collision_id': r.collision_id,
-            'mmsi_a': r.mmsi_a,
-            'mmsi_b': r.mmsi_b,
-            'timestamp': r.coll_ts.isoformat() if r.coll_ts else None,
-            'cpa': r.cpa,
-            'tcpa': r.tcpa,
-            'latitude_a': r.latitude_a,
-            'longitude_a': r.longitude_a,
-            'latitude_b': r.latitude_b,
-            'longitude_b': r.longitude_b
-        })
-    return jsonify(result)
-
-########################################################################
-# NOWE DLA MODUŁU HISTORY – PLIKOWE (z GCS)
-########################################################################
 
 @app.route("/history_filelist")
 def history_filelist():
     """
-    Zwraca listę plików z GCS (np. z ostatnich X dni).
-    Pipeline history generuje pliki w GCS w folderze `GCS_HISTORY_PREFIX`.
-    Przykład: collisions_YYYYmmddHHMMSS.json
+    Zwraca listę plików z GCS (np. z ostatnich X dni),
+    generowanych przez pipeline history.
+    Domyślnie: 7 dni wstecz.
     """
     days_back = int(request.args.get("days", 7))
     cutoff = datetime.utcnow() - timedelta(days=days_back)
 
-    from google.cloud import storage
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
 
@@ -329,36 +277,44 @@ def history_filelist():
 @app.route("/history_file")
 def history_file():
     """
-    Zwraca zawartość konkretnego pliku (JSON) z GCS,
-    wygenerowanego przez pipeline history.
-    Załóżmy, że pipeline zapisuje JSON w formacie:
+    Zwraca zawartość konkretnego pliku JSON z GCS,
+    generowanego przez pipeline history.
+    Format pliku (przykład):
       {
         "collisions": [
-           { "collision_id": "...", "frames": [...], ... },
-           ...
+          {
+            "collision_id": "...",
+            "frames": [
+               { "time": "...", "shipPositions": [...] },
+               ...
+            ]
+          },
+          ...
         ]
       }
     """
     filename = request.args.get("file", "")
     if not filename:
-        return jsonify({"error": "Missing 'file' param"}), 400
+        return jsonify({"error": "Missing 'file' parameter"}), 400
 
-    from google.cloud import storage
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
-
     blob = bucket.blob(filename)
+
     if not blob.exists():
-        return jsonify({"error": "File not found"}), 404
+        return jsonify({"error": f"File not found: {filename}"}), 404
 
     data_str = blob.download_as_text(encoding="utf-8")
-    # Niczego nie przerabiamy, zwracamy w oryginale
+    # Zwracamy surowy JSON:
     return app.response_class(
         data_str,
         mimetype="application/json"
     )
 
-########################################################################
-
+# ------------------------------------------------------------
+# 5) Uruchom serwer
+# ------------------------------------------------------------
 if __name__ == '__main__':
+    # Upewnij się, że zainstalowałeś google-cloud-storage:
+    #   pip install google-cloud-storage
     app.run(host='0.0.0.0', port=5000, debug=True)
