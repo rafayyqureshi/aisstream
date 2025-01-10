@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
-from google.cloud import storage  # ← Dodatkowo, do obsługi GCS
 
 app = Flask(
     __name__,
