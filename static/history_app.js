@@ -39,7 +39,7 @@ function initHistoryApp() {
  */
 function setupUI() {
   // Day -
-  document.getElementById('prevDay').addEventListener('click', ()=>{
+  document.getElementById('prevDay').addEventListener('click', () => {
     if (currentDay > minDay) {
       currentDay--;
       updateDayLabel();
@@ -47,7 +47,7 @@ function setupUI() {
     }
   });
   // Day +
-  document.getElementById('nextDay').addEventListener('click', ()=>{
+  document.getElementById('nextDay').addEventListener('click', () => {
     if (currentDay < maxDay) {
       currentDay++;
       updateDayLabel();
@@ -64,14 +64,14 @@ function setupUI() {
   });
 
   // Animacja
-  document.getElementById('playPause').addEventListener('click', ()=>{
+  document.getElementById('playPause').addEventListener('click', () => {
     if (isPlaying) stopAnimation(); 
     else startAnimation();
   });
-  document.getElementById('stepForward').addEventListener('click', ()=>{
+  document.getElementById('stepForward').addEventListener('click', () => {
     stepAnimation(1);
   });
-  document.getElementById('stepBack').addEventListener('click', ()=>{
+  document.getElementById('stepBack').addEventListener('click', () => {
     stepAnimation(-1);
   });
 
@@ -85,7 +85,7 @@ function updateDayLabel() {
   const now = new Date();
   let targetDate = new Date(now);
   targetDate.setDate(now.getDate() + currentDay);
-  const dateStr = targetDate.toISOString().slice(0,10);
+  const dateStr = targetDate.toISOString().slice(0, 10);
 
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
   document.getElementById('prevDay').disabled = (currentDay <= minDay);
@@ -99,7 +99,7 @@ function fetchFileListAndLoadCollisions() {
   fetch('/history_filelist')
     .then(res => {
       if (!res.ok) {
-        // Może być 500 czy inny kod
+        // Może być 500, 404, itp.
         throw new Error(`HTTP status ${res.status} - ${res.statusText}`);
       }
       return res.text(); // Spróbujemy odczytać jako tekst
@@ -110,10 +110,12 @@ function fetchFileListAndLoadCollisions() {
         data = JSON.parse(txt);
       } catch (parseErr) {
         console.error("Otrzymano niepoprawny JSON (być może HTML z błędem?).", parseErr);
+        showErrorInCollisionList("Invalid JSON from /history_filelist.");
         return;
       }
       if (!data.files) {
         console.warn("Brak 'files' w odpowiedzi /history_filelist:", data);
+        showErrorInCollisionList("No 'files' array in /history_filelist response.");
         return;
       }
       // Ładujemy wszystkie pliki
@@ -121,18 +123,34 @@ function fetchFileListAndLoadCollisions() {
     })
     .catch(err => {
       console.error("Błąd fetchFileList:", err);
+      showErrorInCollisionList(`Error fetching file list: ${err.message}`);
     });
+}
+
+/**
+ * Wyświetla błąd w sekcji #collision-list
+ */
+function showErrorInCollisionList(msg) {
+  const listElem = document.getElementById('collision-list');
+  if (listElem) {
+    listElem.innerHTML = `<div class="collision-item" style="color:red;"><b>Error:</b> ${msg}</div>`;
+  }
 }
 
 /**
  * Sekwencyjnie ładujemy pliki z GCS i łączymy kolizje do allCollisions
  */
 function loadAllFiles(fileList) {
+  if (!fileList || fileList.length === 0) {
+    showErrorInCollisionList("File list is empty. No historical collisions to load.");
+    return;
+  }
+
   let chain = Promise.resolve();
   fileList.forEach(fileName => {
     chain = chain.then(() => loadOneFile(fileName));
   });
-  chain.then(()=>{
+  chain.then(() => {
     console.log("Wczytano wszystkie pliki GCS. Liczba kolizji:", allCollisions.length);
     filterAndDisplayCollisions();
   });
@@ -163,6 +181,7 @@ function loadOneFile(fileName) {
     })
     .catch(err => {
       console.error("Błąd loadOneFile:", fileName, err);
+      // Nie przerywamy łańcucha – wczytujemy dalej kolejne pliki
     });
 }
 
@@ -172,7 +191,7 @@ function loadOneFile(fileName) {
 function filterAndDisplayCollisions() {
   clearCollisions();
 
-  if (!allCollisions || allCollisions.length===0) {
+  if (!allCollisions || allCollisions.length === 0) {
     const listElem = document.getElementById('collision-list');
     listElem.innerHTML = '<div class="collision-item"><i>No collisions loaded or no data</i></div>';
     return;
@@ -182,15 +201,15 @@ function filterAndDisplayCollisions() {
   const now = new Date();
   let targetDate = new Date(now);
   targetDate.setDate(now.getDate() + currentDay);
-  let targetStr = targetDate.toISOString().slice(0,10);
+  let targetStr = targetDate.toISOString().slice(0, 10);
 
   // Filtr cpa
   let filtered = allCollisions.filter(c => {
     if (!c.timestamp) return false;
-    let dtStr = c.timestamp.slice(0,10);
+    let dtStr = c.timestamp.slice(0, 10);
     if (dtStr !== targetStr) return false;
 
-    if ((c.cpa||99) > cpaFilter) return false;
+    if ((c.cpa || 99) > cpaFilter) return false;
     return true;
   });
 
@@ -201,10 +220,10 @@ function filterAndDisplayCollisions() {
  * Czyści listę i markery
  */
 function clearCollisions() {
-  collisionMarkers.forEach(m=>map.removeLayer(m));
-  collisionMarkers=[];
+  collisionMarkers.forEach(m => map.removeLayer(m));
+  collisionMarkers = [];
   const listElem = document.getElementById('collision-list');
-  if (listElem) listElem.innerHTML='';
+  if (listElem) listElem.innerHTML = '';
 }
 
 /**
@@ -212,10 +231,10 @@ function clearCollisions() {
  */
 function displayCollisions(collisions) {
   const listElem = document.getElementById('collision-list');
-  if (!collisions || collisions.length===0) {
+  if (!collisions || collisions.length === 0) {
     let noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML='<i>No collisions for selected day/cpa</i>';
+    noItem.innerHTML = '<i>No collisions for selected day/cpa</i>';
     listElem.appendChild(noItem);
     return;
   }
@@ -229,7 +248,7 @@ function displayCollisions(collisions) {
     // Nazwy statków (lub fallback do mmsi)
     let shipA = c.ship1_name || `MMSI:${c.mmsi_a}`;
     let shipB = c.ship2_name || `MMSI:${c.mmsi_b}`;
-    let distNm = (c.cpa||0).toFixed(2);
+    let distNm = (c.cpa || 0).toFixed(2);
     let timeStr = '';
     if (c.timestamp) {
       let d = new Date(c.timestamp);
@@ -240,7 +259,7 @@ function displayCollisions(collisions) {
     let item = document.createElement('div');
     item.classList.add('collision-item');
 
-    item.innerHTML=`
+    item.innerHTML = `
       <div class="collision-header" style="display:flex;justify-content:space-between;align-items:center;">
         <div>
           <strong>${shipA} - ${shipB}</strong><br>
@@ -252,30 +271,30 @@ function displayCollisions(collisions) {
     listElem.appendChild(item);
 
     // Obsługa kliknięcia -> zoom i wczytanie animacji
-    item.querySelector('.zoom-button').addEventListener('click', ()=>{
+    item.querySelector('.zoom-button').addEventListener('click', () => {
       zoomToCollision(c);
     });
 
     // Marker kolizyjny
-    let latC = ((c.latitude_a ||0) + (c.latitude_b||0))/2;
-    let lonC = ((c.longitude_a||0) + (c.longitude_b||0))/2;
+    let latC = ((c.latitude_a || 0) + (c.latitude_b || 0)) / 2;
+    let lonC = ((c.longitude_a || 0) + (c.longitude_b || 0)) / 2;
 
     let collisionIcon = L.divIcon({
-      className:'',
+      className: '',
       html: `
         <svg width="24" height="24" viewBox="-12 -12 24 24">
           <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
           <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">!</text>
         </svg>
       `,
-      iconSize:[24,24],
-      iconAnchor:[12,12]
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
     });
 
-    let tip=`Collision: ${shipA} & ${shipB}\nDist:${distNm} nm @ ${timeStr}`;
-    let marker = L.marker([latC, lonC], { icon:collisionIcon })
-      .bindTooltip(tip.replace(/\n/g,"<br>"), {sticky:true})
-      .on('click', ()=> zoomToCollision(c));
+    let tip = `Collision: ${shipA} & ${shipB}\nDist:${distNm} nm @ ${timeStr}`;
+    let marker = L.marker([latC, lonC], { icon: collisionIcon })
+      .bindTooltip(tip.replace(/\n/g, "<br>"), { sticky: true })
+      .on('click', () => zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
   });
@@ -285,16 +304,16 @@ function displayCollisions(collisions) {
  * Przeniesienie widoku do kolizji i pobranie animacji
  */
 function zoomToCollision(c) {
-  let latC = ((c.latitude_a||0) + (c.latitude_b||0))/2;
-  let lonC = ((c.longitude_a||0) + (c.longitude_b||0))/2;
+  let latC = ((c.latitude_a || 0) + (c.latitude_b || 0)) / 2;
+  let lonC = ((c.longitude_a || 0) + (c.longitude_b || 0)) / 2;
   map.setView([latC, lonC], 10);
 
-  document.getElementById('left-panel').style.display='block';
-  document.getElementById('bottom-center-bar').style.display='block';
+  document.getElementById('left-panel').style.display = 'block';
+  document.getElementById('bottom-center-bar').style.display = 'block';
 
   stopAnimation();
-  animationData=[];
-  animationIndex=0;
+  animationData = [];
+  animationIndex = 0;
 
   // c.collision_id => /history_data?collision_id=...
   let url = `/history_data?collision_id=${encodeURIComponent(c.collision_id)}`;
@@ -319,10 +338,10 @@ function zoomToCollision(c) {
       }
       inSituationView = true;
       animationData = json.frames;
-      animationIndex=0;
+      animationIndex = 0;
       updateMapFrame();
     })
-    .catch(err=>{
+    .catch(err => {
       console.error("Błąd zoomToCollision fetch:", err);
     });
 }
@@ -330,77 +349,76 @@ function zoomToCollision(c) {
 /**
  * start/stop animacji
  */
-function startAnimation(){
-  if (!animationData || animationData.length===0) return;
-  isPlaying=true;
-  document.getElementById('playPause').textContent='Pause';
-  animationInterval=setInterval(()=>stepAnimation(1),1000);
+function startAnimation() {
+  if (!animationData || animationData.length === 0) return;
+  isPlaying = true;
+  document.getElementById('playPause').textContent = 'Pause';
+  animationInterval = setInterval(() => stepAnimation(1), 1000);
 }
-function stopAnimation(){
-  isPlaying=false;
-  document.getElementById('playPause').textContent='Play';
+function stopAnimation() {
+  isPlaying = false;
+  document.getElementById('playPause').textContent = 'Play';
   if (animationInterval) clearInterval(animationInterval);
-  animationInterval=null;
+  animationInterval = null;
 }
-function stepAnimation(step){
-  animationIndex+=step;
-  if (animationIndex<0) animationIndex=0;
-  if (animationIndex>=animationData.length) animationIndex=animationData.length-1;
+function stepAnimation(step) {
+  animationIndex += step;
+  if (animationIndex < 0) animationIndex = 0;
+  if (animationIndex >= animationData.length) animationIndex = animationData.length - 1;
   updateMapFrame();
 }
 
 /**
  * Wyświetlenie klatki animacji
  */
-function updateMapFrame(){
+function updateMapFrame() {
   const frameIndicator = document.getElementById('frameIndicator');
-  frameIndicator.textContent = `${animationIndex+1}/${animationData.length}`;
+  frameIndicator.textContent = `${animationIndex + 1}/${animationData.length}`;
 
   // czyścimy poprzednie
-  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-  shipMarkersOnMap=[];
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
 
-  if(!animationData || animationData.length===0) return;
+  if (!animationData || animationData.length === 0) return;
   let frame = animationData[animationIndex];
-  let ships = frame.shipPositions||[];
+  let ships = frame.shipPositions || [];
 
-  ships.forEach(s=>{
-    let sd={
-      cog: s.cog||0,
-      ship_length: s.ship_length||0
+  ships.forEach(s => {
+    let sd = {
+      cog: s.cog || 0,
+      ship_length: s.ship_length || 0
     };
-    let icon = createShipIcon(sd,false);
-    let marker = L.marker([s.lat, s.lon], {icon});
+    let icon = createShipIcon(sd, false);
+    let marker = L.marker([s.lat, s.lon], { icon });
     let nm = s.name || `MMSI:${s.mmsi}`;
-    let sogVal = (s.sog||0).toFixed(1);
-    let rDeg = Math.round(s.cog||0);
-    let tip=`
+    let sogVal = (s.sog || 0).toFixed(1);
+    let rDeg = Math.round(s.cog || 0);
+    let tip = `
       <b>${nm}</b><br>
       SOG:${sogVal} kn, COG:${rDeg}°<br>
-      Len:${s.ship_length||0}
+      Len:${s.ship_length || 0}
     `;
-    marker.bindTooltip(tip, {sticky:true});
+    marker.bindTooltip(tip, { sticky: true });
     marker.addTo(map);
     shipMarkersOnMap.push(marker);
   });
 
   // Panel info
   const leftPanel = document.getElementById('selected-ships-info');
-  leftPanel.innerHTML='';
+  leftPanel.innerHTML = '';
   const pairInfo = document.getElementById('pair-info');
-  pairInfo.innerHTML='';
+  pairInfo.innerHTML = '';
 
-  // Dla prostoty 2 statki (lub n)
-  if (ships.length>=2){
-    let sA=ships[0];
-    let sB=ships[1];
-    let nameA=sA.name||`MMSI:${sA.mmsi}`;
-    let nameB=sB.name||`MMSI:${sB.mmsi}`;
-    leftPanel.innerHTML=`
+  if (ships.length >= 2) {
+    let sA = ships[0];
+    let sB = ships[1];
+    let nameA = sA.name || `MMSI:${sA.mmsi}`;
+    let nameB = sB.name || `MMSI:${sB.mmsi}`;
+    leftPanel.innerHTML = `
       <b>${nameA}</b><br>
-      SOG:${(sA.sog||0).toFixed(1)} kn, COG:${Math.round(sA.cog||0)}°, L:${sA.ship_length||'N/A'}<br><br>
+      SOG:${(sA.sog || 0).toFixed(1)} kn, COG:${Math.round(sA.cog || 0)}°, L:${sA.ship_length || 'N/A'}<br><br>
       <b>${nameB}</b><br>
-      SOG:${(sB.sog||0).toFixed(1)} kn, COG:${Math.round(sB.cog||0)}°, L:${sB.ship_length||'N/A'}
+      SOG:${(sB.sog || 0).toFixed(1)} kn, COG:${Math.round(sB.cog || 0)}°, L:${sB.ship_length || 'N/A'}
     `;
   }
 }
