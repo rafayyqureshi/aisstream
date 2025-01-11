@@ -2,279 +2,250 @@
 import os
 import json
 import math
+import time
+import logging
 import datetime
 
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions, GoogleCloudOptions
+from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
+from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
+from apache_beam.transforms.userstate import BagStateSpec
+import apache_beam.coders
 
-# Upewnij się, że plik "requirements.txt" ma apache-beam>=2.14 itp.
-# by FileIO było dostępne.
-from apache_beam.io.fileio import WriteToFiles, FileSink
+# Parametry kolizji
+CPA_THRESHOLD = 0.5         # mile morskie
+TCPA_THRESHOLD = 10.0       # minuty
+STATE_RETENTION_SEC = 120   # wydłużamy do 120s (2 min), by potok dłużej śledził parę
+# OLD_COLLISION_MINUTES = 5 # usuwamy/wyłączamy, żeby BQ nie „obcinał” starych wierszy
 
-# ------------------------------------------------------------
-# Funkcja pomocnicza: Prosta interpolacja klatek
-# ------------------------------------------------------------
-def interpolate_positions(records, step_seconds=60):
-    if not records:
-        return []
-    # sortujemy rosnąco po timestamp
-    records.sort(key=lambda x: x[0])
-    start_t = records[0][0]
-    end_t   = records[-1][0]
+def parse_ais(record: bytes):
+    """
+    Parsuje rekord JSON z Pub/Sub (AIS).
+    Zwraca None, jeśli brakuje wymaganych pól.
+    """
+    try:
+        data = json.loads(record.decode("utf-8"))
+        required = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
+        if not all(r in data for r in required):
+            return None
 
-    out = []
-    current_t = start_t
-    idx = 0
+        data["mmsi"] = int(data["mmsi"])
+        data["latitude"] = float(data["latitude"])
+        data["longitude"] = float(data["longitude"])
+        data["cog"] = float(data["cog"])
+        data["sog"] = float(data["sog"])
 
-    while current_t <= end_t:
-        # szukamy segmentu [records[idx], records[idx+1]]
-        while idx < len(records) - 1 and records[idx+1][0] < current_t:
-            idx += 1
+        # Opcjonalne pole ship_length
+        ship_len = None
+        if "ship_length" in data:
+            try:
+                ship_len = float(data["ship_length"])
+            except:
+                pass
+        data["ship_length"] = ship_len
 
-        if idx == len(records) - 1:
-            # koniec
-            t_last, la, lo, sg, cg = records[-1]
-            out.append((current_t, la, lo, sg, cg))
-        else:
-            tA, laA, loA, sgA, cgA = records[idx]
-            tB, laB, loB, sgB, cgB = records[idx+1]
-            if current_t < tA:
-                out.append((current_t, laA, loA, sgA, cgA))
-            else:
-                dt = (tB - tA).total_seconds()
-                if dt <= 0:
-                    out.append((current_t, laA, loA, sgA, cgA))
-                else:
-                    ratio = (current_t - tA).total_seconds() / dt
-                    lat_i = laA + (laB - laA)*ratio
-                    lon_i = loA + (loB - loA)*ratio
-                    sog_i = sgA + (sgB - sgA)*ratio
-                    cog_i = cgA + (cgB - cgA)*ratio
-                    out.append((current_t, lat_i, lon_i, sog_i, cog_i))
+        # geohash – do stateful detection
+        data["geohash"] = data.get("geohash", "none")
 
-        current_t += datetime.timedelta(seconds=step_seconds)
+        return data
+    except:
+        return None
 
-    return out
+def compute_cpa_tcpa(a, b):
+    """
+    Oblicza (cpa, tcpa).
+    Zwraca (9999, -1) jeśli statki <50m lub tcpa < 0.
+    """
+    try:
+        la = float(a.get("ship_length") or 0)
+        lb = float(b.get("ship_length") or 0)
+    except:
+        return (9999, -1)
 
-# ------------------------------------------------------------
-# DoFn: rozwijamy wpisy kolizji w klatki animacji
-# ------------------------------------------------------------
-class ProcessCollisionsFn(beam.DoFn):
-    def setup(self):
-        # Klient BQ tworzony raz na workerze
-        self.bq_client = bigquery.Client()
+    if la < 50 or lb < 50:
+        return (9999, -1)
 
-    def process(self, collision_row):
-        """
-        collision_row jest dict-em z BQ, np:
-          {
-            'collision_id': '...',
-            'mmsi_a': 123,
-            'mmsi_b': 456,
-            'timestamp': datetime,
-            'cpa': 0.23,
-            'tcpa': 5.0,
-            ...
-          }
-        """
-        collision_id = collision_row['collision_id']
-        mmsi_a       = collision_row['mmsi_a']
-        mmsi_b       = collision_row['mmsi_b']
-        cpa_val      = collision_row['cpa']
-        tcpa_val     = collision_row['tcpa']
-        ts_coll      = collision_row['timestamp']  # datetime
+    latRef = (a["latitude"] + b["latitude"]) / 2.0
+    scaleLat = 111000.0
+    scaleLon = 111000.0 * math.cos(math.radians(latRef))
 
-        # Filtr bezpieczeństwa
-        if cpa_val is None or cpa_val >= 0.5:
-            return
-        if tcpa_val is None or tcpa_val > 10 or tcpa_val < 0:
-            return
+    def to_xy(lat, lon):
+        return (lon * scaleLon, lat * scaleLat)
 
-        # Zakres [T -20 min, T +5 min] do animacji
-        coll_time = ts_coll
-        start_t = coll_time - datetime.timedelta(minutes=20)
-        end_t   = coll_time + datetime.timedelta(minutes=5)
+    xA, yA = to_xy(a["latitude"], a["longitude"])
+    xB, yB = to_xy(b["latitude"], b["longitude"])
 
-        # Składamy zapytanie - dołączamy ship_name, ship_length
-        query = f"""
-        SELECT
-          mmsi,
-          timestamp,
-          latitude,
-          longitude,
-          sog,
-          cog,
-          ANY_VALUE(ship_name) AS ship_name,
-          ANY_VALUE(ship_length) AS ship_length
-        FROM `ais_dataset_us.ships_positions`
-        WHERE mmsi IN ({mmsi_a}, {mmsi_b})
-          AND timestamp BETWEEN '{start_t.isoformat()}' AND '{end_t.isoformat()}'
-        GROUP BY mmsi, timestamp, latitude, longitude, sog, cog
-        ORDER BY timestamp
-        """
+    sogA = float(a["sog"] or 0)
+    sogB = float(b["sog"] or 0)
 
-        rows = list(self.bq_client.query(query).result())
+    def cog_to_vec(cog_deg, sog_nm):
+        r = math.radians(cog_deg)
+        return (sog_nm * math.sin(r), sog_nm * math.cos(r))
 
-        data_a = []
-        data_b = []
-        for r in rows:
-            t  = r.timestamp
-            la = float(r.latitude or 0.0)
-            lo = float(r.longitude or 0.0)
-            sg = float(r.sog or 0.0)
-            cg = float(r.cog or 0.0)
-            nm = r.ship_name
-            ln = r.ship_length
+    vxA, vyA = cog_to_vec(a["cog"], sogA)
+    vxB, vyB = cog_to_vec(b["cog"], sogB)
 
-            if r.mmsi == mmsi_a:
-                data_a.append((t, la, lo, sg, cg, nm, ln))
-            else:
-                data_b.append((t, la, lo, sg, cg, nm, ln))
+    dx = xA - xB
+    dy = yA - yB
 
-        # Stripping do 5-elementów (dla interpolacji)
-        def stripped(x):
-            return (x[0], x[1], x[2], x[3], x[4])  # ts, lat, lon, sog, cog
+    speed_scale = 1852.0 / 60.0  # nm/h => m/min
+    dvx_mpm = (vxA - vxB) * speed_scale
+    dvy_mpm = (vyA - vyB) * speed_scale
 
-        data_a_stripped = [stripped(x) for x in data_a]
-        data_b_stripped = [stripped(x) for x in data_b]
+    VV = dvx_mpm**2 + dvy_mpm**2
+    PV = dx * dvx_mpm + dy * dvy_mpm
 
-        interp_a = interpolate_positions(data_a_stripped, 60)
-        interp_b = interpolate_positions(data_b_stripped, 60)
+    if VV == 0:
+        tcpa = 0.0
+    else:
+        tcpa = -PV / VV
 
-        # Weźmy nazwy i długości z ostatniego wiersza (lub None)
-        name_a = data_a[-1][5] if data_a else None
-        len_a  = data_a[-1][6] if data_a else None
-        name_b = data_b[-1][5] if data_b else None
-        len_b  = data_b[-1][6] if data_b else None
+    if tcpa < 0:
+        return (9999, -1)
 
-        from collections import defaultdict
-        time_map = defaultdict(list)
+    # Pozycje przy CPA
+    vxA_mpm = vxA * speed_scale
+    vyA_mpm = vyA * speed_scale
+    vxB_mpm = vxB * speed_scale
+    vyB_mpm = vyB * speed_scale
 
-        def add_ships(interp_list, mmsi_val, name_val, length_val):
-            for (ts, la, lo, sg, cg) in interp_list:
-                key_ts = ts.replace(microsecond=0)
-                time_map[key_ts].append({
-                    "mmsi": mmsi_val,
-                    "lat": la,
-                    "lon": lo,
-                    "sog": sg,
-                    "cog": cg,
-                    "name": name_val,
-                    "ship_length": length_val
-                })
+    xA2 = xA + vxA_mpm * tcpa
+    yA2 = yA + vyA_mpm * tcpa
+    xB2 = xB + vxB_mpm * tcpa
+    yB2 = yB + vyB_mpm * tcpa
 
-        add_ships(interp_a, mmsi_a, name_a, len_a)
-        add_ships(interp_b, mmsi_b, name_b, len_b)
+    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
+    dist_nm = dist_m / 1852.0
+    return (dist_nm, tcpa)
 
-        frames = []
-        for tstamp in sorted(time_map.keys()):
-            frames.append({
-                "time": tstamp.isoformat(),
-                "shipPositions": time_map[tstamp]
-            })
+class CollisionDoFn(beam.DoFn):
+    """
+    Stateful DoFn do wykrywania kolizji w obrębie tej samej komórki geohash.
+    """
+    RECORDS_STATE = BagStateSpec("records_state", beam.coders.FastPrimitivesCoder())
 
-        collision_obj = {
-            "collision_id": collision_id,
-            "mmsi_a": mmsi_a,
-            "mmsi_b": mmsi_b,
-            "cpa": cpa_val,
-            "tcpa": tcpa_val,
-            "timestamp": ts_coll.isoformat() if ts_coll else None,
-            "frames": frames
-        }
-        yield collision_obj
+    def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
+        gh, ship = element
+        now_sec = time.time()
 
-# ------------------------------------------------------------
-# Funkcja do konwersji listy kolizji → JSON (całościowy)
-# ------------------------------------------------------------
-def combine_collisions_into_single_json(items):
-    arr = list(items)  # items to iterable
-    big_dict = {"collisions": arr}
-    # Możesz sformatować ładnie, albo zapisywać bez indent=2.
-    return json.dumps(big_dict, default=str, indent=2)
+        # Dodaj nowy statek do stanu
+        records_state.add((ship, now_sec))
 
-# FileSink z poprawnym sygnaturami
-class SingleJSONSink(FileSink):
-    def open(self, fh):
-        return fh
+        # Odczyt stanu
+        old_list = list(records_state.read())
+        fresh = []
+        for (s, t) in old_list:
+            if (now_sec - t) <= STATE_RETENTION_SEC:
+                fresh.append((s, t))
 
-    # Uwaga: w Beam 2.48+ WriteToFiles może wywołać sink.write(fh, element, window=..., ...).
-    # Dlatego akceptujemy *args, **kwargs.
-    def write(self, fh, element, **kwargs):
-        fh.write(element.encode("utf-8"))
+        records_state.clear()
+        for (s, t) in fresh:
+            records_state.add((s, t))
 
-    def flush(self, fh):
-        pass
+        # Oblicz kolizje
+        for (old_ship, _) in fresh:
+            if old_ship["mmsi"] == ship["mmsi"]:
+                continue
+            cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
+            if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
+                yield {
+                    "mmsi_a": old_ship["mmsi"],
+                    "mmsi_b": ship["mmsi"],
+                    "timestamp": ship["timestamp"],  # z nowszego
+                    "cpa": cpa,
+                    "tcpa": tcpa,
+                    "latitude_a": old_ship["latitude"],
+                    "longitude_a": old_ship["longitude"],
+                    "latitude_b": ship["latitude"],
+                    "longitude_b": ship["longitude"],
+                    "ship_length_a": old_ship.get("ship_length"),
+                    "ship_length_b": ship.get("ship_length")
+                }
+
+def remove_geohash(row):
+    # Usuwamy klucz "geohash" przed zapisem do ships_positions
+    new_row = dict(row)
+    new_row.pop("geohash", None)
+    return new_row
 
 def run():
-    # 1) Odczytujemy pipeline_options poza potokiem
+    logging.getLogger().setLevel(logging.INFO)
     pipeline_options = PipelineOptions()
-    google_cloud_options = pipeline_options.view_as(GoogleCloudOptions)
-    region = google_cloud_options.region
-    # tu można ewentualnie odczytać parametry user-defined, np. LOOKBACK_MINUTES
-    # (jeśli zdefiniowano custom options, ale tu zrobimy prosto)
+    pipeline_options.view_as(StandardOptions).streaming = True
 
-    # Ustawiamy streaming=False (batch)
-    standard_options = pipeline_options.view_as(StandardOptions)
-    standard_options.streaming = False
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
+    dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
+    input_sub = os.getenv("INPUT_SUBSCRIPTION", 
+                          "projects/ais-collision-detection/subscriptions/ais-data-sub")
 
-    lookback_minutes = int(os.getenv('LOOKBACK_MINUTES','60'))
+    table_positions = f"{project_id}:{dataset}.ships_positions"
+    table_collisions = f"{project_id}:{dataset}.collisions"
 
-    # Ścieżka docelowa
-    output_prefix = os.getenv('HISTORY_OUTPUT_PREFIX',
-                              'gs://ais-collision-detection-bucket/history_collisions/hourly')
-
-    now = datetime.datetime.utcnow()
-    start_time = now - datetime.timedelta(minutes=lookback_minutes)
-
-    # 2) Tworzymy potok
     with beam.Pipeline(options=pipeline_options) as p:
+        # 1) Odczyt AIS z PubSub
+        lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        query = f"""
-        SELECT
-          CONCAT(CAST(mmsi_a AS STRING), '_',
-                 CAST(mmsi_b AS STRING), '_',
-                 FORMAT_TIMESTAMP('%Y%m%d%H%M%S', timestamp)) AS collision_id,
-          mmsi_a,
-          mmsi_b,
-          timestamp,
-          cpa,
-          tcpa
-        FROM `ais_dataset_us.collisions`
-        WHERE timestamp >= TIMESTAMP('{start_time.isoformat()}')
-          AND cpa < 0.5
-          AND tcpa >= 0
-          AND tcpa <= 10
-        ORDER BY timestamp
-        """
-
-        # 3) Czytamy z BQ
-        collisions = (
-            p
-            | "ReadCollisionsBQ" >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+        # 2) Parsowanie
+        parsed = (
+            lines
+            | "ParseAIS" >> beam.Map(parse_ais)
+            | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 4) Rozbijamy kolizje w klatki
-        expanded = collisions | "ProcessCollisions" >> beam.ParDo(ProcessCollisionsFn())
-
-        # 5) Składamy do listy, a potem do jednego JSON-a
-        collisions_list = expanded | "ToList" >> beam.combiners.ToList()
-        single_json_str = collisions_list | "CombineToJson" >> beam.Map(combine_collisions_into_single_json)
-
-        # 6) Zapis do jednego pliku
-        timestamp_str = now.strftime("%Y%m%d%H%M%S")
-        filename = f"{output_prefix}/collisions_{timestamp_str}.json"
-
-        (
-            single_json_str
-            | "WriteSingleFile" >> WriteToFiles(
-                path=filename,
-                file_naming=lambda _, __: "part.json",
-                max_writers_per_bundle=1,
-                sink=SingleJSONSink()
-            )
+        # 3) Zapis statków do BQ
+        parsed_for_bq = parsed | "RemoveGeoHash" >> beam.Map(remove_geohash)
+        parsed_for_bq | "WritePositions" >> WriteToBigQuery(
+            table=table_positions,
+            schema=(
+                "mmsi:INTEGER,"
+                "latitude:FLOAT,"
+                "longitude:FLOAT,"
+                "cog:FLOAT,"
+                "sog:FLOAT,"
+                "timestamp:TIMESTAMP,"
+                "ship_name:STRING,"
+                "ship_length:FLOAT"
+            ),
+            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            additional_bq_parameters={"location": "us-east1"},
         )
+
+        # 4) Wykrywanie kolizji
+        keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+        collisions = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
+        # Uwaga: rezygnujemy z filtra starych kolizji, by BQ mogło gromadzić
+        # i będziemy filtrować dopiero w front-endzie
+
+        # 5) Zapis kolizji do BQ
+        collisions | "WriteCollisions" >> WriteToBigQuery(
+            table=table_collisions,
+            schema=(
+                "mmsi_a:INTEGER,"
+                "mmsi_b:INTEGER,"
+                "timestamp:TIMESTAMP,"
+                "cpa:FLOAT,"
+                "tcpa:FLOAT,"
+                "latitude_a:FLOAT,"
+                "longitude_a:FLOAT,"
+                "latitude_b:FLOAT,"
+                "longitude_b:FLOAT,"
+                "ship_length_a:FLOAT,"
+                "ship_length_b:FLOAT"
+            ),
+            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            additional_bq_parameters={"location": "us-east1"},
+        )
+
+        # 6) (opcjonalnie) publikacja do PubSub collisions-topic...
+     
+        #collisions_str = (
+        #    collisions
+        #    | "CollisionsToJson" >> beam.Map(lambda c: json.dumps(c).encode("utf-8"))
+        #)
+        #collisions_str | "PublishCollisions" >> beam.io.WriteToPubSub(topic=collisions_topic)
 
 if __name__ == "__main__":
     run()
