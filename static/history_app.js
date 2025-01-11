@@ -3,39 +3,35 @@
 // ==========================
 
 let map;
-let scenarioMarkers = [];       // ikony scenariuszy na mapie
-let currentScenarios = [];      // wszystkie wczytane scenariusze (z wielu plików)
-let scenarioGroups = {};        // np. hour -> [scenarios]
+let scenarioMarkers = [];       // Ikony scenariuszy na mapie
+let currentScenarios = [];      // wszystkie wczytane scenariusze (z plików GCS)
+let scenarioGroups = {};        // np. "2025010914" -> [scenarios]
 let selectedScenario = null;    // aktualnie wybrany scenariusz
-let animationData = null;       // trzymamy klatki frames
+let animationData = null;       // frames danej animacji
 let animationIndex = 0;
 let animationInterval = null;
 let isPlaying = false;
 
-let shipMarkersOnMap = [];      // statki w aktualnej klatce
+let shipMarkersOnMap = [];      // statki wyświetlane w aktualnej klatce
 let inSituationView = false;    // czy jesteśmy w trybie odtwarzania
 
-// Parametry filtra cpa (opcjonalnie)
-let cpaFilter = 0.5;
-
-// Day offset (jeśli mamy przyciski nextDay/prevDay)
+// Zmienne do obsługi “dni” wstecz (jeśli mamy + / - day)
 let currentDay = 0;
 const minDay = -7;
 const maxDay = 0;
 
-// Główna inicjalizacja
 function initHistoryApp() {
-  // Tworzymy mapę
+  // 1) Tworzymy mapę z common.js
   map = initSharedMap('map');
 
-  // UI
+  // 2) UI – obsługa day offset, animacji
   setupDayUI();
   setupBottomUI();
 
-  // Start
+  // 3) Start – pobierz listę plików i wczytaj scenariusze
   fetchFileListAndLoadScenarios();
-  
-  // Możemy ewentualnie nasłuchiwać klik w mapę => exitSituationView
+
+  // Gdy user kliknie w mapę, a mamy odtwarzanie – wyjdź z trybu
   map.on('click', () => {
     if (inSituationView) {
       exitSituationView();
@@ -43,9 +39,9 @@ function initHistoryApp() {
   });
 }
 
-// -------------------------
-// 1) Obsługa day offset
-// -------------------------
+// --------------------
+// 1) obsługa day offset
+// --------------------
 function setupDayUI() {
   document.getElementById('prevDay').addEventListener('click', () => {
     if (currentDay > minDay) {
@@ -68,7 +64,7 @@ function setupDayUI() {
 function updateDayLabel() {
   const now = new Date();
   let d = new Date(now);
-  d.setDate(now.getDate() + currentDay);
+  d.setDate(d.getDate() + currentDay);
   const dateStr = d.toISOString().slice(0, 10);
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
 }
@@ -77,10 +73,8 @@ function updateDayLabel() {
 // 2) Fetch plików GCS + parse
 // -------------------------
 function fetchFileListAndLoadScenarios() {
-  const dayOffsetParam = currentDay; // lub np. param “days=7”, w zależności od Twojej implementacji
-  // np. /history_filelist?days=7, ale można też rozbić to na inny param
-  const url = `/history_filelist?days=${7 + (currentDay>=0 ? currentDay : 0)}`;
-  // (powyższy 7 to przykładowy – dostosuj jak chcesz)
+  // days=7 + offset – w uproszczeniu
+  const url = `/history_filelist?days=${7 + currentDay}`;
 
   fetch(url)
     .then(res => {
@@ -92,11 +86,10 @@ function fetchFileListAndLoadScenarios() {
     .then(data => {
       const files = data.files || [];
       if (files.length === 0) {
-        console.log('Brak plików w GCS dla day=', currentDay);
-        updateCollisionListUI();
+        console.log('Brak plików w GCS dla dayOffset=', currentDay);
+        updateCollisionListUI(); // pusta
         return;
       }
-      // Wczytujemy każdy plik po kolei
       return loadAllScenarioFiles(files);
     })
     .catch(err => {
@@ -104,14 +97,13 @@ function fetchFileListAndLoadScenarios() {
     });
 }
 
+// Wczytuje wszystkie pliki scenariuszy
 function loadAllScenarioFiles(fileList) {
-  // Oczyszczamy
   currentScenarios = [];
   scenarioGroups = {};
   scenarioMarkers.forEach(m => map.removeLayer(m));
   scenarioMarkers = [];
 
-  // Ładujemy pliki sekwencyjnie (dla uproszczenia Promise chain)
   const promises = fileList.map(f => {
     const fname = f.name;
     return fetch(`/history_file?file=${encodeURIComponent(fname)}`)
@@ -122,13 +114,11 @@ function loadAllScenarioFiles(fileList) {
         return r.json();
       })
       .then(jsonData => {
-        // Plik ma: { "scenarios": [ ... ] }
         if (!jsonData.scenarios) {
           console.warn(`Plik ${fname} nie zawiera "scenarios". Pomijam...`);
           return;
         }
         jsonData.scenarios.forEach(sc => {
-          // Dla uproszczenia doklejamy 'fileName' i 'timeCreated'?
           sc.fileName = fname;
           currentScenarios.push(sc);
         });
@@ -138,31 +128,26 @@ function loadAllScenarioFiles(fileList) {
       });
   });
 
-  // Gdy wszystkie pliki wczytane
   return Promise.all(promises)
     .then(() => {
-      console.log(`Załadowano wszystkie pliki. currentScenarios.length:`, currentScenarios.length);
+      console.log(`Załadowano pliki. currentScenarios.length:`, currentScenarios.length);
       groupScenariosByHour();
       updateCollisionListUI();
       drawScenarioMarkers();
     });
 }
 
-// 3) Grupowanie po “godzinach” – np. wyciągamy z nazwy pliku "YYYYmmddHH"
 function groupScenariosByHour() {
-  scenarioGroups = {};  // np. key = "2025010914" (2025-01-09 14)
+  scenarioGroups = {};
   currentScenarios.forEach(sc => {
-    // scenario_id np. "scenario_123456789_111_222"
-    // plik np. "multiship_20250109143512.json"
     const fname = sc.fileName || "";
-    // wycinamy datę/godzinę z nazwy pliku
-    // Przykład: collisions_20250109143512.json => hourKey = "2025010914"
-    const match = fname.match(/(\d{4}\d{2}\d{2}\d{2})\d{2}\d{2}\.json$/);
+    // Wzorzec: multiship_2025010914.json => hourKey = "2025010914"
+    const match = fname.match(/(\d{8}_\d{2})\.json$/); 
+    // e.g. "20250109_14"
     let hourKey = "unknown";
     if (match) {
-      hourKey = match[1]; // e.g. "2025010914"
+      hourKey = match[1];
     }
-
     if (!scenarioGroups[hourKey]) {
       scenarioGroups[hourKey] = [];
     }
@@ -171,13 +156,14 @@ function groupScenariosByHour() {
 }
 
 // -------------------------
-// 4) Generowanie listy w prawym panelu
+// 3) Generowanie listy
 // -------------------------
 function updateCollisionListUI() {
   const listDiv = document.getElementById('collision-list');
   listDiv.innerHTML = '';
 
-  if (Object.keys(scenarioGroups).length === 0) {
+  const hourKeys = Object.keys(scenarioGroups).sort();
+  if (hourKeys.length===0) {
     const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
     noItem.innerHTML = '<i>No collision scenarios found</i>';
@@ -185,37 +171,30 @@ function updateCollisionListUI() {
     return;
   }
 
-  // Sortuj klucze
-  const hourKeys = Object.keys(scenarioGroups).sort();
-  hourKeys.forEach(hourKey => {
-    // Tworzymy dropDown
+  hourKeys.forEach(hk => {
     const hourBlock = document.createElement('div');
     hourBlock.classList.add('hour-block');
 
     const hourTitle = document.createElement('div');
     hourTitle.classList.add('hour-title');
-    hourTitle.textContent = `Hour: ${hourKey}`;
+    hourTitle.textContent = `Hour: ${hk}`;
     hourBlock.appendChild(hourTitle);
 
-    // Lista scenariuszy
-    const scList = scenarioGroups[hourKey];
-    scList.forEach(sc => {
+    scenarioGroups[hk].forEach(sc => {
       const item = document.createElement('div');
       item.classList.add('collision-item');
-      const scID = sc.scenario_id;
-
-      // Jak opisać? Np. “scenario_id” + liczbę statków + liczbę frames
-      const shipsCount = (sc.ships_involved || []).length;
+      const scID = sc.collision_id || sc.scenario_id || 'unknown';
       const framesCount = (sc.frames || []).length;
+      // e.g. sc.focus_mmsi = [A,B], sc.cpa
+      const focusStr = sc.focus_mmsi ? sc.focus_mmsi.join(',') : (sc.ships_involved||[]).join(',');
 
       item.innerHTML = `
         <strong>${scID}</strong><br>
-        Ships: ${shipsCount}, Frames: ${framesCount}
+        Focus: ${focusStr} <br>
+        Frames: ${framesCount}
         <button class="zoom-button">🔍</button>
       `;
-
-      // Po kliknięciu w “lupę” => zoom do scenariusza / wczytaj animację
-      item.querySelector('.zoom-button').addEventListener('click', () => {
+      item.querySelector('.zoom-button').addEventListener('click', ()=>{
         onSelectScenario(sc);
       });
 
@@ -226,196 +205,194 @@ function updateCollisionListUI() {
   });
 }
 
-// 5) Rysujemy jedną ikonę na mapie dla scenariusza
+// -------------------------
+// 4) Ikony scenariuszy
+// -------------------------
 function drawScenarioMarkers() {
-  // Usuwamy stare
   scenarioMarkers.forEach(m => map.removeLayer(m));
   scenarioMarkers = [];
 
-  Object.keys(scenarioGroups).forEach(hourKey => {
-    const scList = scenarioGroups[hourKey];
-    scList.forEach(sc => {
-      // Ustalmy “pozycję” scenariusza -> np. bierzemy average (latitude, longitude)
-      // z collisions_in_scenario[0] - w nowym potoku mamy “collisions_in_scenario”?
-      // Albo bierzemy 1. klatkę frames[0], average statków.
+  Object.keys(scenarioGroups).forEach(hk => {
+    scenarioGroups[hk].forEach(sc => {
+      // weźmy 1. klatkę -> average position
+      if (!sc.frames || sc.frames.length===0) return;
+      const f0 = sc.frames[0];
+      const ships = f0.shipPositions||[];
+      if (ships.length===0) return;
 
-      let latSum = 0, lonSum = 0, count = 0;
-      if (sc.frames && sc.frames.length > 0) {
-        // Weźmy 1. klatkę
-        const firstFrame = sc.frames[0];
-        const ships = firstFrame.shipPositions || [];
-        ships.forEach(s => {
-          latSum += s.lat;
-          lonSum += s.lon;
-          count++;
-        });
-      }
-      if (count === 0) {
-        // fallback
-        return;
-      }
-      let latC = latSum / count;
-      let lonC = lonSum / count;
+      let latSum=0, lonSum=0, count=0;
+      ships.forEach(s => {
+        latSum += s.lat; 
+        lonSum += s.lon; 
+        count++;
+      });
+      if (count===0) return;
+      let latC = latSum/count;
+      let lonC = lonSum/count;
 
-      // Marker
       const iconHTML = `
         <svg width="20" height="20" viewBox="-10 -10 20 20">
           <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
-          <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">S</text>
+          <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">H</text>
         </svg>
       `;
       const scenarioIcon = L.divIcon({
-        className: '',
-        html: iconHTML,
-        iconSize: [20,20],
-        iconAnchor: [10,10]
+        className:'',
+        html:iconHTML,
+        iconSize:[20,20],
+        iconAnchor:[10,10]
       });
-
-      const marker = L.marker([latC, lonC], { icon: scenarioIcon })
-        .bindTooltip(`Scenario: ${sc.scenario_id}`, {direction:'top'})
-        .on('click', () => {
-          onSelectScenario(sc);
-        });
+      let marker = L.marker([latC, lonC], {icon: scenarioIcon})
+        .bindTooltip(`Scenario: ${sc.collision_id||sc.scenario_id}`, {direction:'top'})
+        .on('click', ()=> onSelectScenario(sc));
       marker.addTo(map);
       scenarioMarkers.push(marker);
     });
   });
 }
 
-// Gdy wybieramy scenariusz z listy lub z mapy
+// -------------------------
+// 5) Obsługa scenariusza
+// -------------------------
 function onSelectScenario(scenario) {
   selectedScenario = scenario;
-  // Zoom do bounding box (wszystkie statki we wszystkich frames?), lub wystarczy 1. klatka
   if (!scenario.frames || scenario.frames.length===0) {
     console.warn("Scenario has no frames");
     return;
   }
-
-  const firstFrame = scenario.frames[0];
-  const ships = firstFrame.shipPositions || [];
-  if (ships.length === 0) {
+  // Zoom do bounding box 1. klatki
+  const ships = scenario.frames[0].shipPositions||[];
+  if (ships.length===0) {
     console.warn("No ships in first frame");
     return;
   }
-
-  let latLngs = ships.map(s => [s.lat, s.lon]);
-  let bounds = L.latLngBounds(latLngs);
+  const latLngs = ships.map(s => [s.lat, s.lon]);
+  const bounds = L.latLngBounds(latLngs);
   map.fitBounds(bounds, {padding:[30,30], maxZoom:13});
 
-  // Otwieramy panel animacji
   loadScenarioAnimation(scenario);
 }
 
-// ---------------------------
-// 6) Animacja scenariusza
-// ---------------------------
 function loadScenarioAnimation(scenario) {
-  animationData = scenario.frames || [];
-  animationIndex = 0;
+  animationData = scenario.frames||[];
+  animationIndex=0;
   stopAnimation();
-  inSituationView = true;
+  inSituationView=true;
 
-  // Pokaż panele
-  document.getElementById('left-panel').style.display = 'block';
-  document.getElementById('bottom-center-bar').style.display = 'block';
+  document.getElementById('left-panel').style.display='block';
+  document.getElementById('bottom-center-bar').style.display='block';
 
   updateMapFrame();
 }
 
+// -------------------------
+// 6) Animacja
+// -------------------------
 function startAnimation() {
-  if (!animationData || animationData.length===0) return;
-  isPlaying = true;
-  document.getElementById('playPause').textContent = 'Pause';
-  animationInterval = setInterval(() => stepAnimation(1), 1000);
+  if(!animationData || animationData.length===0) return;
+  isPlaying=true;
+  document.getElementById('playPause').textContent='Pause';
+  animationInterval = setInterval(()=> stepAnimation(1), 1000);
 }
 function stopAnimation() {
-  isPlaying = false;
-  document.getElementById('playPause').textContent = 'Play';
-  if (animationInterval) clearInterval(animationInterval);
-  animationInterval = null;
+  isPlaying=false;
+  document.getElementById('playPause').textContent='Play';
+  if(animationInterval) clearInterval(animationInterval);
+  animationInterval=null;
 }
-function stepAnimation(step) {
-  animationIndex += step;
-  if (animationIndex < 0) animationIndex = 0;
-  if (animationIndex >= animationData.length) animationIndex = animationData.length-1;
+function stepAnimation(step){
+  animationIndex+=step;
+  if(animationIndex<0) animationIndex=0;
+  if(animationIndex>=animationData.length) animationIndex=animationData.length-1;
   updateMapFrame();
 }
-function updateMapFrame() {
-  const frameIndicator = document.getElementById('frameIndicator');
-  frameIndicator.textContent = `${animationIndex+1}/${animationData.length}`;
+function updateMapFrame(){
+  const frameIndicator=document.getElementById('frameIndicator');
+  frameIndicator.textContent=`${animationIndex+1}/${animationData.length}`;
 
-  // czyścimy stare
-  shipMarkersOnMap.forEach(m => map.removeLayer(m));
-  shipMarkersOnMap = [];
+  // czyść
+  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
+  shipMarkersOnMap=[];
 
-  if (!animationData || animationData.length===0) return;
+  if(!animationData||animationData.length===0) return;
   let frame = animationData[animationIndex];
-  let ships = frame.shipPositions || [];
+  let ships = frame.shipPositions||[];
 
+  // Rysuj statki
   ships.forEach(s => {
     let marker = L.marker([s.lat, s.lon], {
-      icon: createShipIcon(s, false) // z common.js
+      icon:createShipIcon(s, false)
     });
-    const nm = s.name || s.mmsi;
-    const tooltip = `
+    let nm = s.name||s.mmsi;
+    let tt=`
       <b>${nm}</b><br>
       COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)} kn<br>
-      Len:${s.ship_length || 'Unknown'}
+      L:${s.ship_length||'??'}
     `;
-    marker.bindTooltip(tooltip, { direction:'top', sticky:true });
+    marker.bindTooltip(tt, {direction:'top', sticky:true});
     marker.addTo(map);
     shipMarkersOnMap.push(marker);
   });
 
-  // Można tu też wypełnić panel “selected-ships-info” => 
-  const leftPanel = document.getElementById('selected-ships-info');
-  leftPanel.innerHTML = '';
-  const pairInfo = document.getElementById('pair-info');
-  pairInfo.innerHTML = '';
+  // Panel
+  const leftPanel=document.getElementById('selected-ships-info');
+  leftPanel.innerHTML='';
+  const pairInfo=document.getElementById('pair-info');
+  pairInfo.innerHTML='';
 
-  // Ponieważ w scenario może być n statków, wyświetlamy np. spis:
-  let html = `<b>Frame time:</b> ${frame.time}<br>`;
+  // Wypisz parametry klatki: time, focus_dist, delta_minutes
+  let html=`
+    <b>Frame time:</b> ${frame.time}<br>
+  `;
+  if(frame.focus_dist!==undefined){
+    html+=`<b>Dist(focus):</b> ${frame.focus_dist?.toFixed(2)} nm<br>`;
+  }
+  if(frame.delta_minutes!==undefined){
+    html+=`<b>Time to min approach:</b> ${frame.delta_minutes} min<br>`;
+  }
+  html+=`<hr/>`;
+
   ships.forEach(s => {
-    html += `
+    html+=`
       <div>
-        <b>${s.name || s.mmsi}</b> 
+        <b>${s.name||s.mmsi}</b> 
         [COG:${Math.round(s.cog)}, SOG:${s.sog.toFixed(1)} kn, L:${s.ship_length||'?'}]
       </div>
     `;
   });
-  leftPanel.innerHTML = html;
+  leftPanel.innerHTML=html;
 }
 
-function exitSituationView() {
-  inSituationView = false;
-  document.getElementById('left-panel').style.display = 'none';
-  document.getElementById('bottom-center-bar').style.display = 'none';
+function exitSituationView(){
+  inSituationView=false;
+  document.getElementById('left-panel').style.display='none';
+  document.getElementById('bottom-center-bar').style.display='none';
   stopAnimation();
-  shipMarkersOnMap.forEach(m => map.removeLayer(m));
-  shipMarkersOnMap = [];
-  animationData = null;
-  animationIndex = 0;
+  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
+  shipMarkersOnMap=[];
+  animationData=null;
+  animationIndex=0;
 }
 
-function clearAllScenarios() {
-  // czyścimy listę i marker i panel
-  currentScenarios = [];
-  scenarioGroups = {};
-  scenarioMarkers.forEach(m => map.removeLayer(m));
-  scenarioMarkers = [];
-  document.getElementById('collision-list').innerHTML = '';
+function clearAllScenarios(){
+  currentScenarios=[];
+  scenarioGroups={};
+  scenarioMarkers.forEach(m=>map.removeLayer(m));
+  scenarioMarkers=[];
+  document.getElementById('collision-list').innerHTML='';
 }
 
-function setupBottomUI() {
-  document.getElementById('playPause').addEventListener('click', () => {
-    if (isPlaying) stopAnimation();
+// -------------------------
+// Inic bottom bar
+// -------------------------
+function setupBottomUI(){
+  document.getElementById('playPause').addEventListener('click', ()=>{
+    if(isPlaying) stopAnimation();
     else startAnimation();
   });
-  document.getElementById('stepForward').addEventListener('click', () => stepAnimation(1));
-  document.getElementById('stepBack').addEventListener('click', () => stepAnimation(-1));
+  document.getElementById('stepForward').addEventListener('click', ()=>stepAnimation(1));
+  document.getElementById('stepBack').addEventListener('click', ()=>stepAnimation(-1));
 }
 
-// ---------------
-// init
-// ---------------
+// start
 document.addEventListener('DOMContentLoaded', initHistoryApp);
