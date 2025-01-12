@@ -389,6 +389,9 @@ function setupBottomUI(){
   });
   document.getElementById('stepForward').addEventListener('click',()=>stepAnimation(1));
   document.getElementById('stepBack').addEventListener('click',()=>stepAnimation(-1));
+  document.getElementById('closePlayback').addEventListener('click', () => {
+    exitSituationView(); 
+  });
 }
 
 // Start

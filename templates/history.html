@@ -61,17 +61,19 @@
   <!-- Prawy panel: lista kolizji/scenariuszy -->
   <div id="right-panel">
     <h2>Historical Collisions</h2>
-    <div id="collision-list" style="overflow:auto;max-height:90vh;">
-      <!-- wygenerowane dynamicznie przez history_app.js -->
+    <div id="collision-list" style="overflow:auto; max-height:90vh;">
+      <!-- generowane dynamicznie przez history_app.js -->
     </div>
   </div>
 
-  <!-- Dolny panel (sterowanie animacją) – ukrywany / pokazywany -->
+  <!-- Dolny panel (sterowanie animacją) – tu dodajemy przycisk "Close" -->
   <div id="bottom-center-bar" style="display:none;">
     <button id="stepBack">&lt;</button>
     <button id="playPause">Play</button>
     <button id="stepForward">&gt;</button>
     <span id="frameIndicator"></span>
+    <!-- Nowy przycisk "Close" -->
+    <button id="closePlayback">Close</button>
   </div>
 
   <!-- common.js (najpierw), potem history_app.js -->
