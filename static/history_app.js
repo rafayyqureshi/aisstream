@@ -24,13 +24,13 @@ const maxDay = 0;
 
 function initHistoryApp() {
   // 1) Init map
-  map = initSharedMap('map');
+  map = initSharedMap('map'); // z pliku common.js
 
   // 2) Setup UI
   setupDayUI();
   setupBottomUI();
 
-  // 3) Load
+  // 3) Load pliki .json z GCS
   fetchFileListAndLoadScenarios();
 }
 
@@ -38,16 +38,16 @@ function initHistoryApp() {
 // A) Day offset
 // ---------------------------------------
 function setupDayUI() {
-  document.getElementById('prevDay').addEventListener('click', ()=>{
-    if(currentDay > minDay) {
+  document.getElementById('prevDay').addEventListener('click', () => {
+    if (currentDay > minDay) {
       currentDay--;
       updateDayLabel();
       clearAll();
       fetchFileListAndLoadScenarios();
     }
   });
-  document.getElementById('nextDay').addEventListener('click', ()=>{
-    if(currentDay < maxDay) {
+  document.getElementById('nextDay').addEventListener('click', () => {
+    if (currentDay < maxDay) {
       currentDay++;
       updateDayLabel();
       clearAll();
@@ -61,25 +61,25 @@ function updateDayLabel() {
   const now = new Date();
   let d = new Date(now);
   d.setDate(d.getDate() + currentDay);
-  const dateStr = d.toISOString().slice(0,10);
+  const dateStr = d.toISOString().slice(0, 10);
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
 }
 
 // ---------------------------------------
-// B) Fetch file list from GCS + parse
+// B) Pobranie listy plików z GCS + parse
 // ---------------------------------------
-function fetchFileListAndLoadScenarios(){
+function fetchFileListAndLoadScenarios() {
   const url = `/history_filelist?days=${7 + currentDay}`;
 
   fetch(url)
     .then(res => {
-      if(!res.ok) throw new Error(`HTTP ${res.status} - ${res.statusText}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} - ${res.statusText}`);
       return res.json();
     })
     .then(data => {
       const files = data.files || [];
-      if(files.length === 0){
-        console.log("No GCS files found (day offset=", currentDay,")");
+      if (files.length === 0) {
+        console.log("No GCS files found for day offset=", currentDay);
         updateCollisionList();
         return;
       }
@@ -88,30 +88,30 @@ function fetchFileListAndLoadScenarios(){
     .catch(err => console.error("fetchFileList error:", err));
 }
 
-function loadAllScenarioFiles(fileList){
-  // clear
+function loadAllScenarioFiles(fileList) {
+  // Wstępne czyszczenie
   umbrellasMap = {};
   subScenariosMap = {};
   scenarioMarkers.forEach(m => map.removeLayer(m));
   scenarioMarkers = [];
 
-  const promises = fileList.map(f=>{
+  const promises = fileList.map(f => {
     const fname = f.name;
     return fetch(`/history_file?file=${encodeURIComponent(fname)}`)
       .then(r => {
-        if(!r.ok) throw new Error(`HTTP ${r.status} - ${r.statusText}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status} - ${r.statusText}`);
         return r.json();
       })
       .then(jsonData => {
         const arr = jsonData.scenarios || [];
         arr.forEach(obj => {
-          if(obj._parent){
+          if (obj._parent) {
             // Umbrella
             umbrellasMap[obj.scenario_id] = obj;
           } else {
             // Sub-scenario
-            let sid = obj.scenario_id;
-            if(!subScenariosMap[sid]) subScenariosMap[sid] = [];
+            const sid = obj.scenario_id;
+            if (!subScenariosMap[sid]) subScenariosMap[sid] = [];
             subScenariosMap[sid].push(obj);
           }
         });
@@ -120,18 +120,20 @@ function loadAllScenarioFiles(fileList){
   });
 
   return Promise.all(promises)
-    .then(()=>{
-      console.log("Umbrellas:", Object.keys(umbrellasMap).length,
-                  "Sub-scenarios:", Object.keys(subScenariosMap).length);
+    .then(() => {
+      console.log(
+        "Umbrellas:", Object.keys(umbrellasMap).length,
+        "Sub-scenarios:", Object.keys(subScenariosMap).length
+      );
       updateCollisionList();
       drawScenarioMarkers();
     });
 }
 
 // ---------------------------------------
-// C) Build collision list in the right panel
+// C) Wyświetlanie listy scenariuszy w panelu
 // ---------------------------------------
-function updateCollisionList(){
+function updateCollisionList() {
   const listDiv = document.getElementById('collision-list');
   listDiv.innerHTML = '';
 
@@ -139,10 +141,10 @@ function updateCollisionList(){
     ...Object.keys(umbrellasMap),
     ...Object.keys(subScenariosMap)
   ]);
-  if(allIDs.size===0){
-    let noItem = document.createElement('div');
+  if (allIDs.size === 0) {
+    const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML='<i>No collision scenarios found</i>';
+    noItem.innerHTML = '<i>No collision scenarios found</i>';
     listDiv.appendChild(noItem);
     return;
   }
@@ -150,20 +152,19 @@ function updateCollisionList(){
   const sortedIDs = Array.from(allIDs).sort();
 
   sortedIDs.forEach(sid => {
-    const umb = umbrellasMap[sid]; // may be undefined
+    const umb = umbrellasMap[sid];         // ewentualnie undefined
     const subs = subScenariosMap[sid] || [];
 
-    let headerText = `Scenario: ${sid} (subs:${subs.length})`;
-    if(umb){
+    let headerText = `Scenario: ${sid} (subs=${subs.length})`;
+    if (umb) {
       const scCount = umb.collisions_count || subs.length;
-      const shipsCount = umb.ships_involved?.length || 0;
+      const shipsCount = umb.ships_involved ? umb.ships_involved.length : 0;
       headerText = `Umbrella ${sid} [ships:${shipsCount}, collisions:${scCount}]`;
     }
 
     const blockDiv = document.createElement('div');
     blockDiv.classList.add('umbrella-block');
 
-    // Umbrella header
     const headerDiv = document.createElement('div');
     headerDiv.classList.add('umbrella-header');
     headerDiv.textContent = headerText;
@@ -175,31 +176,31 @@ function updateCollisionList(){
     blockDiv.appendChild(headerDiv);
 
     const subListDiv = document.createElement('div');
-    subListDiv.style.display='none';
+    subListDiv.style.display = 'none';
 
-    expandBtn.addEventListener('click',()=>{
-      if(subListDiv.style.display==='none'){
-        subListDiv.style.display='block';
-        expandBtn.textContent='▲';
+    expandBtn.addEventListener('click', () => {
+      if (subListDiv.style.display === 'none') {
+        subListDiv.style.display = 'block';
+        expandBtn.textContent = '▲';
       } else {
-        subListDiv.style.display='none';
-        expandBtn.textContent='▼';
+        subListDiv.style.display = 'none';
+        expandBtn.textContent = '▼';
       }
     });
 
-    // sub-scenarios
+    // Sub-scenariusze (A–B)
     subs.forEach(sc => {
-      const item=document.createElement('div');
+      const item = document.createElement('div');
       item.classList.add('collision-item');
-      const framesCount= sc.frames?.length || 0;
-      const scTitle= sc.title || sc.collision_id|| sid;
+      const framesCount = sc.frames?.length || 0;
+      const scTitle = sc.title || sc.collision_id || sid;
 
-      item.innerHTML= `
+      item.innerHTML = `
         <strong>${scTitle}</strong><br>
         Frames: ${framesCount}
         <button class="zoom-button">🔍</button>
       `;
-      item.querySelector('.zoom-button').addEventListener('click', ()=>{
+      item.querySelector('.zoom-button').addEventListener('click', () => {
         onSelectScenario(sc);
       });
 
@@ -212,53 +213,57 @@ function updateCollisionList(){
 }
 
 // ---------------------------------------
-// D) Draw sub-scenario markers
+// D) Rysowanie sub-scenariuszy (markery na mapie)
 // ---------------------------------------
-function drawScenarioMarkers(){
-  scenarioMarkers.forEach(m=>map.removeLayer(m));
-  scenarioMarkers=[];
+function drawScenarioMarkers() {
+  scenarioMarkers.forEach(m => map.removeLayer(m));
+  scenarioMarkers = [];
 
-  for(let sid in subScenariosMap){
-    let arr = subScenariosMap[sid];
-    arr.forEach(sub=>{
-      const frames=sub.frames||[];
-      if(frames.length===0)return;
+  for (let sid in subScenariosMap) {
+    const subs = subScenariosMap[sid];
+    subs.forEach(sub => {
+      const frames = sub.frames || [];
+      if (frames.length === 0) return;
 
       let latC = sub.icon_lat;
       let lonC = sub.icon_lon;
 
       // fallback => 1st frame
-      if(latC==null || lonC==null){
-        const ships0= frames[0].shipPositions||[];
-        if(ships0.length>0){
-          let sumLat=0,sumLon=0,c=0;
-          ships0.forEach(s=>{
-            sumLat+=s.lat; sumLon+=s.lon; c++;
+      if (latC == null || lonC == null) {
+        const ships0 = frames[0].shipPositions || [];
+        if (ships0.length > 0) {
+          let sumLat = 0, sumLon = 0, cnt = 0;
+          ships0.forEach(s => {
+            sumLat += s.lat;
+            sumLon += s.lon;
+            cnt++;
           });
-          if(c>0){
-            latC=sumLat/c; lonC=sumLon/c;
+          if (cnt > 0) {
+            latC = sumLat / cnt;
+            lonC = sumLon / cnt;
           }
         }
       }
-      if(latC==null || lonC==null) return;
+      if (latC == null || lonC == null) return;
 
-      const iconHTML=`
+      // Ikona
+      const iconHTML = `
         <svg width="20" height="20" viewBox="-10 -10 20 20">
           <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
           <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">C</text>
         </svg>
       `;
       const scenarioIcon = L.divIcon({
-        className:'',
-        html:iconHTML,
-        iconSize:[20,20],
-        iconAnchor:[10,10]
+        className: '',
+        html: iconHTML,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10]
       });
 
-      const title=sub.title||sub.collision_id;
-      const marker=L.marker([latC, lonC], {icon:scenarioIcon})
-        .bindTooltip(title,{direction:'top'})
-        .on('click', ()=>onSelectScenario(sub));
+      const title = sub.title || sub.collision_id;
+      const marker = L.marker([latC, lonC], { icon: scenarioIcon })
+        .bindTooltip(title, { direction: 'top' })
+        .on('click', () => onSelectScenario(sub));
       marker.addTo(map);
       scenarioMarkers.push(marker);
     });
@@ -266,167 +271,171 @@ function drawScenarioMarkers(){
 }
 
 // ---------------------------------------
-// E) onSelectScenario => animation
+// E) Wybór sub-scenariusza => animacja
 // ---------------------------------------
-function onSelectScenario(subScenario){
-  selectedScenario=subScenario;
-  const frames=subScenario.frames||[];
-  if(frames.length===0){
+function onSelectScenario(subScenario) {
+  selectedScenario = subScenario;
+  const frames = subScenario.frames || [];
+  if (frames.length === 0) {
     console.warn("Scenario has no frames");
     return;
   }
-  // zoom to 1st frame
-  const ships0= frames[0].shipPositions||[];
-  if(ships0.length>0){
-    const latLngs=ships0.map(s=>[s.lat,s.lon]);
-    const b=L.latLngBounds(latLngs);
-    map.fitBounds(b,{padding:[30,30], maxZoom:13});
+
+  // Zoom to first frame
+  const ships0 = frames[0].shipPositions || [];
+  if (ships0.length > 0) {
+    const latLngs = ships0.map(s => [s.lat, s.lon]);
+    const b = L.latLngBounds(latLngs);
+    map.fitBounds(b, { padding: [30, 30], maxZoom: 13 });
   }
 
   loadScenarioAnimation(subScenario);
 }
 
-function loadScenarioAnimation(subScenario){
-  animationData=subScenario.frames||[];
-  animationIndex=0;
+function loadScenarioAnimation(subScenario) {
+  animationData = subScenario.frames || [];
+  animationIndex = 0;
   stopAnimation();
-  inSituationView=true;
+  inSituationView = true;
 
-  document.getElementById('left-panel').style.display='block';
-  document.getElementById('bottom-center-bar').style.display='block';
+  document.getElementById('left-panel').style.display = 'block';
+  document.getElementById('bottom-center-bar').style.display = 'block';
 
   updateMapFrame();
 }
 
 // ---------------------------------------
-// F) Animation
+// F) Animacja
 // ---------------------------------------
-function startAnimation(){
-  if(!animationData||animationData.length===0)return;
-  isPlaying=true;
-  document.getElementById('playPause').textContent='Pause';
-  animationInterval=setInterval(()=> stepAnimation(1),1000);
+function startAnimation() {
+  if (!animationData || animationData.length === 0) return;
+  isPlaying = true;
+  document.getElementById('playPause').textContent = 'Pause';
+  animationInterval = setInterval(() => stepAnimation(1), 1000);
 }
-function stopAnimation(){
-  isPlaying=false;
-  document.getElementById('playPause').textContent='Play';
-  if(animationInterval)clearInterval(animationInterval);
-  animationInterval=null;
+
+function stopAnimation() {
+  isPlaying = false;
+  document.getElementById('playPause').textContent = 'Play';
+  if (animationInterval) clearInterval(animationInterval);
+  animationInterval = null;
 }
-function stepAnimation(step){
-  animationIndex+=step;
-  if(animationIndex<0) animationIndex=0;
-  if(animationIndex>=animationData.length) animationIndex=animationData.length-1;
+
+function stepAnimation(step) {
+  animationIndex += step;
+  if (animationIndex < 0) animationIndex = 0;
+  if (animationIndex >= animationData.length) animationIndex = animationData.length - 1;
   updateMapFrame();
 }
 
-function updateMapFrame(){
-  const frameIndicator=document.getElementById('frameIndicator');
-  frameIndicator.textContent=`${animationIndex+1}/${animationData.length}`;
+function updateMapFrame() {
+  const frameIndicator = document.getElementById('frameIndicator');
+  frameIndicator.textContent = `${animationIndex + 1}/${animationData.length}`;
 
-  // remove old
-  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-  shipMarkersOnMap=[];
+  // Usuwamy stare markery
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
 
-  if(!animationData||animationData.length===0)return;
-  const frame= animationData[animationIndex];
-  const ships= frame.shipPositions||[];
+  if (!animationData || animationData.length === 0) return;
+  const frame = animationData[animationIndex];
+  const ships = frame.shipPositions || [];
 
-  // 1) draw all ships
-  ships.forEach(s=>{
-    const mk=L.marker([s.lat,s.lon],{
-      icon:createShipIcon(s,false)
+  // Rysujemy wszystkie statki
+  ships.forEach(s => {
+    const mk = L.marker([s.lat, s.lon], {
+      icon: createShipIcon(s, false) // z common.js
     });
-    const nm=s.name||s.mmsi;
-    const tt=`
+    const nm = s.name || s.mmsi;
+    const tt = `
       <b>${nm}</b><br>
-      COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)} kn<br>
-      L:${s.ship_length||"??"}
+      COG: ${Math.round(s.cog)}°, SOG: ${s.sog.toFixed(1)} kn<br>
+      L: ${s.ship_length || "??"}
     `;
-    mk.bindTooltip(tt,{direction:'top',sticky:true});
+    mk.bindTooltip(tt, { direction: 'top', sticky: true });
     mk.addTo(map);
     shipMarkersOnMap.push(mk);
   });
 
-  // 2) panel
-  const leftPanel=document.getElementById('selected-ships-info');
-  leftPanel.innerHTML='';
-  const pairInfo=document.getElementById('pair-info');
-  pairInfo.innerHTML='';
+  // Panel
+  const leftPanel = document.getElementById('selected-ships-info');
+  leftPanel.innerHTML = '';
+  const pairInfo = document.getElementById('pair-info');
+  pairInfo.innerHTML = '';
 
-  let html=`<b>Frame time:</b> ${frame.time}<br>`;
-  if(frame.focus_dist!==undefined){
+  let html = `<b>Frame time:</b> ${frame.time}<br>`;
+  if (frame.focus_dist !== undefined) {
     html += `<b>Focus Dist:</b> ${frame.focus_dist.toFixed(3)} nm<br>`;
   }
-  if(frame.delta_minutes!==undefined){
+  if (frame.delta_minutes !== undefined) {
     html += `<b>Time to min approach:</b> ${frame.delta_minutes} min<br>`;
   }
-  html+=`<hr/>`;
+  html += `<hr/>`;
 
-  // Ewentualnie wyróżnienie "focus"
-  if(selectedScenario && selectedScenario.focus_mmsi){
-    const [mA,mB] = selectedScenario.focus_mmsi;
-    let posA=null; let posB=null;
-    ships.forEach(s=>{
-      if(s.mmsi===mA) posA=s;
-      if(s.mmsi===mB) posB=s;
+  // Podświetlamy "focus" A–B
+  if (selectedScenario && selectedScenario.focus_mmsi) {
+    const [mA, mB] = selectedScenario.focus_mmsi;
+    let posA = null, posB = null;
+    ships.forEach(ss => {
+      if (ss.mmsi === mA) posA = ss;
+      if (ss.mmsi === mB) posB = ss;
     });
-    if(posA && posB){
-      html+=`<b>Focus ships:</b><br>
+    if (posA && posB) {
+      html += `<b>Focus ships:</b><br>
         ${posA.name} [COG:${Math.round(posA.cog)}, SOG:${posA.sog.toFixed(1)}]<br>
-        ${posB.name} [COG:${Math.round(posB.cog)}, SOG:${posB.sog.toFixed(1)}]<br><hr/>`;
+        ${posB.name} [COG:${Math.round(posB.cog)}, SOG:${posB.sog.toFixed(1)}]<br>
+      <hr/>`;
     }
   }
 
-  // list all ships
-  ships.forEach(s=>{
-    const nm=s.name||s.mmsi;
-    html+=`
+  // Wypisujemy wszystkie statki w tej klatce
+  ships.forEach(s => {
+    const nm = s.name || s.mmsi;
+    html += `
       <div>
         <b>${nm}</b>
         [COG:${Math.round(s.cog)}, SOG:${s.sog.toFixed(1)} kn, L:${s.ship_length||"?"}]
       </div>
     `;
   });
-  leftPanel.innerHTML=html;
+  leftPanel.innerHTML = html;
 }
 
 // ---------------------------------------
 // G) exitSituationView
 // ---------------------------------------
-function exitSituationView(){
-  inSituationView=false;
-  document.getElementById('left-panel').style.display='none';
-  document.getElementById('bottom-center-bar').style.display='none';
+function exitSituationView() {
+  inSituationView = false;
+  document.getElementById('left-panel').style.display = 'none';
+  document.getElementById('bottom-center-bar').style.display = 'none';
   stopAnimation();
-  shipMarkersOnMap.forEach(m=>map.removeLayer(m));
-  shipMarkersOnMap=[];
-  animationData=null;
-  animationIndex=0;
+  shipMarkersOnMap.forEach(m => map.removeLayer(m));
+  shipMarkersOnMap = [];
+  animationData = null;
+  animationIndex = 0;
 }
 
 // ---------------------------------------
 // cleanup
 // ---------------------------------------
-function clearAll(){
-  umbrellasMap={};
-  subScenariosMap={};
-  scenarioMarkers.forEach(m=>map.removeLayer(m));
-  scenarioMarkers=[];
-  document.getElementById('collision-list').innerHTML='';
+function clearAll() {
+  umbrellasMap = {};
+  subScenariosMap = {};
+  scenarioMarkers.forEach(m => map.removeLayer(m));
+  scenarioMarkers = [];
+  document.getElementById('collision-list').innerHTML = '';
 }
 
 // ---------------------------------------
-// bottom UI (animation)
+// bottom UI (animacja)
 // ---------------------------------------
-function setupBottomUI(){
-  document.getElementById('playPause').addEventListener('click',()=>{
-    if(isPlaying) stopAnimation();
+function setupBottomUI() {
+  document.getElementById('playPause').addEventListener('click', () => {
+    if (isPlaying) stopAnimation();
     else startAnimation();
   });
-  document.getElementById('stepForward').addEventListener('click',()=>stepAnimation(1));
-  document.getElementById('stepBack').addEventListener('click',()=>stepAnimation(-1));
-  document.getElementById('closePlayback').addEventListener('click',()=>{
+  document.getElementById('stepForward').addEventListener('click', () => stepAnimation(1));
+  document.getElementById('stepBack').addEventListener('click', () => stepAnimation(-1));
+  document.getElementById('closePlayback').addEventListener('click', () => {
     exitSituationView();
   });
 }

@@ -22,7 +22,6 @@ def interpolate_positions(records, step_seconds=60):
     if not records:
         return []
 
-    # Sort
     records.sort(key=lambda x: x[0])
     start_t = records[0][0]
     end_t   = records[-1][0]
@@ -43,7 +42,6 @@ def interpolate_positions(records, step_seconds=60):
             tA, laA, loA, sgA, cgA = records[idx]
             tB, laB, loB, sgB, cgB = records[idx+1]
             if current_t < tA:
-                # Jeszcze przed tA
                 out.append((current_t, laA, loA, sgA, cgA))
             else:
                 dt = (tB - tA).total_seconds()
@@ -51,10 +49,10 @@ def interpolate_positions(records, step_seconds=60):
                     out.append((current_t, laA, loA, sgA, cgA))
                 else:
                     ratio = (current_t - tA).total_seconds() / dt
-                    lat_i = laA + (laB - laA)*ratio
-                    lon_i = loA + (loB - loA)*ratio
-                    sg_i  = sgA + (sgB - sgA)*ratio
-                    cg_i  = cgA + (cgB - cgA)*ratio
+                    lat_i = laA + (laB - laA) * ratio
+                    lon_i = loA + (loB - loA) * ratio
+                    sg_i  = sgA + (sgB - sgA) * ratio
+                    cg_i  = cgA + (cgB - cgA) * ratio
                     out.append((current_t, lat_i, lon_i, sg_i, cg_i))
 
         current_t += datetime.timedelta(seconds=step_seconds)
@@ -65,8 +63,8 @@ def interpolate_positions(records, step_seconds=60):
 # ------------------------------------------------------------
 class DedupCollisionsFn(beam.DoFn):
     """
-    Zbiera kolizje w 1 godz., tworzy mapę (a,b)->collision
-    i wybiera minimalne cpa, aby uniknąć duplikatów par A–B.
+    Zbiera kolizje w 1 godzinie, tworzy mapę (mmsiA,mmsiB)->collision,
+    wybiera minimalne cpa, aby uniknąć duplikatów tej samej pary.
     """
     def process(self, collisions):
         from collections import defaultdict
@@ -74,7 +72,7 @@ class DedupCollisionsFn(beam.DoFn):
         for c in collisions:
             a = min(c["mmsi_a"], c["mmsi_b"])
             b = max(c["mmsi_a"], c["mmsi_b"])
-            key = (a,b)
+            key = (a, b)
             old = pair_map.get(key)
             if not old:
                 pair_map[key] = c
@@ -100,6 +98,7 @@ class GroupCollisionsIntoScenarios(beam.DoFn):
             col_map.append(c)
 
         visited = set()
+
         def bfs(start):
             queue = deque([start])
             visited.add(start)
@@ -134,7 +133,7 @@ class GroupCollisionsIntoScenarios(beam.DoFn):
                           + "_".join(map(str, sorted(comp_set)))
 
             yield {
-                "_parent": True,  # Umbrella-flag
+                "_parent": True,  # flaga umbrella
                 "scenario_id": scenario_id,
                 "ships_involved": sorted(list(comp_set)),
                 "collisions_in_scenario": relevant,
@@ -143,7 +142,7 @@ class GroupCollisionsIntoScenarios(beam.DoFn):
             }
 
 # ------------------------------------------------------------
-# 4) BuildScenarioFramesFn – generowanie sub-scenariuszy (A–B)
+# 4) BuildScenarioFramesFn – sub-scenariusze (A–B), z wypełnieniem luki
 # ------------------------------------------------------------
 class BuildScenarioFramesFn(beam.DoFn):
     def setup(self):
@@ -153,10 +152,10 @@ class BuildScenarioFramesFn(beam.DoFn):
         R_earth_nm = 3440.065
         dLat = math.radians(lat2 - lat1)
         dLon = math.radians(lon2 - lon1)
-        a = (math.sin(dLat/2)**2
-             + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dLon/2)**2)
-        c = 2*math.atan2(math.sqrt(a), math.sqrt(1-a))
-        return R_earth_nm*c
+        a = (math.sin(dLat/2)**2 +
+             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLon/2)**2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        return R_earth_nm * c
 
     def process(self, umbrella):
         # Jeśli to już sub-scenario => emit bez zmian
@@ -164,14 +163,13 @@ class BuildScenarioFramesFn(beam.DoFn):
             yield umbrella
             return
 
-        # Umbrella
         scenario_id = umbrella["scenario_id"]
         ships_all  = umbrella["ships_involved"] or []
         collisions = umbrella["collisions_in_scenario"] or []
         min_ts     = umbrella["min_ts"]
         max_ts     = umbrella["max_ts"]
 
-        # Emit umbrella info (np. do listy)
+        # Emisja "umbrella" info do listy
         parent_obj = {
             "_parent": True,
             "scenario_id": scenario_id,
@@ -189,7 +187,7 @@ class BuildScenarioFramesFn(beam.DoFn):
         global_start = min_ts - datetime.timedelta(minutes=15)
         global_end   = max_ts + datetime.timedelta(minutes=5)
 
-        # Pobierz AIS
+        # Pobranie AIS
         str_mmsi = ",".join(map(str, ships_all))
         query = f"""
         SELECT
@@ -216,27 +214,30 @@ class BuildScenarioFramesFn(beam.DoFn):
 
         for r in rows:
             t  = r.timestamp
-            la = float(r.latitude or 0)
-            lo = float(r.longitude or 0)
-            sg = float(r.sog or 0)
-            cg = float(r.cog or 0)
+            la = float(r.latitude or 0.0)
+            lo = float(r.longitude or 0.0)
+            sg = float(r.sog or 0.0)
+            cg = float(r.cog or 0.0)
             data_map[r.mmsi].append((t, la, lo, sg, cg))
-            name_map[r.mmsi] = r.ship_name
-            len_map[r.mmsi]  = r.ship_length
+            name_map[r.mmsi] = r.ship_name or str(r.mmsi)
+            len_map[r.mmsi]  = r.ship_length or 0
 
-        # Interpol (co 60 s)
-        full_time_map = defaultdict(list)
+        # (A) Interpolacja + last_known => full_time_map[tstamp][mmsi]
+        full_time_map = defaultdict(dict)
+        last_known = {mm: None for mm in ships_all}  # do wypełniania luk
+
+        # 1) interpolacja dla każdego statku
         for mm in ships_all:
             arr = data_map[mm]
             if not arr:
                 continue
             interped = interpolate_positions(arr, 60)
-            nm = name_map.get(mm) or str(mm)
-            ln = len_map.get(mm) or 0
+            nm = name_map[mm]
+            ln = len_map[mm]
 
             for (ts, la, lo, sg, cg) in interped:
                 key_ts = ts.replace(microsecond=0)
-                full_time_map[key_ts].append({
+                full_time_map[key_ts][mm] = {
                     "mmsi": mm,
                     "name": nm,
                     "ship_length": ln,
@@ -244,9 +245,27 @@ class BuildScenarioFramesFn(beam.DoFn):
                     "lon": lo,
                     "sog": sg,
                     "cog": cg
-                })
+                }
+                last_known[mm] = full_time_map[key_ts][mm]
 
-        # Dla każdej kolizji (A–B) -> sub-scenario
+        # 2) Uzupełniamy luki – w każdej minucie każdy statek
+        all_times = sorted(full_time_map.keys())
+        for tstamp in all_times:
+            # sprawdzamy, czy mamy info dla każdego mm
+            for mm in ships_all:
+                if mm not in full_time_map[tstamp]:
+                    # wstawiamy kopię last_known
+                    if last_known[mm] is not None:
+                        clone = dict(last_known[mm])  # kopia
+                        # lat, lon, sog, cog z last_known
+                        # (zakładamy, że "statek stoi" jeśli brak nowych danych)
+                        full_time_map[tstamp][mm] = clone
+            # update last_known
+            for mm in ships_all:
+                if mm in full_time_map[tstamp]:
+                    last_known[mm] = full_time_map[tstamp][mm]
+
+        # (B) Budowa sub-scenariuszy (A–B)
         for c in collisions:
             collision_id = c["collision_id"]
             a = c["mmsi_a"]
@@ -259,30 +278,31 @@ class BuildScenarioFramesFn(beam.DoFn):
             sub_start = t_min - datetime.timedelta(minutes=15)
             sub_end   = t_min + datetime.timedelta(minutes=5)
 
-            frames=[]
-            icon_lat=None
-            icon_lon=None
+            frames = []
+            icon_lat = None
+            icon_lon = None
 
-            for tstamp in sorted(full_time_map.keys()):
+            for tstamp in all_times:
                 if tstamp < sub_start or tstamp > sub_end:
                     continue
-                shipsArr = full_time_map[tstamp]
-                # Szukamy A, B
-                posA=None; posB=None
-                for s in shipsArr:
-                    if s["mmsi"]==a: posA=s
-                    if s["mmsi"]==b: posB=s
+                # mamy dictionary: full_time_map[tstamp] = { mmsi -> {...}, ...}
+                ships_dict = full_time_map[tstamp]
+                # konwertujemy na listę
+                shipsArr = list(ships_dict.values())
 
-                dist_nm=None
+                posA = ships_dict.get(a)
+                posB = ships_dict.get(b)
+
+                dist_nm = None
                 if posA and posB:
-                    dist_nm=self._haversine_nm(posA["lat"],posA["lon"],
-                                               posB["lat"],posB["lon"])
-                    # Sprawdź, czy to "dokładnie" moment t_min
-                    if abs((tstamp - t_min).total_seconds())<1.0:
-                        icon_lat=0.5*(posA["lat"]+posB["lat"])
-                        icon_lon=0.5*(posA["lon"]+posB["lon"])
+                    dist_nm = self._haversine_nm(posA["lat"], posA["lon"],
+                                                 posB["lat"], posB["lon"])
+                    # ikona, jeśli tstamp bliski t_min
+                    if abs((tstamp - t_min).total_seconds()) < 1.0:
+                        icon_lat = 0.5*(posA["lat"] + posB["lat"])
+                        icon_lon = 0.5*(posA["lon"] + posB["lon"])
 
-                delta_minutes = round((tstamp - t_min).total_seconds()/60.0,2)
+                delta_minutes = round((tstamp - t_min).total_seconds()/60.0, 2)
 
                 frames.append({
                     "time": tstamp.isoformat(),
@@ -291,25 +311,26 @@ class BuildScenarioFramesFn(beam.DoFn):
                     "delta_minutes": delta_minutes
                 })
 
-            # Fallback, jeśli nie było klatki == t_min
+            # fallback – ikona
             if icon_lat is None and icon_lon is None and frames:
-                # Najbliższa klatka
-                best_fr=None
-                best_dt=999999
+                # Najbliższa klatka do t_min
+                best_fr = None
+                best_dt = 999999
                 for fr in frames:
-                    fts=datetime.datetime.fromisoformat(fr["time"])
-                    diff_sec=abs((fts - t_min).total_seconds())
-                    if diff_sec<best_dt:
+                    fts = datetime.datetime.fromisoformat(fr["time"])
+                    diff_sec = abs((fts - t_min).total_seconds())
+                    if diff_sec < best_dt:
                         best_dt=diff_sec
                         best_fr=fr
                 if best_fr:
-                    pa=None; pb=None
+                    posA = None
+                    posB = None
                     for sdat in best_fr["shipPositions"]:
-                        if sdat["mmsi"]==a: pa=sdat
-                        if sdat["mmsi"]==b: pb=sdat
-                    if pa and pb:
-                        icon_lat=0.5*(pa["lat"]+pb["lat"])
-                        icon_lon=0.5*(pa["lon"]+pb["lon"])
+                        if sdat["mmsi"] == a: posA=sdat
+                        if sdat["mmsi"] == b: posB=sdat
+                    if posA and posB:
+                        icon_lat=0.5*(posA["lat"]+posB["lat"])
+                        icon_lon=0.5*(posA["lon"]+posB["lon"])
 
             # Tytuł
             nmA = name_map.get(a) or str(a)
@@ -340,7 +361,7 @@ def scenario_list_to_json(items):
 
 class SingleScenarioJSONSink(FileSink):
     def open(self, fh):
-        self._fh=fh
+        self._fh = fh
     def write(self, element):
         self._fh.write(element.encode("utf-8"))
         self._fh.write(b"\n")
@@ -353,7 +374,7 @@ class SingleScenarioJSONSink(FileSink):
 def run():
     logging.getLogger().setLevel(logging.INFO)
     pipeline_options = PipelineOptions()
-    pipeline_options.view_as(StandardOptions).streaming=False
+    pipeline_options.view_as(StandardOptions).streaming = False
 
     now_utc = datetime.datetime.utcnow()
     this_hour = now_utc.replace(minute=0, second=0, microsecond=0)
@@ -384,8 +405,10 @@ def run():
     ORDER BY timestamp
     """
 
-    output_prefix = os.getenv("HISTORY_OUTPUT_PREFIX",
-                              "gs://ais-collision-detection-bucket/history_collisions/hourly")
+    output_prefix = os.getenv(
+        "HISTORY_OUTPUT_PREFIX",
+        "gs://ais-collision-detection-bucket/history_collisions/hourly"
+    )
     date_str = prev_hour.strftime("%Y%m%d_%H")
     filename = f"{output_prefix}/multiship_{date_str}.json"
 
@@ -395,6 +418,7 @@ def run():
             | "ReadCollisions" >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
         )
         collisions_list = collisions | "GroupAll" >> beam.combiners.ToList()
+
         deduped = collisions_list | "Deduplicate" >> beam.ParDo(DedupCollisionsFn())
         umbrella = deduped | "GroupCollisions" >> beam.ParDo(GroupCollisionsIntoScenarios())
         scenario_frames = umbrella | "BuildFrames" >> beam.ParDo(BuildScenarioFramesFn())
@@ -408,5 +432,5 @@ def run():
             sink=SingleScenarioJSONSink()
         )
 
-if __name__=="__main__":
+if __name__ == "__main__":
     run()
