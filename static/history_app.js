@@ -3,42 +3,42 @@
 // ==========================
 let map;
 
-// Mapa “umbrella” -> obiekt = { _parent:true, scenario_id, ships_involved, collisions_count, ... }
-// Mapa sub-scenariuszy -> array obiektów = { _parent:false, collision_id, frames, icon_lat, icon_lon, ... }
-let umbrellasMap = {};    // klucz: scenario_id => obiekt umbrella
-let subScenariosMap = {}; // klucz: scenario_id => array sub-scenariuszy
+// Umbrella scenario => _parent:true
+// Sub-scenarios => _parent:false
+let umbrellasMap = {};    // key: scenario_id -> umbrella object
+let subScenariosMap = {}; // key: scenario_id -> array of sub-scenarios
 
-let scenarioMarkers = []; // ikony sub-scenariuszy na mapie
+let scenarioMarkers = []; // markers for each sub-scenario (A–B)
 let inSituationView = false;
 let isPlaying = false;
-let animationData = null; 
+let animationData = null;
 let animationIndex = 0;
 let animationInterval = null;
 let shipMarkersOnMap = [];
 let selectedScenario = null;
 
-// Obsługa dni wstecz
+// Day offset
 let currentDay = 0;
 const minDay = -7;
 const maxDay = 0;
 
 function initHistoryApp() {
-  // 1) Inicjalizacja mapy (common.js)
+  // 1) Init map
   map = initSharedMap('map');
 
-  // 2) Obsługa UI (dni, animacja)
+  // 2) Setup UI
   setupDayUI();
   setupBottomUI();
 
-  // 3) Start
+  // 3) Load
   fetchFileListAndLoadScenarios();
 }
 
 // ---------------------------------------
-// A) Obsługa day offset
+// A) Day offset
 // ---------------------------------------
 function setupDayUI() {
-  document.getElementById('prevDay').addEventListener('click', () => {
+  document.getElementById('prevDay').addEventListener('click', ()=>{
     if(currentDay > minDay) {
       currentDay--;
       updateDayLabel();
@@ -46,7 +46,7 @@ function setupDayUI() {
       fetchFileListAndLoadScenarios();
     }
   });
-  document.getElementById('nextDay').addEventListener('click', () => {
+  document.getElementById('nextDay').addEventListener('click', ()=>{
     if(currentDay < maxDay) {
       currentDay++;
       updateDayLabel();
@@ -59,16 +59,16 @@ function setupDayUI() {
 
 function updateDayLabel() {
   const now = new Date();
-  const d = new Date(now);
+  let d = new Date(now);
   d.setDate(d.getDate() + currentDay);
-  const dateStr = d.toISOString().slice(0, 10);
+  const dateStr = d.toISOString().slice(0,10);
   document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
 }
 
 // ---------------------------------------
-// B) Pobieranie listy plików GCS + wczytywanie
+// B) Fetch file list from GCS + parse
 // ---------------------------------------
-function fetchFileListAndLoadScenarios() {
+function fetchFileListAndLoadScenarios(){
   const url = `/history_filelist?days=${7 + currentDay}`;
 
   fetch(url)
@@ -78,25 +78,24 @@ function fetchFileListAndLoadScenarios() {
     })
     .then(data => {
       const files = data.files || [];
-      if (files.length === 0) {
-        console.log("Brak plików GCS (day offset =", currentDay, ")");
+      if(files.length === 0){
+        console.log("No GCS files found (day offset=", currentDay,")");
         updateCollisionList();
         return;
       }
       return loadAllScenarioFiles(files);
     })
-    .catch(err => console.error("Błąd fetchFileList:", err));
+    .catch(err => console.error("fetchFileList error:", err));
 }
 
-function loadAllScenarioFiles(fileList) {
-  // Czyścimy
+function loadAllScenarioFiles(fileList){
+  // clear
   umbrellasMap = {};
   subScenariosMap = {};
   scenarioMarkers.forEach(m => map.removeLayer(m));
   scenarioMarkers = [];
 
-  // Sekwencyjnie wczytujemy
-  const promises = fileList.map(f => {
+  const promises = fileList.map(f=>{
     const fname = f.name;
     return fetch(`/history_file?file=${encodeURIComponent(fname)}`)
       .then(r => {
@@ -106,9 +105,8 @@ function loadAllScenarioFiles(fileList) {
       .then(jsonData => {
         const arr = jsonData.scenarios || [];
         arr.forEach(obj => {
-          // Rozróżniamy: umbrella (_parent == true) vs sub-scenario (_parent == false)
-          if(obj._parent) {
-            // Zapamiętujemy "umbrella" w umbrellasMap
+          if(obj._parent){
+            // Umbrella
             umbrellasMap[obj.scenario_id] = obj;
           } else {
             // Sub-scenario
@@ -118,11 +116,11 @@ function loadAllScenarioFiles(fileList) {
           }
         });
       })
-      .catch(err => console.error("Błąd loadOneFile:", err));
+      .catch(err => console.error("loadOneFile error:", err));
   });
 
   return Promise.all(promises)
-    .then(() => {
+    .then(()=>{
       console.log("Umbrellas:", Object.keys(umbrellasMap).length,
                   "Sub-scenarios:", Object.keys(subScenariosMap).length);
       updateCollisionList();
@@ -131,79 +129,80 @@ function loadAllScenarioFiles(fileList) {
 }
 
 // ---------------------------------------
-// C) Budowa listy kolizji w panelu (umbrella -> sub-scenarios)
+// C) Build collision list in the right panel
 // ---------------------------------------
-function updateCollisionList() {
+function updateCollisionList(){
   const listDiv = document.getElementById('collision-list');
   listDiv.innerHTML = '';
 
-  // Zbierz *wszystkie* scenario_id z umbrellas + sub-scenarios
-  let allIDs = new Set([...Object.keys(umbrellasMap), ...Object.keys(subScenariosMap)]);
-  if(allIDs.size === 0) {
+  let allIDs = new Set([
+    ...Object.keys(umbrellasMap),
+    ...Object.keys(subScenariosMap)
+  ]);
+  if(allIDs.size===0){
     let noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML = '<i>No collision scenarios found</i>';
+    noItem.innerHTML='<i>No collision scenarios found</i>';
     listDiv.appendChild(noItem);
     return;
   }
+
   const sortedIDs = Array.from(allIDs).sort();
 
-  // Tworzymy węzły
   sortedIDs.forEach(sid => {
-    const umbrella = umbrellasMap[sid];   // undefined jeśli brak
+    const umb = umbrellasMap[sid]; // may be undefined
     const subs = subScenariosMap[sid] || [];
 
-    // Umbrella header
-    let headerText = `Scenario: ${sid}, (subs:${subs.length})`;
-    if(umbrella) {
-      const shipsCount = umbrella.ships_involved?.length || 0;
-      let cCount = umbrella.collisions_count || subs.length;
-      headerText = `Umbrella ${sid} [ships:${shipsCount}, collisions:${cCount}]`;
+    let headerText = `Scenario: ${sid} (subs:${subs.length})`;
+    if(umb){
+      const scCount = umb.collisions_count || subs.length;
+      const shipsCount = umb.ships_involved?.length || 0;
+      headerText = `Umbrella ${sid} [ships:${shipsCount}, collisions:${scCount}]`;
     }
 
     const blockDiv = document.createElement('div');
     blockDiv.classList.add('umbrella-block');
 
-    // Nagłówek umbrella
+    // Umbrella header
     const headerDiv = document.createElement('div');
     headerDiv.classList.add('umbrella-header');
     headerDiv.textContent = headerText;
 
+    // expand/collapse
     const expandBtn = document.createElement('button');
     expandBtn.textContent = '▼';
     headerDiv.appendChild(expandBtn);
-
     blockDiv.appendChild(headerDiv);
 
-    // Podlista sub-scenariuszy
     const subListDiv = document.createElement('div');
-    subListDiv.style.display = 'none';
+    subListDiv.style.display='none';
 
-    expandBtn.addEventListener('click', () => {
-      if(subListDiv.style.display === 'none') {
-        subListDiv.style.display = 'block';
-        expandBtn.textContent = '▲';
+    expandBtn.addEventListener('click',()=>{
+      if(subListDiv.style.display==='none'){
+        subListDiv.style.display='block';
+        expandBtn.textContent='▲';
       } else {
-        subListDiv.style.display = 'none';
-        expandBtn.textContent = '▼';
+        subListDiv.style.display='none';
+        expandBtn.textContent='▼';
       }
     });
 
-    // Wypełniamy sub-scenariusze
+    // sub-scenarios
     subs.forEach(sc => {
-      const item = document.createElement('div');
+      const item=document.createElement('div');
       item.classList.add('collision-item');
-      const framesCount = sc.frames?.length || 0;
-      const scTitle = sc.title || sc.collision_id || sid;
+      const framesCount= sc.frames?.length || 0;
+      const scTitle= sc.title || sc.collision_id|| sid;
 
-      item.innerHTML = `
+      item.innerHTML= `
         <strong>${scTitle}</strong><br>
         Frames: ${framesCount}
         <button class="zoom-button">🔍</button>
       `;
-      item.querySelector('.zoom-button').addEventListener('click', () => {
+      item.querySelector('.zoom-button').addEventListener('click', ()=>{
         onSelectScenario(sc);
       });
+
       subListDiv.appendChild(item);
     });
 
@@ -213,53 +212,53 @@ function updateCollisionList() {
 }
 
 // ---------------------------------------
-// D) Rysowanie ikon sub-scenariuszy
+// D) Draw sub-scenario markers
 // ---------------------------------------
-function drawScenarioMarkers() {
-  scenarioMarkers.forEach(m => map.removeLayer(m));
-  scenarioMarkers = [];
+function drawScenarioMarkers(){
+  scenarioMarkers.forEach(m=>map.removeLayer(m));
+  scenarioMarkers=[];
 
-  // subScenariosMap[sid] => array
-  for(let sid in subScenariosMap) {
+  for(let sid in subScenariosMap){
     let arr = subScenariosMap[sid];
-    arr.forEach(sub => {
-      const frames = sub.frames || [];
-      if(frames.length === 0) return;
+    arr.forEach(sub=>{
+      const frames=sub.frames||[];
+      if(frames.length===0)return;
 
-      // Pozycja minimalnego rozminięcia
-      let latC = sub.icon_lat, lonC = sub.icon_lon;
+      let latC = sub.icon_lat;
+      let lonC = sub.icon_lon;
 
-      // fallback => 1. klatka
-      if(latC == null || lonC == null) {
-        const ships0 = frames[0].shipPositions||[];
+      // fallback => 1st frame
+      if(latC==null || lonC==null){
+        const ships0= frames[0].shipPositions||[];
         if(ships0.length>0){
-          let sumLat=0, sumLon=0, count=0;
+          let sumLat=0,sumLon=0,c=0;
           ships0.forEach(s=>{
-            sumLat+=s.lat; sumLon+=s.lon; count++;
+            sumLat+=s.lat; sumLon+=s.lon; c++;
           });
-          if(count>0){
-            latC=sumLat/count; lonC=sumLon/count;
+          if(c>0){
+            latC=sumLat/c; lonC=sumLon/c;
           }
         }
       }
-      if(latC == null || lonC == null) return;
+      if(latC==null || lonC==null) return;
 
-      // Ikona
       const iconHTML=`
         <svg width="20" height="20" viewBox="-10 -10 20 20">
           <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
           <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">C</text>
         </svg>
       `;
-      const scenarioIcon=L.divIcon({
+      const scenarioIcon = L.divIcon({
         className:'',
         html:iconHTML,
         iconSize:[20,20],
         iconAnchor:[10,10]
       });
-      const marker = L.marker([latC, lonC], {icon:scenarioIcon})
-        .bindTooltip(sub.title||sub.collision_id, {direction:'top'})
-        .on('click', ()=> onSelectScenario(sub));
+
+      const title=sub.title||sub.collision_id;
+      const marker=L.marker([latC, lonC], {icon:scenarioIcon})
+        .bindTooltip(title,{direction:'top'})
+        .on('click', ()=>onSelectScenario(sub));
       marker.addTo(map);
       scenarioMarkers.push(marker);
     });
@@ -267,22 +266,21 @@ function drawScenarioMarkers() {
 }
 
 // ---------------------------------------
-// E) Otwieranie sub-scenariusza -> animacja
+// E) onSelectScenario => animation
 // ---------------------------------------
 function onSelectScenario(subScenario){
   selectedScenario=subScenario;
-  const frames= subScenario.frames||[];
+  const frames=subScenario.frames||[];
   if(frames.length===0){
     console.warn("Scenario has no frames");
     return;
   }
-
-  // Zoom do 1 klatki
+  // zoom to 1st frame
   const ships0= frames[0].shipPositions||[];
   if(ships0.length>0){
-    const latLngs= ships0.map(s=>[s.lat,s.lon]);
-    const bounds= L.latLngBounds(latLngs);
-    map.fitBounds(bounds,{padding:[30,30],maxZoom:13});
+    const latLngs=ships0.map(s=>[s.lat,s.lon]);
+    const b=L.latLngBounds(latLngs);
+    map.fitBounds(b,{padding:[30,30], maxZoom:13});
   }
 
   loadScenarioAnimation(subScenario);
@@ -301,7 +299,7 @@ function loadScenarioAnimation(subScenario){
 }
 
 // ---------------------------------------
-// F) Animacja
+// F) Animation
 // ---------------------------------------
 function startAnimation(){
   if(!animationData||animationData.length===0)return;
@@ -312,7 +310,7 @@ function startAnimation(){
 function stopAnimation(){
   isPlaying=false;
   document.getElementById('playPause').textContent='Play';
-  if(animationInterval) clearInterval(animationInterval);
+  if(animationInterval)clearInterval(animationInterval);
   animationInterval=null;
 }
 function stepAnimation(step){
@@ -326,7 +324,7 @@ function updateMapFrame(){
   const frameIndicator=document.getElementById('frameIndicator');
   frameIndicator.textContent=`${animationIndex+1}/${animationData.length}`;
 
-  // Czyścimy poprzednie
+  // remove old
   shipMarkersOnMap.forEach(m=>map.removeLayer(m));
   shipMarkersOnMap=[];
 
@@ -334,69 +332,67 @@ function updateMapFrame(){
   const frame= animationData[animationIndex];
   const ships= frame.shipPositions||[];
 
-  // 1) Rysowanie statków
+  // 1) draw all ships
   ships.forEach(s=>{
-    const nm= s.name|| s.mmsi;
-    const mk= L.marker([s.lat, s.lon], {
-      icon: createShipIcon(s,false) // z common.js
+    const mk=L.marker([s.lat,s.lon],{
+      icon:createShipIcon(s,false)
     });
-    const tooltipHtml= `
+    const nm=s.name||s.mmsi;
+    const tt=`
       <b>${nm}</b><br>
-      COG: ${Math.round(s.cog)}°, SOG: ${s.sog.toFixed(1)} kn<br>
-      L: ${s.ship_length||"??"}
+      COG:${Math.round(s.cog)}°, SOG:${s.sog.toFixed(1)} kn<br>
+      L:${s.ship_length||"??"}
     `;
-    mk.bindTooltip(tooltipHtml, {direction:'top', sticky:true});
+    mk.bindTooltip(tt,{direction:'top',sticky:true});
     mk.addTo(map);
     shipMarkersOnMap.push(mk);
   });
 
-  // 2) Wypełniamy panel (po lewej)
+  // 2) panel
   const leftPanel=document.getElementById('selected-ships-info');
   leftPanel.innerHTML='';
   const pairInfo=document.getElementById('pair-info');
   pairInfo.innerHTML='';
 
   let html=`<b>Frame time:</b> ${frame.time}<br>`;
-  if(frame.focus_dist!==undefined) {
-    html+=`<b>Focus Dist:</b> ${frame.focus_dist.toFixed(3)} nm<br>`;
+  if(frame.focus_dist!==undefined){
+    html += `<b>Focus Dist:</b> ${frame.focus_dist.toFixed(3)} nm<br>`;
   }
-  if(frame.delta_minutes!==undefined) {
-    html+=`<b>Time to min approach:</b> ${frame.delta_minutes} min<br>`;
+  if(frame.delta_minutes!==undefined){
+    html += `<b>Time to min approach:</b> ${frame.delta_minutes} min<br>`;
   }
   html+=`<hr/>`;
 
-  // Ewentualnie wyróżnienie pary
-  if(selectedScenario && selectedScenario.focus_mmsi) {
-    const [mA,mB]= selectedScenario.focus_mmsi;
-    let posA=null, posB=null;
+  // Ewentualnie wyróżnienie "focus"
+  if(selectedScenario && selectedScenario.focus_mmsi){
+    const [mA,mB] = selectedScenario.focus_mmsi;
+    let posA=null; let posB=null;
     ships.forEach(s=>{
       if(s.mmsi===mA) posA=s;
       if(s.mmsi===mB) posB=s;
     });
     if(posA && posB){
-      html+=`<div><b>Focus Ships:</b><br>
+      html+=`<b>Focus ships:</b><br>
         ${posA.name} [COG:${Math.round(posA.cog)}, SOG:${posA.sog.toFixed(1)}]<br>
-        ${posB.name} [COG:${Math.round(posB.cog)}, SOG:${posB.sog.toFixed(1)}]<br>
-      </div><hr/>`;
+        ${posB.name} [COG:${Math.round(posB.cog)}, SOG:${posB.sog.toFixed(1)}]<br><hr/>`;
     }
   }
 
-  // Lista wszystkich statków
+  // list all ships
   ships.forEach(s=>{
-    const nm= s.name||s.mmsi;
-    html+= `
+    const nm=s.name||s.mmsi;
+    html+=`
       <div>
-        <b>${nm}</b> 
+        <b>${nm}</b>
         [COG:${Math.round(s.cog)}, SOG:${s.sog.toFixed(1)} kn, L:${s.ship_length||"?"}]
       </div>
     `;
   });
-
-  leftPanel.innerHTML= html;
+  leftPanel.innerHTML=html;
 }
 
 // ---------------------------------------
-// G) Zakończenie odtwarzania
+// G) exitSituationView
 // ---------------------------------------
 function exitSituationView(){
   inSituationView=false;
@@ -410,7 +406,7 @@ function exitSituationView(){
 }
 
 // ---------------------------------------
-// Porządki
+// cleanup
 // ---------------------------------------
 function clearAll(){
   umbrellasMap={};
@@ -421,19 +417,19 @@ function clearAll(){
 }
 
 // ---------------------------------------
-// bottom panel (animacja)
+// bottom UI (animation)
 // ---------------------------------------
 function setupBottomUI(){
   document.getElementById('playPause').addEventListener('click',()=>{
     if(isPlaying) stopAnimation();
     else startAnimation();
   });
-  document.getElementById('stepForward').addEventListener('click',()=> stepAnimation(1));
-  document.getElementById('stepBack').addEventListener('click',()=> stepAnimation(-1));
-  document.getElementById('closePlayback').addEventListener('click', ()=>{
+  document.getElementById('stepForward').addEventListener('click',()=>stepAnimation(1));
+  document.getElementById('stepBack').addEventListener('click',()=>stepAnimation(-1));
+  document.getElementById('closePlayback').addEventListener('click',()=>{
     exitSituationView();
   });
 }
 
-// Uruchamiamy
+// Start
 document.addEventListener('DOMContentLoaded', initHistoryApp);
