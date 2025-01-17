@@ -106,10 +106,8 @@ function loadAllScenarioFiles(fileList) {
         const arr = jsonData.scenarios || [];
         arr.forEach(obj => {
           if (obj._parent) {
-            // Umbrella
             umbrellasMap[obj.scenario_id] = obj;
           } else {
-            // Sub-scenario
             const sid = obj.scenario_id;
             if (!subScenariosMap[sid]) subScenariosMap[sid] = [];
             subScenariosMap[sid].push(obj);
@@ -152,7 +150,7 @@ function updateCollisionList() {
   const sortedIDs = Array.from(allIDs).sort();
 
   sortedIDs.forEach(sid => {
-    const umb = umbrellasMap[sid];         // ewentualnie undefined
+    const umb = umbrellasMap[sid];
     const subs = subScenariosMap[sid] || [];
 
     let headerText = `Scenario: ${sid} (subs=${subs.length})`;
@@ -246,7 +244,7 @@ function drawScenarioMarkers() {
       }
       if (latC == null || lonC == null) return;
 
-      // Ikona
+      // Ikona "C"
       const iconHTML = `
         <svg width="20" height="20" viewBox="-10 -10 20 20">
           <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
@@ -281,7 +279,7 @@ function onSelectScenario(subScenario) {
     return;
   }
 
-  // Zoom to first frame
+  // Zoom to the positions in the first frame
   const ships0 = frames[0].shipPositions || [];
   if (ships0.length > 0) {
     const latLngs = ships0.map(s => [s.lat, s.lon]);
@@ -328,6 +326,9 @@ function stepAnimation(step) {
   updateMapFrame();
 }
 
+// ---------------------------------------
+// G) updateMapFrame – 3 sekcje w panelu
+// ---------------------------------------
 function updateMapFrame() {
   const frameIndicator = document.getElementById('frameIndicator');
   frameIndicator.textContent = `${animationIndex + 1}/${animationData.length}`;
@@ -343,7 +344,7 @@ function updateMapFrame() {
   // Rysujemy wszystkie statki
   ships.forEach(s => {
     const mk = L.marker([s.lat, s.lon], {
-      icon: createShipIcon(s, false) // z common.js
+      icon: createShipIcon(s, false)
     });
     const nm = s.name || s.mmsi;
     const tt = `
@@ -356,22 +357,37 @@ function updateMapFrame() {
     shipMarkersOnMap.push(mk);
   });
 
-  // Panel
+  // Panel - 3 sekcje
+  // 1) Sekcja ogólna
+  // 2) Sekcja pary (A–B)
+  // 3) (opcjonalna) sekcja z innymi statkami
   const leftPanel = document.getElementById('selected-ships-info');
   leftPanel.innerHTML = '';
-  const pairInfo = document.getElementById('pair-info');
-  pairInfo.innerHTML = '';
 
-  let html = `<b>Frame time:</b> ${frame.time}<br>`;
-  if (frame.focus_dist !== undefined) {
-    html += `<b>Focus Dist:</b> ${frame.focus_dist.toFixed(3)} nm<br>`;
-  }
-  if (frame.delta_minutes !== undefined) {
-    html += `<b>Time to min approach:</b> ${frame.delta_minutes} min<br>`;
-  }
-  html += `<hr/>`;
+  // Format time: chcemy HH:MM:SS
+  const rawTime = frame.time; // np. "2025-01-17T01:25:25+00:00"
+  const dateObj = new Date(rawTime);
+  const hh = String(dateObj.getHours()).padStart(2, '0');
+  const mm = String(dateObj.getMinutes()).padStart(2, '0');
+  const ss = String(dateObj.getSeconds()).padStart(2, '0');
+  const niceTime = `${hh}:${mm}:${ss}`;
 
-  // Podświetlamy "focus" A–B
+  // Sekcja 1: General info
+  let html = `<div class="panel-section">`;
+  html += `<h4>General info</h4>`;
+  html += `<div><b>Time:</b> ${niceTime}</div>`;
+
+  if (frame.focus_dist !== undefined && frame.focus_dist !== null) {
+    html += `<div><b>Closest distance:</b> ${frame.focus_dist.toFixed(3)} nm</div>`;
+  }
+  if (frame.delta_minutes !== undefined && frame.delta_minutes !== null) {
+    html += `<div><b>Time to closest approach:</b> ${frame.delta_minutes} min</div>`;
+  }
+  html += `</div><hr/>`;
+
+  // Sekcja 2: Ships on collision (A–B)
+  let focusHtml = `<div class="panel-section">`;
+  focusHtml += `<h4>Ships in collision</h4>`;
   if (selectedScenario && selectedScenario.focus_mmsi) {
     const [mA, mB] = selectedScenario.focus_mmsi;
     let posA = null, posB = null;
@@ -380,28 +396,42 @@ function updateMapFrame() {
       if (ss.mmsi === mB) posB = ss;
     });
     if (posA && posB) {
-      html += `<b>Focus ships:</b><br>
-        ${posA.name} [COG:${Math.round(posA.cog)}, SOG:${posA.sog.toFixed(1)}]<br>
-        ${posB.name} [COG:${Math.round(posB.cog)}, SOG:${posB.sog.toFixed(1)}]<br>
-      <hr/>`;
+      focusHtml += `<div>${posA.name}: COG=${Math.round(posA.cog)}, SOG=${posA.sog.toFixed(1)} kn</div>`;
+      focusHtml += `<div>${posB.name}: COG=${Math.round(posB.cog)}, SOG=${posB.sog.toFixed(1)} kn</div>`;
+    } else {
+      focusHtml += `<i>Collision ships not found in this frame</i>`;
+    }
+  } else {
+    focusHtml += `<i>No focus ships</i>`;
+  }
+  focusHtml += `</div><hr/>`;
+
+  // Sekcja 3: Inne statki (opcjonalna)
+  // Warunek: jeżeli w scenario mamy > 2 statków i "ships_all" w sub-scenario
+  let otherHtml = '';
+  if (selectedScenario && selectedScenario.all_involved_mmsi) {
+    const involved = selectedScenario.all_involved_mmsi;
+    if (involved.length > 2) {
+      const [mA, mB] = selectedScenario.focus_mmsi || [null,null];
+      // Wylistuj statki != A,B
+      const others = ships.filter(s => s.mmsi !== mA && s.mmsi !== mB);
+      if (others.length > 0) {
+        otherHtml += `<div class="panel-section">`;
+        otherHtml += `<h4>Other ships</h4>`;
+        others.forEach(s => {
+          otherHtml += `<div>${s.name}: COG=${Math.round(s.cog)}, SOG=${s.sog.toFixed(1)} kn</div>`;
+        });
+        otherHtml += `</div><hr/>`;
+      }
     }
   }
 
-  // Wypisujemy wszystkie statki w tej klatce
-  ships.forEach(s => {
-    const nm = s.name || s.mmsi;
-    html += `
-      <div>
-        <b>${nm}</b>
-        [COG:${Math.round(s.cog)}, SOG:${s.sog.toFixed(1)} kn, L:${s.ship_length||"?"}]
-      </div>
-    `;
-  });
-  leftPanel.innerHTML = html;
+  // Złożenie panelu
+  leftPanel.innerHTML = html + focusHtml + otherHtml;
 }
 
 // ---------------------------------------
-// G) exitSituationView
+// H) exitSituationView
 // ---------------------------------------
 function exitSituationView() {
   inSituationView = false;
