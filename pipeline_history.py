@@ -31,24 +31,21 @@ def interpolate_positions(records, step_seconds=60):
     idx = 0
 
     while current_t <= end_t:
-        # Przesuwamy idx tak, żeby records[idx] <= current_t < records[idx+1]
         while idx < len(records) - 1 and records[idx+1][0] < current_t:
             idx += 1
 
         if idx == len(records) - 1:
-            # Jesteśmy już na końcu - wszystkie kolejne klatki będą kopiowały ostatni punkt
+            # Ostatni punkt
             _, la, lo, sg, cg = records[-1]
             out.append((current_t, la, lo, sg, cg))
         else:
             tA, laA, loA, sgA, cgA = records[idx]
             tB, laB, loB, sgB, cgB = records[idx+1]
             if current_t < tA:
-                # Jeszcze przed tA: bierzemy "A"
                 out.append((current_t, laA, loA, sgA, cgA))
             else:
                 dt = (tB - tA).total_seconds()
                 if dt <= 0:
-                    # Ochrona przed dzieleniem przez 0, bierzemy A
                     out.append((current_t, laA, loA, sgA, cgA))
                 else:
                     ratio = (current_t - tA).total_seconds() / dt
@@ -62,12 +59,12 @@ def interpolate_positions(records, step_seconds=60):
     return out
 
 # ------------------------------------------------------------
-# 2) DedupCollisionsFn – minimalne cpa (dla tej samej pary w 1 godzinie)
+# 2) DedupCollisionsFn – minimalne cpa
 # ------------------------------------------------------------
 class DedupCollisionsFn(beam.DoFn):
     """
     Zbiera kolizje w 1 godzinie, tworzy mapę (mmsiA,mmsiB)->collision,
-    wybiera minimalne cpa, aby uniknąć duplikatów tej samej pary (A–B).
+    wybiera minimalne cpa, aby uniknąć duplikatów tej samej pary.
     """
     def process(self, collisions):
         pair_map = {}
@@ -79,7 +76,7 @@ class DedupCollisionsFn(beam.DoFn):
             if not old:
                 pair_map[key] = c
             else:
-                # Bierzemy kolizję o najmniejszym cpa
+                # Wybieramy kolizję o najmniejszym cpa
                 if c["cpa"] < old["cpa"]:
                     pair_map[key] = c
         yield list(pair_map.values())
@@ -88,10 +85,6 @@ class DedupCollisionsFn(beam.DoFn):
 # 3) GroupCollisionsIntoScenarios – umbrella (graf spójny)
 # ------------------------------------------------------------
 class GroupCollisionsIntoScenarios(beam.DoFn):
-    """
-    Wyszukuje wszystkie MMSI, które są w 1 "umbrella scenario" (spójny graf).
-    collisions_in_scenario => lista kolizji (A–B).
-    """
     def process(self, collisions_list):
         collisions_list.sort(key=lambda c: c["timestamp"])
         graph = defaultdict(set)
@@ -148,7 +141,7 @@ class GroupCollisionsIntoScenarios(beam.DoFn):
             }
 
 # ------------------------------------------------------------
-# 4) BuildScenarioFramesFn – sub-scenariusze (A–B), wypełnianie luk, poszukiwanie realnego min. dystansu
+# 4) BuildScenarioFramesFn – sub-scenariusze (A–B), z wide oknem, wyliczaniem real_min_dist, itd.
 # ------------------------------------------------------------
 class BuildScenarioFramesFn(beam.DoFn):
     def setup(self):
@@ -164,8 +157,7 @@ class BuildScenarioFramesFn(beam.DoFn):
         return R_earth_nm * c
 
     def process(self, umbrella):
-        # Jeśli to już sub-scenario => emit bez zmian
-        # (może się nie zdarzyć, ale na wszelki wypadek)
+        # Jeśli to już sub-scenario => emit bez zmian (zazwyczaj nie wystąpi, ale na wszelki wypadek)
         if not umbrella.get("_parent"):
             yield umbrella
             return
@@ -176,7 +168,7 @@ class BuildScenarioFramesFn(beam.DoFn):
         min_ts     = umbrella["min_ts"]
         max_ts     = umbrella["max_ts"]
 
-        # Emisja "umbrella" info
+        # Emitujemy umbrella (zbiorczy) obiekt
         parent_obj = {
             "_parent": True,
             "scenario_id": scenario_id,
@@ -190,22 +182,21 @@ class BuildScenarioFramesFn(beam.DoFn):
         if not collisions or not min_ts or not max_ts:
             return
 
-        # Przejdziemy po każdej kolizji (A–B) w tym umbrella
-        # i wyszukamy *faktyczne* min-dist w szerszym oknie.
+        # Budowa sub-scenariuszy (A–B) z szerokim oknem i wyznaczeniem real_min_dist
         for c in collisions:
             collision_id = c["collision_id"]
             a = c["mmsi_a"]
             b = c["mmsi_b"]
-            cpa_val = c["cpa"]  # oryginalne cpa z BQ (być może niedokładne)
+            cpa_val = c["cpa"]  # oryginalne cpa z BQ
             t_min   = c["timestamp"]
             if not t_min:
                 continue
 
-            # Szersze okno, np. [-20, +10], by znaleźć real minimal dist
+            # 1) Ustalamy szerokie okno: [t_min - 20, t_min + 10]
             wide_start = t_min - datetime.timedelta(minutes=20)
             wide_end   = t_min + datetime.timedelta(minutes=10)
 
-            # Pobranie AIS z wide okna
+            # 2) Pobranie AIS z wide okna
             str_mmsi = ",".join(map(str, ships_all))
             query = f"""
             SELECT
@@ -225,26 +216,24 @@ class BuildScenarioFramesFn(beam.DoFn):
             """
             rows = list(self.bq_client.query(query).result())
 
-            from collections import defaultdict
             data_map = defaultdict(list)
             name_map = {}
             len_map  = {}
 
             for r in rows:
-                tt = r.timestamp
+                ts = r.timestamp
                 la = float(r.latitude or 0.0)
                 lo = float(r.longitude or 0.0)
                 sg = float(r.sog or 0.0)
                 cg = float(r.cog or 0.0)
-                data_map[r.mmsi].append((tt, la, lo, sg, cg))
+                data_map[r.mmsi].append((ts, la, lo, sg, cg))
                 name_map[r.mmsi] = r.ship_name or str(r.mmsi)
                 len_map[r.mmsi]  = r.ship_length or 0
 
-            # Interpolacja + fill-luki
+            # 3) Interpolacja (co 60s) + fill-luki => full_time_map[tstamp][mmsi]
             full_time_map = defaultdict(dict)
             last_known = {mm: None for mm in ships_all}
 
-            # Interpolujemy co 60s
             for mm in ships_all:
                 arr = data_map[mm]
                 if not arr:
@@ -266,7 +255,7 @@ class BuildScenarioFramesFn(beam.DoFn):
                     }
                     last_known[mm] = full_time_map[key_ts][mm]
 
-            # Fill-luki
+            # fill-luki (jeśli w danej minucie brak wpisu dla statku => użyj last_known)
             all_times = sorted(full_time_map.keys())
             for tstamp in all_times:
                 for mm in ships_all:
@@ -278,80 +267,74 @@ class BuildScenarioFramesFn(beam.DoFn):
                     if mm in full_time_map[tstamp]:
                         last_known[mm] = full_time_map[tstamp][mm]
 
-            # Teraz mamy w full_time_map klatki co 1 min w oknie [-20, +10] od t_min
-            # 1) Znajdź real minimum dla (A,B)
-            real_min_dist = 999999
+            # 4) Znajdź real_min_dist + real_min_time w tym szerokim oknie
+            real_min_dist = 999999.0
             real_min_time = t_min  # fallback
-            # Zapiszmy do listy framesWide
-            framesWide = []
+
+            framesWide = []  # przechowa (tstamp, ships_dict, distAB)
 
             for tstamp in all_times:
-                if wide_start <= tstamp <= wide_end:
-                    ships_dict = full_time_map[tstamp]
-                    posA = ships_dict.get(a)
-                    posB = ships_dict.get(b)
-                    dist_nm = None
-                    if posA and posB:
-                        dist_nm = self._haversine_nm(
-                            posA["lat"], posA["lon"],
-                            posB["lat"], posB["lon"]
-                        )
-                        if dist_nm < real_min_dist:
-                            real_min_dist = dist_nm
-                            real_min_time = tstamp
-                    # Zbuduj wstępną klatkę
-                    framesWide.append((tstamp, ships_dict, dist_nm))
+                if tstamp < wide_start or tstamp > wide_end:
+                    continue
+                ships_dict = full_time_map[tstamp]
+                distAB = None
+                posA = ships_dict.get(a)
+                posB = ships_dict.get(b)
+                if posA and posB:
+                    distAB = self._haversine_nm(posA["lat"], posA["lon"],
+                                                posB["lat"], posB["lon"])
+                    if distAB < real_min_dist:
+                        real_min_dist = distAB
+                        real_min_time = tstamp
 
-            # 2) Mając real_min_time, budujemy finalne [real_min_time - 15, real_min_time + 5]
+                framesWide.append((tstamp, ships_dict, distAB))
+
+            # 5) Przycinamy do finalnych 20 min: [real_min_time - 15, real_min_time + 5]
             final_start = real_min_time - datetime.timedelta(minutes=15)
             final_end   = real_min_time + datetime.timedelta(minutes=5)
 
             frames = []
-            icon_lat = None
-            icon_lon = None
+            best_dist = 999999
+            best_dist_ts = real_min_time
 
-            best_dist = 9999
-            best_dist_t = real_min_time
-
-            for (tstamp, ships_dict, dist_nm) in framesWide:
+            for (tstamp, ships_dict, distAB) in framesWide:
                 if tstamp < final_start or tstamp > final_end:
                     continue
                 shipsArr = list(ships_dict.values())
+                delta_minutes = round((tstamp - real_min_time).total_seconds() / 60.0, 2)
 
-                delta_minutes = round((tstamp - real_min_time).total_seconds()/60.0, 2)
-
-                # focus_dist = dist_nm (odległość A-B), jeśli posA & posB
-                fdist = dist_nm if dist_nm is not None else None
-                if fdist is not None and fdist < best_dist:
-                    best_dist = fdist
-                    best_dist_t = tstamp
+                if distAB is not None and distAB < best_dist:
+                    best_dist = distAB
+                    best_dist_ts = tstamp
 
                 frames.append({
                     "time": tstamp.isoformat(),
                     "shipPositions": shipsArr,
-                    "focus_dist": fdist,
+                    "focus_dist": distAB,
                     "delta_minutes": delta_minutes
                 })
 
-            # Ikona (C) w miejscu realnego minDist
+            # 6) Ustal miejsce ikony "C" (w momencie best_dist_ts)
+            icon_lat = None
+            icon_lon = None
             if frames:
-                # Szukamy klatki najbliższej best_dist_t
-                closest_fr = min(
+                # Wybieramy klatkę najbliższą best_dist_ts
+                closest_frame = min(
                     frames,
-                    key=lambda fr: abs(datetime.datetime.fromisoformat(fr["time"]) - best_dist_t)
+                    key=lambda fr: abs(datetime.datetime.fromisoformat(fr["time"]) - best_dist_ts)
                 )
                 posA = None
                 posB = None
-                for sdat in closest_fr["shipPositions"]:
+                for sdat in closest_frame["shipPositions"]:
                     if sdat["mmsi"] == a:
                         posA = sdat
-                    elif sdat["mmsi"] == b:
+                    if sdat["mmsi"] == b:
                         posB = sdat
                 if posA and posB:
                     icon_lat = 0.5*(posA["lat"] + posB["lat"])
                     icon_lon = 0.5*(posA["lon"] + posB["lon"])
 
-            # Tytuł
+            # 7) Tytuł, final emission
             nmA = name_map.get(a) or str(a)
             nmB = name_map.get(b) or str(b)
             dist_str = f"{real_min_dist:.3f} nm"
@@ -363,6 +346,7 @@ class BuildScenarioFramesFn(beam.DoFn):
                 "collision_id": collision_id,
                 "focus_mmsi": [a, b],
                 "title": scTitle,
+                # cpaVal or real_min_dist? Zapisujemy real_min_dist 
                 "cpa": real_min_dist,
                 "t_min": real_min_time.isoformat(),
                 "all_involved_mmsi": ships_all,
@@ -379,9 +363,6 @@ def scenario_list_to_json(items):
     return json.dumps({"scenarios": arr}, default=str, indent=2)
 
 class SingleScenarioJSONSink(FileSink):
-    """
-    Sink do zapisu finalnych JSON-ów (1 plik na godzinę).
-    """
     def open(self, fh):
         self._fh = fh
     def write(self, element):
@@ -405,7 +386,7 @@ def run():
     start_time = prev_hour
     end_time   = this_hour
 
-    # Zmieniamy cpa < 0.5 (zamiast 0.3), bo chcemy 0.5 nm jako próg minimalnego zbliżenia
+    # cpa < 0.3 => minimalny dystans (jeśli chcesz, możesz ustawić 0.5)
     query = f"""
     SELECT
       CONCAT(
@@ -421,7 +402,7 @@ def run():
     FROM `ais_dataset_us.collisions`
     WHERE timestamp >= TIMESTAMP('{start_time.isoformat()}')
       AND timestamp <  TIMESTAMP('{end_time.isoformat()}')
-      AND cpa < 0.5
+      AND cpa < 0.3
       AND tcpa >= 0
       AND tcpa <= 10
     ORDER BY timestamp
@@ -435,25 +416,33 @@ def run():
     filename = f"{output_prefix}/multiship_{date_str}.json"
 
     with beam.Pipeline(options=pipeline_options) as p:
+        # 1) Odczyt kolizji z BQ
         collisions = (
             p
-            | "ReadCollisions" >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+            | "ReadCollisions" >> beam.io.ReadFromBigQuery(
+                query=query,
+                use_standard_sql=True
+                # location="us-east1"  # jeśli Twój dataset jest w regionie us-east1, dodaj to
+            )
         )
+
+        # 2) Grupujemy w 1 listę
         collisions_list = collisions | "GroupAll" >> beam.combiners.ToList()
 
-        # Deduplicate par A–B w danej godzinie
+        # 3) Deduplikacja par A–B
         deduped = collisions_list | "Deduplicate" >> beam.ParDo(DedupCollisionsFn())
 
-        # Group into umbrella scenarios
+        # 4) Budowa umbrella (graf spójny)
         umbrella = deduped | "GroupCollisions" >> beam.ParDo(GroupCollisionsIntoScenarios())
 
-        # Budowa finalnych sub-scenariuszy
+        # 5) Budowa klatek sub-scenariusza (z wide oknem i real_min_dist)
         scenario_frames = umbrella | "BuildFrames" >> beam.ParDo(BuildScenarioFramesFn())
 
-        # Zapis do JSON
+        # 6) Zapis do listy
         final_list = scenario_frames | "ToList" >> beam.combiners.ToList()
         scenario_json = final_list | "MakeJSON" >> beam.Map(scenario_list_to_json)
 
+        # 7) Zapis do GCS w formacie JSON
         scenario_json | "WriteFile" >> WriteToFiles(
             path=filename,
             max_writers_per_bundle=1,
