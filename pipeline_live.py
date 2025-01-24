@@ -13,11 +13,14 @@ from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
-# Parametry kolizji
+# Dodatkowe importy do okien
+from apache_beam import window
+from apache_beam.transforms import trigger
+from apache_beam.transforms.window import FixedWindows
+
 CPA_THRESHOLD = 0.5         # mile morskie
 TCPA_THRESHOLD = 10.0       # minuty
-STATE_RETENTION_SEC = 120   # wydłużamy do 120s (2 min), by potok dłużej śledził parę
-# OLD_COLLISION_MINUTES = 5 # usuwamy/wyłączamy, żeby BQ nie „obcinał” starych wierszy
+STATE_RETENTION_SEC = 120   # (2 min) do wykrywania kolizji
 
 def parse_ais(record: bytes):
     """
@@ -63,6 +66,7 @@ def compute_cpa_tcpa(a, b):
     except:
         return (9999, -1)
 
+    # Pomijamy statki <50m
     if la < 50 or lb < 50:
         return (9999, -1)
 
@@ -139,6 +143,7 @@ class CollisionDoFn(beam.DoFn):
             if (now_sec - t) <= STATE_RETENTION_SEC:
                 fresh.append((s, t))
 
+        # Oczyszczamy stan i zapisujemy tylko świeże
         records_state.clear()
         for (s, t) in fresh:
             records_state.add((s, t))
@@ -164,7 +169,6 @@ class CollisionDoFn(beam.DoFn):
                 }
 
 def remove_geohash(row):
-    # Usuwamy klucz "geohash" przed zapisem do ships_positions
     new_row = dict(row)
     new_row.pop("geohash", None)
     return new_row
@@ -176,26 +180,45 @@ def run():
 
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
     dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
-    input_sub = os.getenv("INPUT_SUBSCRIPTION", 
+    input_sub = os.getenv("INPUT_SUBSCRIPTION",
                           "projects/ais-collision-detection/subscriptions/ais-data-sub")
 
     table_positions = f"{project_id}:{dataset}.ships_positions"
     table_collisions = f"{project_id}:{dataset}.collisions"
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # 1) Odczyt AIS z PubSub
+        # 1) Odczyt AIS z Pub/Sub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # 2) Parsowanie
+        # 2) Parsowanie AIS
         parsed = (
             lines
             | "ParseAIS" >> beam.Map(parse_ais)
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 3) Zapis statków do BQ
+        # ---- A) Okienkowanie (10s) danych do ships_positions ----
+        # 3) Usuwamy geohash i okienkujemy co 10s
         parsed_for_bq = parsed | "RemoveGeoHash" >> beam.Map(remove_geohash)
-        parsed_for_bq | "WritePositions" >> WriteToBigQuery(
+
+        windowed_positions = (
+            parsed_for_bq
+            | "WindowPositions" >> beam.WindowInto(window.FixedWindows(10))  # co 10s
+        )
+        # 3a) GroupByKey, aby zebrać rekordy w każdej "partycji" (użyjemy sztucznego klucza = None)
+        grouped_positions = (
+            windowed_positions
+            | "KeyPositions" >> beam.Map(lambda row: (None, row))
+            | "GroupPositions" >> beam.GroupByKey()
+        )
+        # 3b) Flatten zgrupowane wartości
+        flattened_positions = (
+            grouped_positions
+            | "ExtractPositions" >> beam.FlatMap(lambda kv: kv[1])  # kv[1] = list of rows
+        )
+
+        # 3c) Zapis do BQ (CREATE_NEVER -> musimy utworzyć tabelę 'ships_positions' wcześniej)
+        flattened_positions | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
             schema=(
                 "mmsi:INTEGER,"
@@ -207,19 +230,32 @@ def run():
                 "ship_name:STRING,"
                 "ship_length:FLOAT"
             ),
-            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+            create_disposition=BigQueryDisposition.CREATE_NEVER,  # <-- zmiana
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             additional_bq_parameters={"location": "us-east1"},
         )
 
-        # 4) Wykrywanie kolizji
+        # ---- B) Wykrywanie kolizji + okienkowanie (10s) do collisions ----
         keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
-        collisions = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
-        # Uwaga: rezygnujemy z filtra starych kolizji, by BQ mogło gromadzić
-        # i będziemy filtrować dopiero w front-endzie
+        collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        # 5) Zapis kolizji do BQ
-        collisions | "WriteCollisions" >> WriteToBigQuery(
+        # 4) Okienko 10s + group
+        windowed_collisions = (
+            collisions_raw
+            | "WindowCollisions" >> beam.WindowInto(window.FixedWindows(10))
+        )
+        grouped_collisions = (
+            windowed_collisions
+            | "KeyCollisions" >> beam.Map(lambda row: (None, row))
+            | "GroupCollisions" >> beam.GroupByKey()
+        )
+        flattened_collisions = (
+            grouped_collisions
+            | "ExtractCollisions" >> beam.FlatMap(lambda kv: kv[1])
+        )
+
+        # 5) Zapis kolizji do BQ (też 10s okno)
+        flattened_collisions | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
             schema=(
                 "mmsi_a:INTEGER,"
@@ -234,18 +270,13 @@ def run():
                 "ship_length_a:FLOAT,"
                 "ship_length_b:FLOAT"
             ),
-            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+            create_disposition=BigQueryDisposition.CREATE_NEVER,  # lepiej też utworzyć wcześniej
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             additional_bq_parameters={"location": "us-east1"},
         )
 
-        # 6) (opcjonalnie) publikacja do PubSub collisions-topic...
-     
-        #collisions_str = (
-        #    collisions
-        #    | "CollisionsToJson" >> beam.Map(lambda c: json.dumps(c).encode("utf-8"))
-        #)
-        #collisions_str | "PublishCollisions" >> beam.io.WriteToPubSub(topic=collisions_topic)
+        # (opcjonalnie) Publikacja do PubSub collisions-topic ...
+        # ...
 
 if __name__ == "__main__":
     run()
