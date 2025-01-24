@@ -41,25 +41,28 @@ function initLiveApp() {
     // Odświeżamy (m.in. wektory prędkości) i ewentualnie CPA/TCPA
     updateSelectedShipsInfo(true);
   });
+
   document.getElementById('cpaFilter').addEventListener('input', e => {
     cpaFilter = parseFloat(e.target.value) || 0.5;
     document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
     fetchCollisions();
   });
+
   document.getElementById('tcpaFilter').addEventListener('input', e => {
     tcpaFilter = parseFloat(e.target.value) || 10;
     document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
     fetchCollisions();
   });
+
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
 
   // 4) Pierwsze pobranie statków i kolizji
   fetchShips();
   fetchCollisions();
 
-  // 5) Odświeżamy co 60 sekund (lub wg potrzeb)
-  shipsInterval = setInterval(fetchShips, 60000);
-  collisionsInterval = setInterval(fetchCollisions, 60000);
+  // 5) Odświeżamy co 30 sekund (zamiast 1 min)
+  shipsInterval = setInterval(fetchShips, 30000);
+  collisionsInterval = setInterval(fetchCollisions, 30000);
 }
 
 // ----------------------------------
@@ -150,9 +153,8 @@ function fetchCollisions() {
 
 /**
  * updateCollisionsList():
- *  - Filtrowanie i grupowanie kolizji (tcpa >= 0, timestamp + tcpa > now, itp.)
- *  - Wyświetlanie w panelu z splitted circle
- *  - Rysowanie markerów kolizyjnych na mapie
+ *  - Filtrowanie i grupowanie kolizji
+ *  - Wyświetlanie w panelu i rysowanie markerów kolizyjnych na mapie
  */
 function updateCollisionsList() {
   const collisionList = document.getElementById('collision-list');
@@ -172,13 +174,14 @@ function updateCollisionsList() {
 
   const nowMs = Date.now();
 
-  // 1) Filtrowanie (np. statki minęły się lub kolizja w przeszłości)
+  // 1) Filtrowanie (np. statki minęły się już)
   let filtered = collisionsData.filter(c => {
     if (c.tcpa < 0) return false;
     if (c.timestamp) {
       let collTime = new Date(c.timestamp).getTime();
-      let futureMs = collTime + (c.tcpa*60000);
+      let futureMs = collTime + (c.tcpa * 60000);
       if (futureMs < nowMs) {
+        // kolizja jest już w przeszłości
         return false;
       }
     }
@@ -193,13 +196,12 @@ function updateCollisionsList() {
     return;
   }
 
-  // 2) Grupowanie wg pary (mmsi_a, mmsi_b)
+  // 2) Grupowanie wg par (mmsi_a, mmsi_b)
   let pairsMap = {};
   filtered.forEach(c => {
     let a = Math.min(c.mmsi_a, c.mmsi_b);
     let b = Math.max(c.mmsi_a, c.mmsi_b);
     let key = `${a}_${b}`;
-
     if (!pairsMap[key]) {
       pairsMap[key] = c;
     } else {
@@ -228,28 +230,16 @@ function updateCollisionsList() {
     let cpaStr = c.cpa.toFixed(2);
     let tcpaStr= c.tcpa.toFixed(2);
 
-    // Pozyskujemy splitted circle z common.js
-    // Wykorzystujemy getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers)
-    const splittedHTML = getCollisionSplitCircle(
-      c.mmsi_a,
-      c.mmsi_b,
-      c.ship_length_a,
-      c.ship_length_b,
-      shipMarkers // dzięki temu możemy sprawdzić aktualne length
-    );
-
-    let timeStr = '';
-    if (c.timestamp) {
-      let dt = new Date(c.timestamp);
-      timeStr = dt.toLocaleTimeString('pl-PL', { hour12:false });
-    }
+    // Można tworzyć splitted circle, itd. (pomijam detale)
+    const timeStr = c.timestamp
+      ? new Date(c.timestamp).toLocaleTimeString('pl-PL', {hour12:false})
+      : '';
 
     const item = document.createElement('div');
     item.classList.add('collision-item');
     item.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
-          ${splittedHTML}
           <strong>${shipA} – ${shipB}</strong><br>
           CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min
           ${timeStr ? '@ ' + timeStr : ''}
@@ -269,7 +259,7 @@ function updateCollisionsList() {
     let lonC = (c.longitude_a + c.longitude_b)/2;
 
     const collisionIcon = L.divIcon({
-      className:'',
+      className: '',
       html: `
         <svg width="24" height="24" viewBox="-12 -12 24 24">
           <path d="M0,-7 7,7 -7,7 Z"
@@ -297,7 +287,6 @@ function zoomToCollision(c) {
     [c.latitude_a, c.longitude_a],
     [c.latitude_b, c.longitude_b]
   ]);
-  // Dopasowanie do kolizji z mniejszym padding i przykładowym maxZoom
   map.fitBounds(bounds, {
     padding: [15, 15],
     maxZoom: 13
@@ -307,19 +296,15 @@ function zoomToCollision(c) {
   if (c.tcpa && c.tcpa > 0 && c.tcpa < 9999) {
     vectorLength = Math.round(c.tcpa);
 
-    // --- 1) Ustawiamy slider na tę wartość ---
+    // Slider + label
     const vectorLengthSlider = document.getElementById('vectorLengthSlider');
     vectorLengthSlider.value = vectorLength.toString();
+    document.getElementById('vectorLengthValue').textContent = vectorLength;
 
-    // --- 2) Ustawiamy label z aktualną wartością (np. obok suwaka) ---
-    const vectorLengthValue = document.getElementById('vectorLengthValue');
-    vectorLengthValue.textContent = vectorLength;
-
-    // --- 3) Odświeżamy wektory na mapie (statki zaznaczone) ---
     updateSelectedShipsInfo(true);
   }
 
-  // Reszta logiki: zaznaczenie statków
+  // Clear i dodajemy obie pary
   clearSelectedShips();
   selectShip(c.mmsi_a);
   selectShip(c.mmsi_b);
@@ -385,30 +370,58 @@ function updateSelectedShipsInfo(selectionChanged) {
   selectedShips.forEach(m => drawVector(m));
   reloadAllShipIcons();
 
-  // Jeżeli zaznaczone 2 – pobieramy cpa/tcpa
+  // Jeśli wybrano 2 statki => CPA/TCPA + Distance
   if (selectedShips.length === 2) {
-    const sorted = [...selectedShips].sort((a,b)=>a-b);
+    const [mA, mB] = selectedShips;
+    let posA = shipMarkers[mA]?.shipData;
+    let posB = shipMarkers[mB]?.shipData;
+
+    // 1) Od razu liczymy aktualny dystans w nm (na podstawie lat/lon)
+    let distNm = null;
+    if (posA && posB) {
+      distNm = computeDistanceNm(posA.latitude, posA.longitude, posB.latitude, posB.longitude);
+    }
+
+    // 2) Pobieramy CPA/TCPA z backendu
+    const sorted = [mA, mB].sort((a,b)=>a-b);
     const url = `/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`;
     fetch(url)
       .then(r => r.json())
       .then(data => {
         if (data.error) {
-          document.getElementById('pair-info').innerHTML =
-            `<b>CPA/TCPA:</b> N/A (${data.error})`;
+          document.getElementById('pair-info').innerHTML = `
+            ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+            <b>CPA/TCPA:</b> N/A (${data.error})
+          `;
         } else {
           let cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
           let tcpaVal= (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
           document.getElementById('pair-info').innerHTML = `
+            ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
             <b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min
           `;
         }
       })
       .catch(err => {
         console.error("Błąd /calculate_cpa_tcpa:", err);
-        document.getElementById('pair-info').innerHTML =
-          '<b>CPA/TCPA:</b> N/A';
+        document.getElementById('pair-info').innerHTML = `
+          ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+          <b>CPA/TCPA:</b> N/A
+        `;
       });
   }
+}
+
+// ------------------ computeDistanceNm (haversine) ------------------
+function computeDistanceNm(lat1, lon1, lat2, lon2) {
+  const R_nm = 3440.065; // promień Ziemi w nm
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin(dLon/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R_nm * c;
 }
 
 // ------------------ drawVector: wektor prędkości ------------------
