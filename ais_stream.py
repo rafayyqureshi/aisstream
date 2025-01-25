@@ -63,7 +63,8 @@ async def connect_ais_stream():
     while True:
         try:
             async with websockets.connect(uri, ping_interval=None, ssl=ssl_context) as websocket:
-                logger.info("Connected to AISSTREAM.io")
+                # logger.info("Connected to AISSTREAM.io")
+                logger.info("=== AIS STREAM (NEW CODE) === connected to AISSTREAM.io")
 
                 subscribe_message = {
                     "APIKey": AISSTREAM_TOKEN,
