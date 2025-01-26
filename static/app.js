@@ -27,18 +27,22 @@ let collisionsInterval = null;
  * Funkcja inicjalizująca moduł LIVE (wywoływana po DOMContentLoaded).
  */
 function initLiveApp() {
-  // 1) Tworzymy mapę z pliku common.js
+  // 1) Tworzymy mapę
   map = initSharedMap('map');
 
-  // 2) Dodajemy warstwę klastrującą statki
+  // 2) warstwa klastrująca
   markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
   map.addLayer(markerClusterGroup);
 
-  // 3) Obsługa UI (suwaki i przyciski)
+  // Zoom event => odświeżamy ikony (aby rysować polygon, jak zoom >=12)
+  map.on('zoomend', () => {
+    reloadAllShipIcons();
+  });
+
+  // 3) UI (suwaki i przyciski)
   document.getElementById('vectorLengthSlider').addEventListener('input', e => {
     vectorLength = parseInt(e.target.value) || 15;
     document.getElementById('vectorLengthValue').textContent = vectorLength;
-    // Odświeżamy (m.in. wektory prędkości) i ewentualnie CPA/TCPA
     updateSelectedShipsInfo(true);
   });
 
@@ -56,11 +60,11 @@ function initLiveApp() {
 
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
 
-  // 4) Pierwsze pobranie statków i kolizji
+  // 4) Pierwsze pobranie
   fetchShips();
   fetchCollisions();
 
-  // 5) Odświeżamy co 30 sekund (zamiast 1 min)
+  // 5) Odśwież co 30s
   shipsInterval = setInterval(fetchShips, 30000);
   collisionsInterval = setInterval(fetchCollisions, 30000);
 }
@@ -96,10 +100,11 @@ function updateShips(shipsArray) {
     const mmsi = ship.mmsi;
     const isSelected = selectedShips.includes(mmsi);
 
-    // Ikona statku z pliku common.js
-    const icon = createShipIcon(ship, isSelected);
+    // Tworzymy ikonę statku. 
+    // Uwaga: musimy przekazać aktualny zoom, bo w createShipIcon sprawdzamy if (zoom>=12)
+    const icon = createShipIcon(ship, isSelected, map.getZoom());
 
-    // Tooltip
+    // tooltip
     const now = Date.now();
     const updTs = ship.timestamp ? new Date(ship.timestamp).getTime() : 0;
     const diffSec = Math.floor((now - updTs)/1000);
@@ -107,17 +112,22 @@ function updateShips(shipsArray) {
     const ss = diffSec % 60;
     const diffStr = `${mm}m ${ss}s ago`;
 
+    // Długość
+    let dimsLen = null;
+    if (ship.dim_a && ship.dim_b) {
+      dimsLen = (parseFloat(ship.dim_a) + parseFloat(ship.dim_b)).toFixed(1);
+    }
+
     const ttHTML = `
       <b>${ship.ship_name || 'Unknown'}</b><br>
       MMSI: ${mmsi}<br>
       SOG: ${ship.sog || 0} kn, COG: ${ship.cog || 0}°<br>
-      Len: ${ship.ship_length || 'N/A'}<br>
+      Length: ${dimsLen || '??'}<br>
       Updated: ${diffStr}
     `;
 
     let marker = shipMarkers[mmsi];
     if (!marker) {
-      // Nowy statek
       marker = L.marker([ship.latitude, ship.longitude], { icon })
         .on('click', () => selectShip(mmsi));
       marker.bindTooltip(ttHTML, { direction:'top', sticky:true });
@@ -126,7 +136,7 @@ function updateShips(shipsArray) {
       shipMarkers[mmsi] = marker;
       markerClusterGroup.addLayer(marker);
     } else {
-      // Aktualizacja
+      // aktualizacja
       marker.setLatLng([ship.latitude, ship.longitude]);
       marker.setIcon(icon);
       marker.setTooltipContent(ttHTML);
@@ -134,7 +144,7 @@ function updateShips(shipsArray) {
     }
   });
 
-  // Odświeżamy zaznaczenia i wektory
+  // Odśwież zaznaczenia
   updateSelectedShipsInfo(false);
 }
 
@@ -151,11 +161,6 @@ function fetchCollisions() {
     .catch(err => console.error("Błąd /collisions:", err));
 }
 
-/**
- * updateCollisionsList():
- *  - Filtrowanie i grupowanie kolizji
- *  - Wyświetlanie w panelu i rysowanie markerów kolizyjnych na mapie
- */
 function updateCollisionsList() {
   const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML = '';
@@ -173,17 +178,12 @@ function updateCollisionsList() {
   }
 
   const nowMs = Date.now();
-
-  // 1) Filtrowanie (np. statki minęły się już)
   let filtered = collisionsData.filter(c => {
     if (c.tcpa < 0) return false;
     if (c.timestamp) {
       let collTime = new Date(c.timestamp).getTime();
       let futureMs = collTime + (c.tcpa * 60000);
-      if (futureMs < nowMs) {
-        // kolizja jest już w przeszłości
-        return false;
-      }
+      if (futureMs < nowMs) return false;
     }
     return true;
   });
@@ -196,7 +196,7 @@ function updateCollisionsList() {
     return;
   }
 
-  // 2) Grupowanie wg par (mmsi_a, mmsi_b)
+  // Grupowanie wg par
   let pairsMap = {};
   filtered.forEach(c => {
     let a = Math.min(c.mmsi_a, c.mmsi_b);
@@ -223,14 +223,17 @@ function updateCollisionsList() {
     return;
   }
 
-  // 3) Wyświetlanie
   finalCollisions.forEach(c => {
-    let shipA = c.ship1_name || c.mmsi_a;
-    let shipB = c.ship2_name || c.mmsi_b;
+    let shipA = `Ship ${c.mmsi_a}`;
+    let shipB = `Ship ${c.mmsi_b}`;
     let cpaStr = c.cpa.toFixed(2);
     let tcpaStr= c.tcpa.toFixed(2);
 
-    // Można tworzyć splitted circle, itd. (pomijam detale)
+    // splitted circle
+    // fallbackLenA/B = 0
+    // Użyj getCollisionSplitCircle(...) by wstawić HTML
+    const splittedHTML = getCollisionSplitCircle(c.mmsi_a, c.mmsi_b, 0, 0, shipMarkers);
+
     const timeStr = c.timestamp
       ? new Date(c.timestamp).toLocaleTimeString('pl-PL', {hour12:false})
       : '';
@@ -240,6 +243,7 @@ function updateCollisionsList() {
     item.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
+          ${splittedHTML}
           <strong>${shipA} – ${shipB}</strong><br>
           CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min
           ${timeStr ? '@ ' + timeStr : ''}
@@ -249,7 +253,7 @@ function updateCollisionsList() {
     `;
     collisionList.appendChild(item);
 
-    // Klik -> zoom
+    // Klik => zoom
     item.querySelector('.zoom-button').addEventListener('click', () => {
       zoomToCollision(c);
     });
@@ -281,7 +285,6 @@ function updateCollisionsList() {
   });
 }
 
-// ------------------ zoomToCollision ------------------
 function zoomToCollision(c) {
   let bounds = L.latLngBounds([
     [c.latitude_a, c.longitude_a],
@@ -292,19 +295,14 @@ function zoomToCollision(c) {
     maxZoom: 13
   });
 
-  // Ustawiamy vectorLength na zaokrągloną wartość tcpa, jeśli sensowna
-  if (c.tcpa && c.tcpa > 0 && c.tcpa < 9999) {
+  // Ustaw vectorLength
+  if (c.tcpa && c.tcpa>0 && c.tcpa<9999) {
     vectorLength = Math.round(c.tcpa);
-
-    // Slider + label
-    const vectorLengthSlider = document.getElementById('vectorLengthSlider');
-    vectorLengthSlider.value = vectorLength.toString();
+    const slider = document.getElementById('vectorLengthSlider');
+    slider.value = vectorLength.toString();
     document.getElementById('vectorLengthValue').textContent = vectorLength;
-
-    updateSelectedShipsInfo(true);
   }
 
-  // Clear i dodajemy obie pary
   clearSelectedShips();
   selectShip(c.mmsi_a);
   selectShip(c.mmsi_b);
@@ -330,7 +328,6 @@ function clearSelectedShips() {
   updateSelectedShipsInfo(false);
 }
 
-// ------------------ Panel "Selected Ships" ------------------
 function updateSelectedShipsInfo(selectionChanged) {
   const panel = document.getElementById('selected-ships-info');
   panel.innerHTML = '';
@@ -341,7 +338,6 @@ function updateSelectedShipsInfo(selectionChanged) {
     return;
   }
 
-  // Zbieramy dane statków
   let sData = [];
   selectedShips.forEach(mmsi => {
     if (shipMarkers[mmsi]?.shipData) {
@@ -349,19 +345,22 @@ function updateSelectedShipsInfo(selectionChanged) {
     }
   });
 
-  // Prezentacja w panelu
   sData.forEach(sd => {
+    let dimsLen = null;
+    if (sd.dim_a && sd.dim_b) {
+      dimsLen = (parseFloat(sd.dim_a) + parseFloat(sd.dim_b)).toFixed(1);
+    }
     const div = document.createElement('div');
     div.innerHTML = `
       <b>${sd.ship_name || 'Unknown'}</b><br>
       MMSI: ${sd.mmsi}<br>
       SOG: ${sd.sog||0} kn, COG: ${sd.cog||0}°<br>
-      Len: ${sd.ship_length||'N/A'}
+      Length: ${dimsLen || 'N/A'}
     `;
     panel.appendChild(div);
   });
 
-  // Wektory prędkości (usuwamy stare)
+  // Rysujemy wektory prędkości
   for (let m in overlayMarkers) {
     overlayMarkers[m].forEach(ln => map.removeLayer(ln));
   }
@@ -370,61 +369,58 @@ function updateSelectedShipsInfo(selectionChanged) {
   selectedShips.forEach(m => drawVector(m));
   reloadAllShipIcons();
 
-  // Jeśli wybrano 2 statki => CPA/TCPA + Distance
+  // Gdy wybrano 2 statki => liczymy distance + CPA/TCPA
   if (selectedShips.length === 2) {
     const [mA, mB] = selectedShips;
     let posA = shipMarkers[mA]?.shipData;
     let posB = shipMarkers[mB]?.shipData;
-
-    // 1) Od razu liczymy aktualny dystans w nm (na podstawie lat/lon)
     let distNm = null;
     if (posA && posB) {
       distNm = computeDistanceNm(posA.latitude, posA.longitude, posB.latitude, posB.longitude);
     }
-
-    // 2) Pobieramy CPA/TCPA z backendu
+    // /calculate_cpa_tcpa
     const sorted = [mA, mB].sort((a,b)=>a-b);
     const url = `/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`;
     fetch(url)
-      .then(r => r.json())
-      .then(data => {
+      .then(r=>r.json())
+      .then(data=>{
         if (data.error) {
-          document.getElementById('pair-info').innerHTML = `
-            ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+          document.getElementById('pair-info').innerHTML=`
+            ${distNm!==null?`<b>Distance:</b> ${distNm.toFixed(2)} nm<br>`:''}
             <b>CPA/TCPA:</b> N/A (${data.error})
           `;
         } else {
-          let cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
-          let tcpaVal= (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
-          document.getElementById('pair-info').innerHTML = `
-            ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+          let cpaVal=(data.cpa>=9999)? 'n/a': data.cpa.toFixed(2);
+          let tcpaVal=(data.tcpa<0)? 'n/a': data.tcpa.toFixed(2);
+          document.getElementById('pair-info').innerHTML=`
+            ${distNm!==null?`<b>Distance:</b> ${distNm.toFixed(2)} nm<br>`:''}
             <b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min
           `;
         }
       })
-      .catch(err => {
+      .catch(err=>{
         console.error("Błąd /calculate_cpa_tcpa:", err);
-        document.getElementById('pair-info').innerHTML = `
-          ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+        document.getElementById('pair-info').innerHTML=`
+          ${distNm!==null?`<b>Distance:</b> ${distNm.toFixed(2)} nm<br>`:''}
           <b>CPA/TCPA:</b> N/A
         `;
       });
   }
 }
 
-// ------------------ computeDistanceNm (haversine) ------------------
+// -------------- computeDistanceNm --------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
-  const R_nm = 3440.065; // promień Ziemi w nm
-  const rad = Math.PI / 180;
-  const dLat = (lat2 - lat1) * rad;
-  const dLon = (lon2 - lon1) * rad;
+  const R_nm = 3440.065;
+  const rad = Math.PI/180;
+  const dLat = (lat2 - lat1)*rad;
+  const dLon = (lon2 - lon1)*rad;
   const a = Math.sin(dLat/2)**2 +
             Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin(dLon/2)**2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R_nm * c;
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R_nm*c;
 }
 
-// ------------------ drawVector: wektor prędkości ------------------
+// -------------- drawVector --------------
 function drawVector(mmsi) {
   let mk = shipMarkers[mmsi];
   if (!mk?.shipData) return;
@@ -433,33 +429,38 @@ function drawVector(mmsi) {
 
   let lat = sd.latitude;
   let lon = sd.longitude;
-  let sog = sd.sog;  // nm/h
+  let sog = sd.sog; 
   let cogDeg = sd.cog;
 
-  let distNm = sog * (vectorLength / 60);
-  let cogRad = (cogDeg * Math.PI)/180;
-  let dLat = (distNm / 60) * Math.cos(cogRad);
-  let dLon = (distNm / 60) * Math.sin(cogRad) / Math.cos(lat*Math.PI/180);
+  let distNm = sog*(vectorLength/60); // sog nm/h -> nm/min => *vectorLength
+  let cogRad = (cogDeg*Math.PI)/180;
+  
+  let dLat = (distNm/60)*Math.cos(cogRad);
+  let dLon = (distNm/60)*Math.sin(cogRad)/ Math.cos(lat*Math.PI/180);
 
-  let endLat = lat + dLat;
-  let endLon = lon + dLon;
+  let endLat = lat+dLat;
+  let endLon = lon+dLon;
 
-  let line = L.polyline([[lat, lon],[endLat, endLon]], {
+  let line = L.polyline([[lat,lon],[endLat,endLon]], {
     color:'blue',
     dashArray:'4,4'
   });
   line.addTo(map);
-  if (!overlayMarkers[mmsi]) overlayMarkers[mmsi] = [];
+  if (!overlayMarkers[mmsi]) overlayMarkers[mmsi]=[];
   overlayMarkers[mmsi].push(line);
 }
 
-// ------------------ reloadAllShipIcons ------------------
+// -------------- reloadAllShipIcons --------------
 function reloadAllShipIcons() {
+  let currentZoom = map.getZoom();
   for (let m in shipMarkers) {
     let mk = shipMarkers[m];
     if (!mk.shipData) continue;
     let isSelected = selectedShips.includes(parseInt(m));
-    let newIcon = createShipIcon(mk.shipData, isSelected);
+    let newIcon = createShipIcon(mk.shipData, isSelected, currentZoom);
     mk.setIcon(newIcon);
   }
 }
+
+// Eksporty
+// (Nie jest konieczne, bo app.js raczej się widzi globalnie)
