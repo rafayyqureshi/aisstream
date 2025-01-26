@@ -74,7 +74,16 @@ function initLiveApp() {
 // ----------------------------------
 function fetchShips() {
   fetch('/ships')
-    .then(res => res.json())
+    .then(res => {
+      if (!res.ok) {
+        throw new Error(`HTTP error ${res.status} – ${res.statusText}`);
+      }
+      const ctype = res.headers.get('content-type') || '';
+      if (!ctype.includes('application/json')) {
+        throw new Error(`Oczekiwano application/json, a otrzymano: ${ctype}`);
+      }
+      return res.json();
+    })
     .then(data => updateShips(data))
     .catch(err => console.error("Błąd /ships:", err));
 }
@@ -101,7 +110,6 @@ function updateShips(shipsArray) {
     const isSelected = selectedShips.includes(mmsi);
 
     // Tworzymy ikonę statku. 
-    // Uwaga: musimy przekazać aktualny zoom, bo w createShipIcon sprawdzamy if (zoom>=12)
     const icon = createShipIcon(ship, isSelected, map.getZoom());
 
     // tooltip
@@ -112,7 +120,7 @@ function updateShips(shipsArray) {
     const ss = diffSec % 60;
     const diffStr = `${mm}m ${ss}s ago`;
 
-    // Długość
+    // Długość (dim_a + dim_b)
     let dimsLen = null;
     if (ship.dim_a && ship.dim_b) {
       dimsLen = (parseFloat(ship.dim_a) + parseFloat(ship.dim_b)).toFixed(1);
@@ -153,7 +161,16 @@ function updateShips(shipsArray) {
 // ----------------------------------
 function fetchCollisions() {
   fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
-    .then(res => res.json())
+    .then(res => {
+      if (!res.ok) {
+        throw new Error(`HTTP error ${res.status} – ${res.statusText}`);
+      }
+      const ctype = res.headers.get('content-type') || '';
+      if (!ctype.includes('application/json')) {
+        throw new Error(`Oczekiwano application/json, a otrzymano: ${ctype}`);
+      }
+      return res.json();
+    })
     .then(data => {
       collisionsData = data || [];
       updateCollisionsList();
@@ -230,8 +247,6 @@ function updateCollisionsList() {
     let tcpaStr= c.tcpa.toFixed(2);
 
     // splitted circle
-    // fallbackLenA/B = 0
-    // Użyj getCollisionSplitCircle(...) by wstawić HTML
     const splittedHTML = getCollisionSplitCircle(c.mmsi_a, c.mmsi_b, 0, 0, shipMarkers);
 
     const timeStr = c.timestamp
@@ -295,7 +310,6 @@ function zoomToCollision(c) {
     maxZoom: 13
   });
 
-  // Ustaw vectorLength
   if (c.tcpa && c.tcpa>0 && c.tcpa<9999) {
     vectorLength = Math.round(c.tcpa);
     const slider = document.getElementById('vectorLengthSlider');
@@ -360,7 +374,7 @@ function updateSelectedShipsInfo(selectionChanged) {
     panel.appendChild(div);
   });
 
-  // Rysujemy wektory prędkości
+  // Rysujemy wektory
   for (let m in overlayMarkers) {
     overlayMarkers[m].forEach(ln => map.removeLayer(ln));
   }
@@ -369,7 +383,7 @@ function updateSelectedShipsInfo(selectionChanged) {
   selectedShips.forEach(m => drawVector(m));
   reloadAllShipIcons();
 
-  // Gdy wybrano 2 statki => liczymy distance + CPA/TCPA
+  // Gdy 2 statki => liczymy distance + CPA/TCPA
   if (selectedShips.length === 2) {
     const [mA, mB] = selectedShips;
     let posA = shipMarkers[mA]?.shipData;
@@ -378,29 +392,28 @@ function updateSelectedShipsInfo(selectionChanged) {
     if (posA && posB) {
       distNm = computeDistanceNm(posA.latitude, posA.longitude, posB.latitude, posB.longitude);
     }
-    // /calculate_cpa_tcpa
     const sorted = [mA, mB].sort((a,b)=>a-b);
     const url = `/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`;
     fetch(url)
-      .then(r=>r.json())
-      .then(data=>{
+      .then(r => r.json())
+      .then(data => {
         if (data.error) {
-          document.getElementById('pair-info').innerHTML=`
+          document.getElementById('pair-info').innerHTML = `
             ${distNm!==null?`<b>Distance:</b> ${distNm.toFixed(2)} nm<br>`:''}
             <b>CPA/TCPA:</b> N/A (${data.error})
           `;
         } else {
           let cpaVal=(data.cpa>=9999)? 'n/a': data.cpa.toFixed(2);
           let tcpaVal=(data.tcpa<0)? 'n/a': data.tcpa.toFixed(2);
-          document.getElementById('pair-info').innerHTML=`
+          document.getElementById('pair-info').innerHTML = `
             ${distNm!==null?`<b>Distance:</b> ${distNm.toFixed(2)} nm<br>`:''}
             <b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min
           `;
         }
       })
-      .catch(err=>{
+      .catch(err => {
         console.error("Błąd /calculate_cpa_tcpa:", err);
-        document.getElementById('pair-info').innerHTML=`
+        document.getElementById('pair-info').innerHTML = `
           ${distNm!==null?`<b>Distance:</b> ${distNm.toFixed(2)} nm<br>`:''}
           <b>CPA/TCPA:</b> N/A
         `;
@@ -432,7 +445,7 @@ function drawVector(mmsi) {
   let sog = sd.sog; 
   let cogDeg = sd.cog;
 
-  let distNm = sog*(vectorLength/60); // sog nm/h -> nm/min => *vectorLength
+  let distNm = sog*(vectorLength/60);
   let cogRad = (cogDeg*Math.PI)/180;
   
   let dLat = (distNm/60)*Math.cos(cogRad);
@@ -461,6 +474,3 @@ function reloadAllShipIcons() {
     mk.setIcon(newIcon);
   }
 }
-
-// Eksporty
-// (Nie jest konieczne, bo app.js raczej się widzi globalnie)
