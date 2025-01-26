@@ -1,474 +1,205 @@
-// ==========================
-// history_app.js
-// ==========================
-let map;
+//
+// common.js
+//
+// Wspólne funkcje i logika wizualizacji,
+// używane przez "live" (app.js) i w przyszłości przez "history".
+//
 
-// Umbrella scenario => _parent:true
-// Sub-scenarios => _parent:false
-let umbrellasMap = {};    // key: scenario_id -> umbrella object
-let subScenariosMap = {}; // key: scenario_id -> array of sub-scenarios
-
-let scenarioMarkers = []; // markers for each sub-scenario (A–B)
-let inSituationView = false;
-let isPlaying = false;
-let animationData = null;
-let animationIndex = 0;
-let animationInterval = null;
-let shipMarkersOnMap = [];
-let selectedScenario = null;
-
-// Day offset
-let currentDay = 0;
-const minDay = -7;
-const maxDay = 0;
-
-function initHistoryApp() {
-  // 1) Init map
-  map = initSharedMap('map'); // z pliku common.js
-
-  // 2) Setup UI
-  setupDayUI();
-  setupBottomUI();
-
-  // 3) Load pliki .json z GCS
-  fetchFileListAndLoadScenarios();
-}
-
-// ---------------------------------------
-// A) Day offset
-// ---------------------------------------
-function setupDayUI() {
-  document.getElementById('prevDay').addEventListener('click', () => {
-    if (currentDay > minDay) {
-      currentDay--;
-      updateDayLabel();
-      clearAll();
-      fetchFileListAndLoadScenarios();
-    }
-  });
-  document.getElementById('nextDay').addEventListener('click', () => {
-    if (currentDay < maxDay) {
-      currentDay++;
-      updateDayLabel();
-      clearAll();
-      fetchFileListAndLoadScenarios();
-    }
-  });
-  updateDayLabel();
-}
-
-function updateDayLabel() {
-  const now = new Date();
-  let d = new Date(now);
-  d.setDate(d.getDate() + currentDay);
-  const dateStr = d.toISOString().slice(0, 10);
-  document.getElementById('currentDayLabel').textContent = `Date: ${dateStr}`;
-}
-
-// ---------------------------------------
-// B) Pobranie listy plików z GCS + parse
-// ---------------------------------------
-function fetchFileListAndLoadScenarios() {
-  const url = `/history_filelist?days=${7 + currentDay}`;
-
-  fetch(url)
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status} - ${res.statusText}`);
-      return res.json();
-    })
-    .then(data => {
-      const files = data.files || [];
-      if (files.length === 0) {
-        console.log("No GCS files found for day offset=", currentDay);
-        updateCollisionList();
-        return;
-      }
-      return loadAllScenarioFiles(files);
-    })
-    .catch(err => console.error("fetchFileList error:", err));
-}
-
-function loadAllScenarioFiles(fileList) {
-  // Wstępne czyszczenie
-  umbrellasMap = {};
-  subScenariosMap = {};
-  scenarioMarkers.forEach(m => map.removeLayer(m));
-  scenarioMarkers = [];
-
-  const promises = fileList.map(f => {
-    const fname = f.name;
-    return fetch(`/history_file?file=${encodeURIComponent(fname)}`)
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status} - ${r.statusText}`);
-        return r.json();
-      })
-      .then(jsonData => {
-        const arr = jsonData.scenarios || [];
-        arr.forEach(obj => {
-          if (obj._parent) {
-            umbrellasMap[obj.scenario_id] = obj;
-          } else {
-            const sid = obj.scenario_id;
-            if (!subScenariosMap[sid]) subScenariosMap[sid] = [];
-            subScenariosMap[sid].push(obj);
-          }
-        });
-      })
-      .catch(err => console.error("loadOneFile error:", err));
+/**
+ * Inicjalizacja mapy Leaflet z warstwami bazowymi OSM i OpenSeaMap.
+ */
+function initSharedMap(mapContainerId) {
+  const map = L.map(mapContainerId, {
+    center: [50, 0],
+    zoom: 5
   });
 
-  return Promise.all(promises)
-    .then(() => {
-      console.log(
-        "Umbrellas:", Object.keys(umbrellasMap).length,
-        "Sub-scenarios:", Object.keys(subScenariosMap).length
-      );
-      updateCollisionList();
-      drawScenarioMarkers();
-    });
+  // Warstwa bazowa OSM
+  const osmLayer = L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 18 }
+  );
+  osmLayer.addTo(map);
+
+  // Warstwa nawigacyjna (OpenSeaMap) - opcjonalna
+  const openSeaMapLayer = L.tileLayer(
+    'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
+    { maxZoom: 18, opacity: 0.8 }
+  );
+  openSeaMapLayer.addTo(map);
+
+  return map;
 }
 
-// ---------------------------------------
-// C) Wyświetlanie listy scenariuszy w panelu
-// ---------------------------------------
-function updateCollisionList() {
-  const listDiv = document.getElementById('collision-list');
-  listDiv.innerHTML = '';
+/**
+ * Konwersja metry -> stopnie (dla szerokości geogr).
+ */
+function metersToDegLat(meters) {
+  // ~111.32 km / stopień
+  return meters / 111320;
+}
 
-  let allIDs = new Set([
-    ...Object.keys(umbrellasMap),
-    ...Object.keys(subScenariosMap)
-  ]);
-  if (allIDs.size === 0) {
-    const noItem = document.createElement('div');
-    noItem.classList.add('collision-item');
-    noItem.innerHTML = '<i>No collision scenarios found</i>';
-    listDiv.appendChild(noItem);
-    return;
+/**
+ * Konwersja metry -> stopnie (dla długości geogr), uwzględnia cos(lat)
+ */
+function metersToDegLon(meters, latDeg) {
+  const cosLat = Math.cos(latDeg * Math.PI / 180);
+  if (cosLat < 1e-5) {
+    return 0;
+  }
+  return meters / (111320 * cosLat);
+}
+
+/**
+ * computeShipPolygonLatLon(lat0, lon0, cogDeg, a, b, c, d):
+ *  Otrzymuje parametry statku (A, B, C, D).
+ *  Zwraca tablicę [ [lat, lon], [lat, lon], ... ] – wierzchołki polygonu.
+ *  Kod z Twojego przykładu (można rozbudować).
+ */
+function computeShipPolygonLatLon(lat0, lon0, cogDeg, a, b, c, d) {
+  // Prosty wzorzec local coords (metry)
+  // x wzdłuż kadłuba, y poprzeczny
+  // ...
+  // W razie potrzeby implementacja
+  return [];
+}
+
+/**
+ * getShipColorFromDims(dim_a, dim_b):
+ *  Zwraca kolor zależny od sumy A+B.
+ */
+function getShipColorFromDims(dim_a, dim_b) {
+  if (!dim_a || !dim_b) {
+    return 'gray';
+  }
+  const lengthVal = dim_a + dim_b;
+  if (lengthVal < 50)   return 'green';
+  if (lengthVal < 150)  return 'yellow';
+  if (lengthVal < 250)  return 'orange';
+  return 'red';
+}
+
+/**
+ * getShipColorByLength(lengthValue)
+ *  Kolor zależny od numeric lengthValue.
+ */
+function getShipColorByLength(lengthValue) {
+  if (lengthValue === null || isNaN(lengthValue)) return 'gray';
+  if (lengthValue < 50)   return 'green';
+  if (lengthValue < 150)  return 'yellow';
+  if (lengthValue < 250)  return 'orange';
+  return 'red';
+}
+
+/**
+ * createSplittedCircle(colorA, colorB):
+ *  Generuje okrąg podzielony pionowo 2 kolorami.
+ */
+function createSplittedCircle(colorA, colorB) {
+  return `
+    <svg width="16" height="16" viewBox="0 0 16 16"
+         style="vertical-align:middle; margin-right:6px;">
+      <!-- lewa połówka -->
+      <path d="M8,0 A8,8 0 0,0 8,16 Z" fill="${colorA}"/>
+      <!-- prawa połówka -->
+      <path d="M8,16 A8,8 0 0,0 8,0 Z" fill="${colorB}"/>
+    </svg>
+  `;
+}
+
+/**
+ * getCollisionSplitCircle(...)
+ *  Do wizualizacji kolizji (2 kolory).
+ */
+function getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers) {
+  let lenA = parseFloat(fallbackLenA) || 0;
+  let lenB = parseFloat(fallbackLenB) || 0;
+
+  // Jeśli w shipMarkers mamy dim_a, dim_b => sumujemy
+  function getLenFromMarker(mmsi) {
+    if (!shipMarkers || !shipMarkers[mmsi]?.shipData) return null;
+    const sd = shipMarkers[mmsi].shipData;
+    const dA = parseFloat(sd.dim_a) || 0;
+    const dB = parseFloat(sd.dim_b) || 0;
+    if (dA>0 && dB>0) return dA + dB;
+    return null;
   }
 
-  const sortedIDs = Array.from(allIDs).sort();
+  const maybeA = getLenFromMarker(mmsiA);
+  const maybeB = getLenFromMarker(mmsiB);
+  if (maybeA !== null) lenA = maybeA;
+  if (maybeB !== null) lenB = maybeB;
 
-  sortedIDs.forEach(sid => {
-    const umb = umbrellasMap[sid];
-    const subs = subScenariosMap[sid] || [];
+  const colorA = getShipColorByLength(lenA);
+  const colorB = getShipColorByLength(lenB);
 
-    let headerText = `Scenario: ${sid} (subs=${subs.length})`;
-    if (umb) {
-      const scCount = umb.collisions_count || subs.length;
-      const shipsCount = umb.ships_involved ? umb.ships_involved.length : 0;
-      headerText = `Umbrella ${sid} [ships:${shipsCount}, collisions:${scCount}]`;
-    }
-
-    const blockDiv = document.createElement('div');
-    blockDiv.classList.add('umbrella-block');
-
-    const headerDiv = document.createElement('div');
-    headerDiv.classList.add('umbrella-header');
-    headerDiv.textContent = headerText;
-
-    // expand/collapse
-    const expandBtn = document.createElement('button');
-    expandBtn.textContent = '▼';
-    headerDiv.appendChild(expandBtn);
-    blockDiv.appendChild(headerDiv);
-
-    const subListDiv = document.createElement('div');
-    subListDiv.style.display = 'none';
-
-    expandBtn.addEventListener('click', () => {
-      if (subListDiv.style.display === 'none') {
-        subListDiv.style.display = 'block';
-        expandBtn.textContent = '▲';
-      } else {
-        subListDiv.style.display = 'none';
-        expandBtn.textContent = '▼';
-      }
-    });
-
-    // Sub-scenariusze (A–B)
-    subs.forEach(sc => {
-      const item = document.createElement('div');
-      item.classList.add('collision-item');
-      const framesCount = sc.frames?.length || 0;
-      const scTitle = sc.title || sc.collision_id || sid;
-
-      item.innerHTML = `
-        <strong>${scTitle}</strong><br>
-        Frames: ${framesCount}
-        <button class="zoom-button">🔍</button>
-      `;
-      item.querySelector('.zoom-button').addEventListener('click', () => {
-        onSelectScenario(sc);
-      });
-
-      subListDiv.appendChild(item);
-    });
-
-    blockDiv.appendChild(subListDiv);
-    listDiv.appendChild(blockDiv);
-  });
+  return createSplittedCircle(colorA, colorB);
 }
 
-// ---------------------------------------
-// D) Rysowanie sub-scenariuszy (markery na mapie)
-// ---------------------------------------
-function drawScenarioMarkers() {
-  scenarioMarkers.forEach(m => map.removeLayer(m));
-  scenarioMarkers = [];
+/**
+ * createShipIcon(shipData, isSelected, mapZoom=5):
+ *  Główna funkcja zwracająca L.divIcon.
+ *  - dla zoom<12 => rysuje trójkąt
+ *  - dla zoom>=12 => rysuje prostszy poligon
+ *  - kolory wg (dim_a + dim_b)
+ *  - highlightRect, jeśli isSelected
+ */
+function createShipIcon(shipData, isSelected, mapZoom=5) {
+  const dimA = parseFloat(shipData.dim_a) || 0;
+  const dimB = parseFloat(shipData.dim_b) || 0;
+  const rotationDeg = shipData.cog || 0;
 
-  for (let sid in subScenariosMap) {
-    const subs = subScenariosMap[sid];
-    subs.forEach(sub => {
-      const frames = sub.frames || [];
-      if (frames.length === 0) return;
+  let lengthVal = dimA + dimB;
+  let color = getShipColorByLength(lengthVal);
 
-      let latC = sub.icon_lat;
-      let lonC = sub.icon_lon;
-
-      // fallback => 1st frame
-      if (latC == null || lonC == null) {
-        const ships0 = frames[0].shipPositions || [];
-        if (ships0.length > 0) {
-          let sumLat = 0, sumLon = 0, cnt = 0;
-          ships0.forEach(s => {
-            sumLat += s.lat;
-            sumLon += s.lon;
-            cnt++;
-          });
-          if (cnt > 0) {
-            latC = sumLat / cnt;
-            lonC = sumLon / cnt;
-          }
-        }
-      }
-      if (latC == null || lonC == null) return;
-
-      // Ikona "C"
-      const iconHTML = `
-        <svg width="20" height="20" viewBox="-10 -10 20 20">
-          <circle cx="0" cy="0" r="8" fill="yellow" stroke="red" stroke-width="2"/>
-          <text x="0" y="3" text-anchor="middle" font-size="8" fill="red">C</text>
-        </svg>
-      `;
-      const scenarioIcon = L.divIcon({
-        className: '',
-        html: iconHTML,
-        iconSize: [20, 20],
-        iconAnchor: [10, 10]
-      });
-
-      const title = sub.title || sub.collision_id;
-      const marker = L.marker([latC, lonC], { icon: scenarioIcon })
-        .bindTooltip(title, { direction: 'top' })
-        .on('click', () => onSelectScenario(sub));
-      marker.addTo(map);
-      scenarioMarkers.push(marker);
-    });
-  }
-}
-
-// ---------------------------------------
-// E) Wybór sub-scenariusza => animacja
-// ---------------------------------------
-function onSelectScenario(subScenario) {
-  selectedScenario = subScenario;
-  const frames = subScenario.frames || [];
-  if (frames.length === 0) {
-    console.warn("Scenario has no frames");
-    return;
-  }
-
-  // Zoom to the positions in the first frame
-  const ships0 = frames[0].shipPositions || [];
-  if (ships0.length > 0) {
-    const latLngs = ships0.map(s => [s.lat, s.lon]);
-    const b = L.latLngBounds(latLngs);
-    map.fitBounds(b, { padding: [30, 30], maxZoom: 13 });
-  }
-
-  loadScenarioAnimation(subScenario);
-}
-
-function loadScenarioAnimation(subScenario) {
-  animationData = subScenario.frames || [];
-  animationIndex = 0;
-  stopAnimation();
-  inSituationView = true;
-
-  document.getElementById('left-panel').style.display = 'block';
-  document.getElementById('bottom-center-bar').style.display = 'block';
-
-  updateMapFrame();
-}
-
-// ---------------------------------------
-// F) Animacja
-// ---------------------------------------
-function startAnimation() {
-  if (!animationData || animationData.length === 0) return;
-  isPlaying = true;
-  document.getElementById('playPause').textContent = 'Pause';
-  animationInterval = setInterval(() => stepAnimation(1), 1000);
-}
-
-function stopAnimation() {
-  isPlaying = false;
-  document.getElementById('playPause').textContent = 'Play';
-  if (animationInterval) clearInterval(animationInterval);
-  animationInterval = null;
-}
-
-function stepAnimation(step) {
-  animationIndex += step;
-  if (animationIndex < 0) animationIndex = 0;
-  if (animationIndex >= animationData.length) animationIndex = animationData.length - 1;
-  updateMapFrame();
-}
-
-// ---------------------------------------
-// G) updateMapFrame – 3 sekcje w panelu
-// ---------------------------------------
-function updateMapFrame() {
-  const frameIndicator = document.getElementById('frameIndicator');
-  frameIndicator.textContent = `${animationIndex + 1}/${animationData.length}`;
-
-  // Usuwamy stare markery
-  shipMarkersOnMap.forEach(m => map.removeLayer(m));
-  shipMarkersOnMap = [];
-
-  if (!animationData || animationData.length === 0) return;
-  const frame = animationData[animationIndex];
-  const ships = frame.shipPositions || [];
-
-  // Rysujemy wszystkie statki
-  ships.forEach(s => {
-    const mk = L.marker([s.lat, s.lon], {
-      icon: createShipIcon(s, false)
-    });
-    const nm = s.name || s.mmsi;
-    const tt = `
-      <b>${nm}</b><br>
-      COG: ${Math.round(s.cog)}°, SOG: ${s.sog.toFixed(1)} kn<br>
-      L: ${s.ship_length || "??"}
+  let highlightRect = '';
+  if (isSelected) {
+    highlightRect = `
+      <rect
+        x="-16" y="-16" width="32" height="32"
+        fill="none" stroke="black" stroke-width="3"
+        stroke-dasharray="5,3"
+      />
     `;
-    mk.bindTooltip(tt, { direction: 'top', sticky: true });
-    mk.addTo(map);
-    shipMarkersOnMap.push(mk);
-  });
-
-  // Panel - 3 sekcje
-  // 1) Sekcja ogólna
-  // 2) Sekcja pary (A–B)
-  // 3) (opcjonalna) sekcja z innymi statkami
-  const leftPanel = document.getElementById('selected-ships-info');
-  leftPanel.innerHTML = '';
-
-  // Format time: chcemy HH:MM:SS
-  const rawTime = frame.time; // np. "2025-01-17T01:25:25+00:00"
-  const dateObj = new Date(rawTime);
-  const hh = String(dateObj.getHours()).padStart(2, '0');
-  const mm = String(dateObj.getMinutes()).padStart(2, '0');
-  const ss = String(dateObj.getSeconds()).padStart(2, '0');
-  const niceTime = `${hh}:${mm}:${ss}`;
-
-  // Sekcja 1: General info
-  let html = `<div class="panel-section">`;
-  html += `<h4>General info</h4>`;
-  html += `<div><b>Time:</b> ${niceTime}</div>`;
-
-  if (frame.focus_dist !== undefined && frame.focus_dist !== null) {
-    html += `<div><b>Closest distance:</b> ${frame.focus_dist.toFixed(3)} nm</div>`;
   }
-  if (frame.delta_minutes !== undefined && frame.delta_minutes !== null) {
-    html += `<div><b>Time to closest approach:</b> ${frame.delta_minutes} min</div>`;
-  }
-  html += `</div><hr/>`;
 
-  // Sekcja 2: Ships on collision (A–B)
-  let focusHtml = `<div class="panel-section">`;
-  focusHtml += `<h4>Ships in collision</h4>`;
-  if (selectedScenario && selectedScenario.focus_mmsi) {
-    const [mA, mB] = selectedScenario.focus_mmsi;
-    let posA = null, posB = null;
-    ships.forEach(ss => {
-      if (ss.mmsi === mA) posA = ss;
-      if (ss.mmsi === mB) posB = ss;
-    });
-    if (posA && posB) {
-      focusHtml += `<div>${posA.name}: COG=${Math.round(posA.cog)}, SOG=${posA.sog.toFixed(1)} kn</div>`;
-      focusHtml += `<div>${posB.name}: COG=${Math.round(posB.cog)}, SOG=${posB.sog.toFixed(1)} kn</div>`;
-    } else {
-      focusHtml += `<i>Collision ships not found in this frame</i>`;
-    }
+  let shapeContent = '';
+  if (mapZoom < 12) {
+    // prosta ikona – trójkąt
+    shapeContent = `
+      <polygon points="0,-8 6,8 -6,8"
+        fill="${color}" stroke="black" stroke-width="1" />
+    `;
   } else {
-    focusHtml += `<i>No focus ships</i>`;
-  }
-  focusHtml += `</div><hr/>`;
-
-  // Sekcja 3: Inne statki (opcjonalna)
-  // Warunek: jeżeli w scenario mamy > 2 statków i "ships_all" w sub-scenario
-  let otherHtml = '';
-  if (selectedScenario && selectedScenario.all_involved_mmsi) {
-    const involved = selectedScenario.all_involved_mmsi;
-    if (involved.length > 2) {
-      const [mA, mB] = selectedScenario.focus_mmsi || [null,null];
-      // Wylistuj statki != A,B
-      const others = ships.filter(s => s.mmsi !== mA && s.mmsi !== mB);
-      if (others.length > 0) {
-        otherHtml += `<div class="panel-section">`;
-        otherHtml += `<h4>Other ships</h4>`;
-        others.forEach(s => {
-          otherHtml += `<div>${s.name}: COG=${Math.round(s.cog)}, SOG=${s.sog.toFixed(1)} kn</div>`;
-        });
-        otherHtml += `</div><hr/>`;
-      }
-    }
+    // poligon + wierzchołek dziobu
+    shapeContent = `
+      <polygon points="-8,-8  -8,8  12,8  15,0  12,-8"
+        fill="${color}" stroke="black" stroke-width="1" />
+    `;
   }
 
-  // Złożenie panelu
-  leftPanel.innerHTML = html + focusHtml + otherHtml;
-}
+  const svgW = 48, svgH = 48;
+  const svgHTML = `
+    <svg width="${svgW}" height="${svgH}" viewBox="-24 -24 48 48">
+      <g transform="rotate(${rotationDeg})">
+        ${highlightRect}
+        ${shapeContent}
+      </g>
+    </svg>
+  `;
 
-// ---------------------------------------
-// H) exitSituationView
-// ---------------------------------------
-function exitSituationView() {
-  inSituationView = false;
-  document.getElementById('left-panel').style.display = 'none';
-  document.getElementById('bottom-center-bar').style.display = 'none';
-  stopAnimation();
-  shipMarkersOnMap.forEach(m => map.removeLayer(m));
-  shipMarkersOnMap = [];
-  animationData = null;
-  animationIndex = 0;
-}
-
-// ---------------------------------------
-// cleanup
-// ---------------------------------------
-function clearAll() {
-  umbrellasMap = {};
-  subScenariosMap = {};
-  scenarioMarkers.forEach(m => map.removeLayer(m));
-  scenarioMarkers = [];
-  document.getElementById('collision-list').innerHTML = '';
-}
-
-// ---------------------------------------
-// bottom UI (animacja)
-// ---------------------------------------
-function setupBottomUI() {
-  document.getElementById('playPause').addEventListener('click', () => {
-    if (isPlaying) stopAnimation();
-    else startAnimation();
-  });
-  document.getElementById('stepForward').addEventListener('click', () => stepAnimation(1));
-  document.getElementById('stepBack').addEventListener('click', () => stepAnimation(-1));
-  document.getElementById('closePlayback').addEventListener('click', () => {
-    exitSituationView();
+  return L.divIcon({
+    className: '',
+    html: svgHTML,
+    iconSize: [svgW, svgH],
+    iconAnchor: [0, 0]
   });
 }
 
-// Start
-document.addEventListener('DOMContentLoaded', initHistoryApp);
+// Eksport w global scope:
+window.initSharedMap = initSharedMap;
+window.computeShipPolygonLatLon = computeShipPolygonLatLon;
+window.getShipColorFromDims = getShipColorFromDims;
+window.getShipColorByLength = getShipColorByLength;
+window.getCollisionSplitCircle = getCollisionSplitCircle;
+window.createShipIcon = createShipIcon;
