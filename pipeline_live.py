@@ -23,12 +23,17 @@ STATE_RETENTION_SEC = 120  # (2 min) do wykrywania kolizji
 def parse_ais(record: bytes):
     """
     Parsuje rekord JSON z Pub/Sub (AIS).
-    Zwraca None, jeśli brakuje wymaganych pól dynamicznych
+    Zwraca None, jeśli brakuje required dynamic fields
     (mmsi, lat, lon, cog, sog, timestamp).
+    
+    Dodatkowo: 
+    - usuwa "ship_length" jeśli istnieje 
+    - konwertuje dim_a..d na float
     """
     try:
         data = json.loads(record.decode("utf-8"))
-        # Pola dynamiczne, minimalne do zapisu w ships_positions
+        
+        # Pola potrzebne do dynamicznego zapisu
         required = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
         if not all(r in data for r in required):
             return None
@@ -40,9 +45,12 @@ def parse_ais(record: bytes):
         data["cog"] = float(data["cog"])
         data["sog"] = float(data["sog"])
 
-        # Pola statyczne (mogą być None / nieobecne)
-        # dim_a, dim_b, dim_c, dim_d
-        for dim in ["dim_a", "dim_b", "dim_c", "dim_d"]:
+        # Wyrzucamy pole ship_length, bo nie ma go w nowym schemacie
+        if "ship_length" in data:
+            data.pop("ship_length", None)
+
+        # Dim_a..d
+        for dim in ["dim_a","dim_b","dim_c","dim_d"]:
             if dim in data:
                 try:
                     data[dim] = float(data[dim])
@@ -52,20 +60,33 @@ def parse_ais(record: bytes):
                 data[dim] = None
 
         # ship_name
-        if "ship_name" not in data:
-            data["ship_name"] = "Unknown"
+        data["ship_name"] = data.get("ship_name", "Unknown")
 
-        # geohash (opcjonalne – do CollisionDoFn)
+        # geohash – do stateful detection
         data["geohash"] = data.get("geohash", "none")
 
         return data
     except:
         return None
 
+def filter_old_messages_that_have_only_ship_length(data):
+    """
+    Jeżeli to stary format, który miał TYLKO ship_length i brak dim_x,
+    to ignorujemy. 
+    (Możesz też przepuszczać, ale i tak w BQ będzie błąd).
+    """
+    # Jesli dim_a..d są None i występuje "ship_length" => to stara wiadomość
+    # Zwracamy False => odrzuć
+    if data["dim_a"] is None and data["dim_b"] is None and data["dim_c"] is None and data["dim_d"] is None:
+        # To oznacza brak nowych wymiarów
+        # (Jeśli chcesz je przepuszczać do ships_positions, usuń warunek)
+        # W tym przykładzie odrzucamy
+        return False
+    return True
+
 def compute_cpa_tcpa(a, b):
     """
-    Oblicza (cpa, tcpa) na podstawie punktu anteny (lat,lon).
-    Zwraca (9999, -1) jeśli tcpa < 0.
+    Oblicza (cpa, tcpa) na podstawie punktów anteny (lat,lon).
     """
     latRef = (a["latitude"] + b["latitude"]) / 2.0
     scaleLat = 111000.0
@@ -160,23 +181,36 @@ class CollisionDoFn(beam.DoFn):
                     "latitude_a": old_ship["latitude"],
                     "longitude_a": old_ship["longitude"],
                     "latitude_b": ship["latitude"],
-                    "longitude_b": ship["longitude"],
-                    # Ewentualnie można dodać dim_a, itp., ale tu pominę
+                    "longitude_b": ship["longitude"]
                 }
 
 def remove_geohash(row):
     """
     Usuwamy geohash, bo nie chcemy go zapisywać w ships_positions.
+    Usuwamy też dim_a..d przy zapisie do positions, 
+    bo tamte kolumny nie istnieją.
     """
     new_row = dict(row)
     new_row.pop("geohash", None)
+    for dim in ["dim_a","dim_b","dim_c","dim_d"]:
+        if dim in new_row:
+            new_row.pop(dim, None)
     return new_row
 
-def is_static_data(row):
+def keep_static_fields_only(row):
     """
-    Zwraca True, jeśli w wierszu jest cokolwiek z dim_a/dim_b/dim_c/dim_d != None
+    Do ships_static -> zatrzymujemy TYLKO mmsi, ship_name, dim_a,b,c,d + update_time
     """
-    return any(row.get(dim) is not None for dim in ["dim_a","dim_b","dim_c","dim_d"])
+    return {
+        "mmsi": row["mmsi"],
+        "ship_name": row["ship_name"],
+        "dim_a": row["dim_a"],
+        "dim_b": row["dim_b"],
+        "dim_c": row["dim_c"],
+        "dim_d": row["dim_d"],
+        # Dołączmy currentTime 
+        "update_time": datetime.datetime.utcnow().isoformat() + "Z"
+    }
 
 def run():
     logging.getLogger().setLevel(logging.INFO)
@@ -203,50 +237,34 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # --------------------------
-        # A) Zapis do ships_static
-        # --------------------------
-        # Filtrujemy te rekordy, które mają `dim_a` lub b,c,d != None
-        static_data = parsed | "FilterStatic" >> beam.Filter(is_static_data)
+        # 2b) (Opcjonalnie) odfiltrować stare wiadomości z ship_length (bo i tak nie pasują do nowego schematu).
+        #    Gdy chcesz całkiem je odrzucić:
+        # parsed_filtered = parsed | "FilterStare" >> beam.Filter(
+        #     lambda row: "ship_length" not in row or row["ship_length"] is None
+        # )
 
-        # Możesz też okienkować statyczne (np. co 60 s, bo rzadziej się zmienia)
-        # Tu dla prostoty dajmy co 60 s
+        # ----------------------------------------------------------------
+        # A) ships_static -> te rekordy, które mają cokolwiek w dim_a..d
+        # ----------------------------------------------------------------
+        static_data = parsed | "FilterStatic" >> beam.Filter(
+            lambda row: any(row.get(dim) is not None for dim in ["dim_a","dim_b","dim_c","dim_d"])
+        )
+
+        # Okno co 60 s
         windowed_static = static_data | "WindowStatic" >> beam.WindowInto(window.FixedWindows(60))
         grouped_static = (
             windowed_static
-            | "KeyStatic" >> beam.Map(lambda row: (None, row))
+            | "KeyStatic" >> beam.Map(lambda r: (None, r))
             | "GroupStatic" >> beam.GroupByKey()
         )
         flattened_static = (
             grouped_static
             | "ExtractStatic" >> beam.FlatMap(lambda kv: kv[1])
         )
+        # Ucinamy tylko potrzebne pola (mmsi, ship_name, dim_a..d, update_time)
+        prepped_static = flattened_static | "KeepStaticFields" >> beam.Map(keep_static_fields_only)
 
-        flattened_static | "WriteStatic" >> WriteToBigQuery(
-            table=table_static,
-            schema=(
-                "mmsi:INTEGER,"
-                "ship_name:STRING,"
-                "dim_a:FLOAT,"
-                "dim_b:FLOAT,"
-                "dim_c:FLOAT,"
-                "dim_d:FLOAT,"
-                "update_time:TIMESTAMP"
-            ),
-            create_disposition=BigQueryDisposition.CREATE_NEVER,
-            write_disposition=BigQueryDisposition.WRITE_APPEND,
-            additional_bq_parameters={"location": "us-east1"},
-            # Możesz dać funkcję do generowania schematu dynamicznie, ale tu statycznie
-        )
-
-        # Ulepszamy: dopisz update_time = current_time, np. w Map
-        def add_update_time(row):
-            row2 = dict(row)
-            row2["update_time"] = datetime.datetime.utcnow().isoformat() + "Z"
-            return row2
-
-        updated_static = flattened_static | "AddUpdateTime" >> beam.Map(add_update_time)
-        updated_static | "WriteStatic2" >> WriteToBigQuery(
+        prepped_static | "WriteStatic" >> WriteToBigQuery(
             table=table_static,
             schema=(
                 "mmsi:INTEGER,"
@@ -261,21 +279,21 @@ def run():
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             additional_bq_parameters={"location": "us-east1"},
         )
-        # (Mozesz spiąć w jedną transform, ale pokazuję koncepcyjnie)
 
-        # --------------------------
-        # B) Zapis do ships_positions (dane dynamiczne)
-        # --------------------------
-        # Usuwamy geohash, okienkujemy co 10s
-        parsed_for_bq = parsed | "RemoveGeoHash" >> beam.Map(remove_geohash)
+        # ----------------------------------------------------------------
+        # B) ships_positions -> dane dynamiczne
+        # ----------------------------------------------------------------
+        # Usuwamy geohash i dim_a..d, bo w tej tabeli nie ma takich kolumn
+        cleaned_for_positions = parsed | "RemoveGeohashAndDims" >> beam.Map(remove_geohash)
 
+        # Okienkowanie co 10 s
         windowed_positions = (
-            parsed_for_bq
-            | "WindowPositions" >> beam.WindowInto(window.FixedWindows(10))  # co 10s
+            cleaned_for_positions
+            | "WindowPositions" >> beam.WindowInto(window.FixedWindows(10))
         )
         grouped_positions = (
             windowed_positions
-            | "KeyPositions" >> beam.Map(lambda row: (None, row))
+            | "KeyPositions" >> beam.Map(lambda r: (None, r))
             | "GroupPositions" >> beam.GroupByKey()
         )
         flattened_positions = (
@@ -283,7 +301,6 @@ def run():
             | "ExtractPositions" >> beam.FlatMap(lambda kv: kv[1])
         )
 
-        # 3) Zapis do BQ
         flattened_positions | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
             schema=(
@@ -300,9 +317,10 @@ def run():
             additional_bq_parameters={"location": "us-east1"},
         )
 
-        # --------------------------
-        # C) Wykrywanie kolizji + okienkowanie (10s) do collisions
-        # --------------------------
+        # ----------------------------------------------------------------
+        # C) collisions -> analogicznie
+        # ----------------------------------------------------------------
+        # Wykrywanie kolizji
         keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
@@ -321,7 +339,7 @@ def run():
         )
 
         flattened_collisions | "WriteCollisions" >> WriteToBigQuery(
-            table=f"{table_collisions}",
+            table=table_collisions,
             schema=(
                 "mmsi_a:INTEGER,"
                 "mmsi_b:INTEGER,"
@@ -333,7 +351,7 @@ def run():
                 "latitude_b:FLOAT,"
                 "longitude_b:FLOAT"
             ),
-            create_disposition=BigQueryDisposition.CREATE_NEVER,  # utwórz wcześniej
+            create_disposition=BigQueryDisposition.CREATE_NEVER,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             additional_bq_parameters={"location": "us-east1"},
         )
