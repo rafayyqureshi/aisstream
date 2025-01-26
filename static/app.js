@@ -1,39 +1,31 @@
 // ==========================
 // app.js (moduł LIVE)
 // ==========================
-
 document.addEventListener('DOMContentLoaded', initLiveApp);
 
 let map;
 let markerClusterGroup;
-let shipMarkers = {};       // key: mmsi -> L.marker
-let overlayMarkers = {};    // key: mmsi -> [ polylines ]
+let shipMarkers = {};
+let overlayMarkers = {};
 let selectedShips = [];
-
-// collisions
 let collisionsData = [];
 let collisionMarkers = [];
 
-// suwak param
 let vectorLength = 15;
 let cpaFilter = 0.5;
 let tcpaFilter = 10;
 
-// intervals
 let shipsInterval = null;
 let collisionsInterval = null;
 
 function initLiveApp() {
-  // 1) Inicjalizacja mapy (z common.js)
-  map = initSharedMap('map');
+  // 1) Mapa
+  map = initSharedMap('map'); // z common.js
 
-  markerClusterGroup = L.markerClusterGroup({ maxClusterRadius:1 });
+  markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
   map.addLayer(markerClusterGroup);
 
-  // Gdy zoom => odśwież ikony
-  map.on('zoomend', () => {
-    reloadAllShipIcons();
-  });
+  map.on('zoomend', () => reloadAllShipIcons());
 
   // 2) UI
   document.getElementById('vectorLengthSlider').addEventListener('input', e => {
@@ -56,7 +48,7 @@ function initLiveApp() {
 
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
 
-  // 3) Start
+  // 3) Start fetch
   fetchShips();
   fetchCollisions();
 
@@ -64,14 +56,14 @@ function initLiveApp() {
   collisionsInterval = setInterval(fetchCollisions, 30000);
 }
 
-//---------------------------------------------
-// A) ships
-//---------------------------------------------
+//-------------------------------------------
+// A) /ships
+//-------------------------------------------
 function fetchShips() {
   fetch('/ships')
     .then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status} - ${res.statusText}`);
-      let ctype = res.headers.get('content-type')||'';
+      const ctype = res.headers.get('content-type') || '';
       if (!ctype.includes('application/json')) {
         throw new Error(`Oczekiwano JSON, otrzymano: ${ctype}`);
       }
@@ -84,7 +76,6 @@ function fetchShips() {
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
-  // Usuwamy stare
   for (let m in shipMarkers) {
     if (!currentSet.has(parseInt(m))) {
       markerClusterGroup.removeLayer(shipMarkers[m]);
@@ -96,31 +87,30 @@ function updateShips(shipsArray) {
     }
   }
 
-  // Dodajemy / aktualizujemy
   shipsArray.forEach(ship => {
     const mmsi = ship.mmsi;
     const isSelected = selectedShips.includes(mmsi);
 
-    // createShipIcon z common.js
+    // UŻYWAMY createShipIcon z common.js
     const icon = createShipIcon(ship, isSelected, map.getZoom());
 
     const now = Date.now();
     const updTs = ship.timestamp ? new Date(ship.timestamp).getTime() : 0;
-    const diffSec = Math.floor((now - updTs)/1000);
-    const mm = Math.floor(diffSec/60);
-    const ss = diffSec%60;
+    const diffSec = Math.floor((now - updTs) / 1000);
+    const mm = Math.floor(diffSec / 60);
+    const ss = diffSec % 60;
     const diffStr = `${mm}m ${ss}s ago`;
 
     let dimsLen = null;
     if (ship.dim_a && ship.dim_b) {
-      dimsLen = (parseFloat(ship.dim_a)+parseFloat(ship.dim_b)).toFixed(1);
+      dimsLen = (parseFloat(ship.dim_a) + parseFloat(ship.dim_b)).toFixed(1);
     }
 
     const ttHTML = `
-      <b>${ship.ship_name||'Unknown'}</b><br>
+      <b>${ship.ship_name || 'Unknown'}</b><br>
       MMSI: ${mmsi}<br>
-      SOG: ${ship.sog||0} kn, COG: ${ship.cog||0}°<br>
-      Length: ${dimsLen||'??'}<br>
+      SOG: ${ship.sog || 0} kn, COG: ${ship.cog || 0}°<br>
+      Length: ${dimsLen || '??'}<br>
       Updated: ${diffStr}
     `;
 
@@ -128,7 +118,7 @@ function updateShips(shipsArray) {
     if (!marker) {
       marker = L.marker([ship.latitude, ship.longitude], { icon })
         .on('click', () => selectShip(mmsi));
-      marker.bindTooltip(ttHTML, {direction:'top', sticky:true});
+      marker.bindTooltip(ttHTML, { direction:'top', sticky:true });
       marker.shipData = ship;
 
       shipMarkers[mmsi] = marker;
@@ -144,100 +134,100 @@ function updateShips(shipsArray) {
   updateSelectedShipsInfo(false);
 }
 
-//---------------------------------------------
-// B) collisions
-//---------------------------------------------
+//-------------------------------------------
+// B) /collisions
+//-------------------------------------------
 function fetchCollisions() {
   fetch(`/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`)
     .then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status} - ${res.statusText}`);
-      let ctype = res.headers.get('content-type')||'';
+      const ctype = res.headers.get('content-type') || '';
       if (!ctype.includes('application/json')) {
         throw new Error(`Oczekiwano JSON, otrzymano: ${ctype}`);
       }
       return res.json();
     })
     .then(data => {
-      collisionsData = data||[];
+      collisionsData = data || [];
       updateCollisionsList();
     })
-    .catch(err=>console.error("Błąd /collisions:",err));
+    .catch(err => console.error("Błąd /collisions:", err));
 }
 
 function updateCollisionsList() {
   const collList = document.getElementById('collision-list');
-  collList.innerHTML='';
-
+  collList.innerHTML = '';
   collisionMarkers.forEach(m => map.removeLayer(m));
-  collisionMarkers=[];
+  collisionMarkers = [];
 
-  if(!collisionsData||collisionsData.length===0){
-    let noItem=document.createElement('div');
+  if (!collisionsData || collisionsData.length === 0) {
+    let noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML='<i>Brak bieżących kolizji</i>';
+    noItem.innerHTML = '<i>Brak bieżących kolizji</i>';
     collList.appendChild(noItem);
     return;
   }
 
-  const nowMs=Date.now();
-  let filtered=collisionsData.filter(c=>{
-    if(c.tcpa<0) return false;
-    if(c.timestamp){
-      let collT=new Date(c.timestamp).getTime();
-      let futureMs=collT+(c.tcpa*60000);
-      if(futureMs<nowMs) return false;
+  const nowMs = Date.now();
+  let filtered = collisionsData.filter(c => {
+    if (c.tcpa<0) return false;
+    if (c.timestamp) {
+      let collTime = new Date(c.timestamp).getTime();
+      let futureMs = collTime + c.tcpa * 60000;
+      if (futureMs < nowMs) return false;
     }
     return true;
   });
 
-  if(filtered.length===0){
-    let d=document.createElement('div');
+  if (filtered.length===0) {
+    let d = document.createElement('div');
     d.classList.add('collision-item');
-    d.innerHTML='<i>Brak bieżących kolizji</i>';
+    d.innerHTML = '<i>Brak bieżących kolizji</i>';
     collList.appendChild(d);
     return;
   }
 
-  let pairsMap={};
-  filtered.forEach(c=>{
-    let a=Math.min(c.mmsi_a,c.mmsi_b);
-    let b=Math.max(c.mmsi_a,c.mmsi_b);
-    let key=`${a}_${b}`;
-    if(!pairsMap[key]){
-      pairsMap[key]=c;
-    }else{
-      let oldT=new Date(pairsMap[key].timestamp).getTime();
-      let newT=new Date(c.timestamp).getTime();
-      if(newT>oldT){
-        pairsMap[key]=c;
+  let pairsMap = {};
+  filtered.forEach(c => {
+    let a = Math.min(c.mmsi_a,c.mmsi_b);
+    let b = Math.max(c.mmsi_a,c.mmsi_b);
+    let key = `${a}_${b}`;
+    if (!pairsMap[key]) {
+      pairsMap[key] = c;
+    } else {
+      let oldT = new Date(pairsMap[key].timestamp).getTime();
+      let newT = new Date(c.timestamp).getTime();
+      if (newT > oldT) {
+        pairsMap[key] = c;
       }
     }
   });
-  const finalCollisions=Object.values(pairsMap);
+  const finalCollisions = Object.values(pairsMap);
 
-  if(finalCollisions.length===0){
-    let d2=document.createElement('div');
+  if (finalCollisions.length===0) {
+    let d2 = document.createElement('div');
     d2.classList.add('collision-item');
-    d2.innerHTML='<i>Brak bieżących kolizji</i>';
+    d2.innerHTML = '<i>Brak bieżących kolizji</i>';
     collList.appendChild(d2);
     return;
   }
 
-  finalCollisions.forEach(c=>{
-    let shipA=`Ship ${c.mmsi_a}`;
-    let shipB=`Ship ${c.mmsi_b}`;
-    let cpaStr=c.cpa.toFixed(2);
-    let tcpaStr=c.tcpa.toFixed(2);
+  finalCollisions.forEach(c => {
+    let shipA = `Ship ${c.mmsi_a}`;
+    let shipB = `Ship ${c.mmsi_b}`;
+    let cpaStr = c.cpa.toFixed(2);
+    let tcpaStr= c.tcpa.toFixed(2);
 
-    const splittedHTML=getCollisionSplitCircle(c.mmsi_a,c.mmsi_b,0,0,shipMarkers);
+    // splitted circle z common.js
+    const splittedHTML = getCollisionSplitCircle(c.mmsi_a, c.mmsi_b, 0, 0, shipMarkers);
 
-    let timeStr=c.timestamp
-      ?new Date(c.timestamp).toLocaleTimeString('pl-PL',{hour12:false})
-      :'';
+    let timeStr = c.timestamp
+      ? new Date(c.timestamp).toLocaleTimeString('pl-PL',{hour12:false})
+      : '';
 
-    let item=document.createElement('div');
+    let item = document.createElement('div');
     item.classList.add('collision-item');
-    item.innerHTML=`
+    item.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
           ${splittedHTML}
@@ -254,10 +244,10 @@ function updateCollisionsList() {
       zoomToCollision(c);
     });
 
-    let latC=(c.latitude_a+c.latitude_b)/2;
-    let lonC=(c.longitude_a+c.longitude_b)/2;
+    let latC = (c.latitude_a + c.latitude_b)/2;
+    let lonC = (c.longitude_a + c.longitude_b)/2;
 
-    const collisionIcon=L.divIcon({
+    const collisionIcon = L.divIcon({
       className:'',
       html:`
         <svg width="24" height="24" viewBox="-12 -12 24 24">
@@ -271,9 +261,9 @@ function updateCollisionsList() {
       iconAnchor:[12,12]
     });
 
-    let tip=`Możliwa kolizja: ${shipA} & ${shipB}, ~${tcpaStr} min`;
-    let marker=L.marker([latC,lonC],{icon:collisionIcon})
-      .bindTooltip(tip,{direction:'top',sticky:true})
+    let tip=`Kolizja: ${shipA} & ${shipB}, ~${tcpaStr} min`;
+    let marker = L.marker([latC, lonC], { icon: collisionIcon })
+      .bindTooltip(tip, {direction:'top',sticky:true})
       .on('click',()=>zoomToCollision(c));
     marker.addTo(map);
     collisionMarkers.push(marker);
@@ -281,15 +271,15 @@ function updateCollisionsList() {
 }
 
 function zoomToCollision(c){
-  let bounds=L.latLngBounds([
+  let bounds = L.latLngBounds([
     [c.latitude_a,c.longitude_a],
     [c.latitude_b,c.longitude_b]
   ]);
   map.fitBounds(bounds,{padding:[15,15],maxZoom:13});
 
-  if(c.tcpa&&c.tcpa>0&&c.tcpa<9999){
+  if(c.tcpa && c.tcpa>0 && c.tcpa<9999){
     vectorLength=Math.round(c.tcpa);
-    document.getElementById('vectorLengthSlider').value=vectorLength.toString();
+    document.getElementById('vectorLengthSlider').value=vectorLength;
     document.getElementById('vectorLengthValue').textContent=vectorLength;
   }
   clearSelectedShips();
@@ -297,7 +287,7 @@ function zoomToCollision(c){
   selectShip(c.mmsi_b);
 }
 
-//---------------- select ships -------------
+//-------------------------------------------
 function selectShip(mmsi){
   if(!selectedShips.includes(mmsi)){
     if(selectedShips.length>=2){
@@ -331,7 +321,6 @@ function updateSelectedShipsInfo(selectionChanged){
       sData.push(shipMarkers[m].shipData);
     }
   });
-
   sData.forEach(sd=>{
     let dimsLen=null;
     if(sd.dim_a&&sd.dim_b){
@@ -392,7 +381,7 @@ function updateSelectedShipsInfo(selectionChanged){
   }
 }
 
-//-------------- computeDistanceNm --------------
+//-------------------------------------------
 function computeDistanceNm(lat1,lon1,lat2,lon2){
   const R_nm=3440.065;
   const rad=Math.PI/180;
@@ -433,14 +422,13 @@ function drawVector(mmsi){
   overlayMarkers[mmsi].push(line);
 }
 
-//---------------------------------------
 function reloadAllShipIcons(){
   let currentZoom=map.getZoom();
   for(let m in shipMarkers){
     let mk=shipMarkers[m];
     if(!mk.shipData) continue;
     let isSelected=selectedShips.includes(parseInt(m));
-    // createShipIcon z common.js
+    // UŻYWAMY createShipIcon (z common.js)
     let newIcon=createShipIcon(mk.shipData,isSelected,currentZoom);
     mk.setIcon(newIcon);
   }
