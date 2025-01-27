@@ -13,27 +13,25 @@ from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
-# Dodatkowe importy do okien
 from apache_beam import window
 
 CPA_THRESHOLD = 0.5        # mile morskie
 TCPA_THRESHOLD = 10.0      # minuty
-STATE_RETENTION_SEC = 120  # (2 min) do wykrywania kolizji
+STATE_RETENTION_SEC = 120  # 2 min (stateful collision detection)
 
 def parse_ais(record: bytes):
     """
     Parsuje rekord JSON z Pub/Sub (AIS).
-    Zwraca None, jeśli brakuje wymaganych dynamicznych pól:
-      [mmsi, latitude, longitude, cog, sog, timestamp].
-    Usuwa 'ship_length' (jeśli występowało w starym formacie).
-    Konwertuje dim_a..d na float (lub None).
+    Wymaga: [mmsi, latitude, longitude, cog, sog, timestamp].
+    Dodatkowo obsługuje 'heading' (TrueHeading) i dim_a..d, ship_name, itp.
     """
     try:
         data = json.loads(record.decode("utf-8"))
+        
         required = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
         if not all(r in data for r in required):
             return None
-
+        
         # Rzutowania podstawowych pól
         data["mmsi"] = int(data["mmsi"])
         data["latitude"] = float(data["latitude"])
@@ -41,11 +39,21 @@ def parse_ais(record: bytes):
         data["cog"] = float(data["cog"])
         data["sog"] = float(data["sog"])
 
-        # Usuwamy stare "ship_length" – nieużywane w nowym schemacie
+        # Wyrzucamy ewentualny stary ship_length
         data.pop("ship_length", None)
 
-        # Zamiana dim_a..d na float
-        for dim in ["dim_a","dim_b","dim_c","dim_d"]:
+        # heading (TrueHeading) – float lub None
+        hdg = data.get("heading")  # klucz 'heading' w Pub/Sub
+        if hdg is not None:
+            try:
+                data["heading"] = float(hdg)
+            except:
+                data["heading"] = None
+        else:
+            data["heading"] = None
+
+        # Dimensje
+        for dim in ["dim_a", "dim_b", "dim_c", "dim_d"]:
             val = data.get(dim)
             if val is not None:
                 try:
@@ -55,10 +63,10 @@ def parse_ais(record: bytes):
             else:
                 data[dim] = None
 
-        # ship_name – fallback
+        # ship_name (fallback)
         data["ship_name"] = data.get("ship_name", "Unknown")
 
-        # geohash – do stateful detection (lub usunąć, jeśli nie używamy)
+        # geohash – ewentualnie, do collision detection
         data["geohash"] = data.get("geohash", "none")
 
         return data
@@ -66,21 +74,60 @@ def parse_ais(record: bytes):
         return None
 
 def compute_cpa_tcpa(a, b):
-    # Przykład implementacji – niezmieniony
-    # ...
+    """
+    Przykładowa funkcja do liczenia (cpa, tcpa).
+    W tym projekcie możesz mieć inną implementację. 
+    """
+    # np. pomijamy statki < 50m (kiedyś?), albo implementacja uproszczona...
     return (9999, -1)
 
 class CollisionDoFn(beam.DoFn):
+    """
+    Stateful DoFn do wykrywania kolizji – roboczy, 
+    o ile faktycznie używasz stateful detection w geohash.
+    """
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.FastPrimitivesCoder())
 
     def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
-        # ... (kod wykrywania kolizji)
-        pass
+        gh, ship = element
+        now_sec = time.time()
+
+        # Dodaj nowy statek do stanu
+        records_state.add((ship, now_sec))
+
+        # Odczyt stanu i odfiltrowanie starych
+        old_list = list(records_state.read())
+        fresh = []
+        for (s, t) in old_list:
+            if (now_sec - t) <= STATE_RETENTION_SEC:
+                fresh.append((s,t))
+
+        records_state.clear()
+        for (s,t) in fresh:
+            records_state.add((s,t))
+
+        # Wykryj kolizje – uproszczone
+        for (old_ship, _) in fresh:
+            if old_ship["mmsi"] == ship["mmsi"]:
+                continue
+            cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
+            if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
+                yield {
+                    "mmsi_a": old_ship["mmsi"],
+                    "mmsi_b": ship["mmsi"],
+                    "timestamp": ship["timestamp"],  # z nowszego
+                    "cpa": cpa,
+                    "tcpa": tcpa,
+                    "latitude_a": old_ship["latitude"],
+                    "longitude_a": old_ship["longitude"],
+                    "latitude_b": ship["latitude"],
+                    "longitude_b": ship["longitude"]
+                }
 
 def remove_geohash_and_dims(row):
     """
-    Usuwamy geohash oraz dim_a,dim_b,dim_c,dim_d 
-    – w tabeli ships_positions mamy tylko mmsi, lat, lon, sog, cog, timestamp, ship_name.
+    Dla ships_positions – usuwamy geohash i dim_* 
+    (bo w tabeli dynamicznej nie mamy tych kolumn).
     """
     new_row = dict(row)
     new_row.pop("geohash", None)
@@ -90,8 +137,7 @@ def remove_geohash_and_dims(row):
 
 def keep_static_fields_only(row):
     """
-    Dla ships_static – zachowujemy tylko: 
-      mmsi, ship_name, dim_a..d, update_time
+    Dla ships_static – zachowujemy: mmsi, ship_name, dim_a,b,c,d, plus update_time.
     """
     return {
         "mmsi": row["mmsi"],
@@ -118,7 +164,7 @@ def run():
     table_static = f"{project_id}:{dataset}.ships_static"
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # 1) Odczyt z PubSub
+        # 1) Odczyt z Pub/Sub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
         # 2) Parsowanie
@@ -128,26 +174,21 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # ------------------------------------------------
-        # A) Zapis statycznych pól (dim_a..d) do ships_static
-        # ------------------------------------------------
+        # 3A) ships_static
         static_data = (
             parsed
             | "FilterWithDims" >> beam.Filter(
                 lambda r: any(r.get(dim) is not None for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
         )
-
-        # np. okno co 60s i GroupByKey 
-        windowed_static = static_data | "WindowStatic" >> beam.WindowInto(window.FixedWindows(60))
+        windowed_static = static_data | "WinStatic" >> beam.WindowInto(window.FixedWindows(60))
         grouped_static = (
             windowed_static
             | "KeyStatic" >> beam.Map(lambda r: (None, r))
             | "GroupStatic" >> beam.GroupByKey()
         )
         flattened_static = grouped_static | "ExtractStatic" >> beam.FlatMap(lambda kv: kv[1])
-        # Przygotowanie pól
-        prepped_static = flattened_static | "KeepStaticFields" >> beam.Map(keep_static_fields_only)
+        prepped_static = flattened_static | "KeepStatic" >> beam.Map(keep_static_fields_only)
 
         prepped_static | "WriteStatic" >> WriteToBigQuery(
             table=table_static,
@@ -164,15 +205,11 @@ def run():
             write_disposition=BigQueryDisposition.WRITE_APPEND,
         )
 
-        # ------------------------------------------------
-        # B) Zapis dynamicznych pól do ships_positions
-        # ------------------------------------------------
+        # 3B) ships_positions (dynamic)
+        #   Dodajemy heading do schematu
         cleaned_for_positions = parsed | "RemoveHashDims" >> beam.Map(remove_geohash_and_dims)
 
-        windowed_positions = (
-            cleaned_for_positions
-            | "WindowPositions" >> beam.WindowInto(window.FixedWindows(10))
-        )
+        windowed_positions = cleaned_for_positions | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
         grouped_positions = (
             windowed_positions
             | "KeyPositions" >> beam.Map(lambda r: (None, r))
@@ -189,18 +226,16 @@ def run():
                 "longitude:FLOAT,"
                 "cog:FLOAT,"
                 "sog:FLOAT,"
+                "heading:FLOAT,"  # <--- NOWE
                 "timestamp:TIMESTAMP"
             ),
             create_disposition=BigQueryDisposition.CREATE_NEVER,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
         )
 
-        # ------------------------------------------------
-        # C) Wykrywanie kolizji i zapis do collisions
-        # ------------------------------------------------
+        # 3C) collisions
         keyed = parsed | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
-
         windowed_collisions = collisions_raw | "WinColl" >> beam.WindowInto(window.FixedWindows(10))
         grouped_coll = (
             windowed_collisions
