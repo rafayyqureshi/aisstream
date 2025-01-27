@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import asyncio
 import json
@@ -28,7 +29,7 @@ publisher = pubsub_v1.PublisherClient()
 topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
 # Słownik pamiętający dane statyczne statków (mmsi -> dict)
-# klucz: mmsi (int), wartość: { 'ship_name':..., 'dim_a':..., 'dim_b':..., 'dim_c':..., 'dim_d':...}
+# klucz: mmsi (int), wartość: { 'ship_name':..., 'dim_a':..., 'dim_b':..., 'dim_c':..., 'dim_d':... }
 ship_static_data = {}
 
 received_count = 0
@@ -36,8 +37,8 @@ published_count = 0
 
 async def log_stats():
     """
-    Zadanie asynchroniczne logujące co minutę ilość
-    odebranych i opublikowanych wiadomości.
+    Zadanie asynchroniczne: co minutę logujemy liczbę odebranych
+    i opublikowanych wiadomości AIS.
     """
     global received_count, published_count
     while True:
@@ -51,19 +52,17 @@ async def log_stats():
 
 async def connect_ais_stream():
     """
-    Główna pętla łącząca się z aisstream.io i odbierająca dane AIS.
+    Główna pętla łącząca się z AISSTREAM.io i nasłuchująca wiadomości AIS (ShipStaticData, PositionReport).
     """
     global received_count, published_count
     uri = "wss://stream.aisstream.io/v0/stream"
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-    # Zadanie asynchroniczne do logowania statystyk co minutę
-    asyncio.create_task(log_stats())
+    asyncio.create_task(log_stats())  # statystyki co 60s
 
     while True:
         try:
             async with websockets.connect(uri, ping_interval=None, ssl=ssl_context) as websocket:
-                # logger.info("Connected to AISSTREAM.io")
                 logger.info("=== AIS STREAM (NEW CODE) === connected to AISSTREAM.io")
 
                 subscribe_message = {
@@ -99,16 +98,17 @@ async def connect_ais_stream():
                         await process_position_report(message)
                     else:
                         logger.warning(f"Unhandled MessageType: {msg_type}")
+
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
-        # Po rozłączeniu czekamy 5s i próbujemy ponownie
+        # Po rozłączeniu: odczekaj 5s i spróbuj ponownie
         await asyncio.sleep(5)
 
 def process_ship_static_data(message: dict):
     """
-    Obróbka wiadomości ShipStaticData:
-    - Pobieramy wymiary A,B,C,D
-    - Zapisujemy w ship_static_data[mmsi].
+    Obrabia wiadomości typu ShipStaticData: 
+    - pobiera nazwy i wymiary A,B,C,D
+    - zapamiętuje w ship_static_data[mmsi].
     """
     metadata = message.get("MetaData", {})
     mmsi = metadata.get('MMSI')
@@ -126,7 +126,7 @@ def process_ship_static_data(message: dict):
     d = dimension.get('D')  # od anteny do prawej burty
 
     def to_float(val):
-        return float(val) if isinstance(val, (int,float)) else None
+        return float(val) if isinstance(val, (int, float)) else None
 
     dim_a = to_float(a)
     dim_b = to_float(b)
@@ -149,9 +149,10 @@ def is_valid_coordinate(value):
 
 async def process_position_report(message: dict):
     """
-    Obsługa wiadomości typu PositionReport.
-    - Dopisujemy statyczne dane (dim_a, dim_b, dim_c, dim_d)
-    - Publikujemy do Pub/Sub.
+    Obrabia wiadomości typu PositionReport:
+    - dopisuje dane statyczne (dim_a, dim_b, etc.) z ship_static_data
+    - pobiera TrueHeading => heading
+    - Publikuje do Pub/Sub.
     """
     global published_count
     position_report = message.get("Message", {}).get("PositionReport", {})
@@ -166,6 +167,14 @@ async def process_position_report(message: dict):
     cog = position_report.get('Cog')
     sog = position_report.get('Sog')
 
+    # Nowy parametr: TrueHeading
+    heading = position_report.get('TrueHeading')  # według dokumentacji
+    if heading is not None:
+        try:
+            heading = float(heading)
+        except:
+            heading = None
+
     # Timestamp
     timestamp = metadata.get('TimeReceived')
     if not timestamp:
@@ -174,13 +183,13 @@ async def process_position_report(message: dict):
         if timestamp.endswith('+00:00'):
             timestamp = timestamp.replace('+00:00', 'Z')
 
-    # Prosty filtr SOG >= 2 i valid lat/lon
+    # Filtr SOG >= 2 + valid lat/lon
     if sog is None or sog < 2:
         return
     if not is_valid_coordinate(latitude) or not is_valid_coordinate(longitude):
         return
 
-    # Pobieramy dane statyczne
+    # Dane statyczne z pamięci
     statics = ship_static_data.get(mmsi, {})
     ship_name = statics.get('ship_name', 'Unknown')
     dim_a = statics.get('dim_a')
@@ -188,7 +197,7 @@ async def process_position_report(message: dict):
     dim_c = statics.get('dim_c')
     dim_d = statics.get('dim_d')
 
-    # Budujemy wiadomość do Pub/Sub
+    # Wiadomość do Pub/Sub
     reduced_message = {
         'mmsi': mmsi,
         'ship_name': ship_name,
@@ -196,6 +205,7 @@ async def process_position_report(message: dict):
         'longitude': longitude,
         'sog': sog,
         'cog': cog,
+        'heading': heading,  # <-- nowa informacja
         'timestamp': timestamp,
         'dim_a': dim_a,
         'dim_b': dim_b,
@@ -208,7 +218,7 @@ async def process_position_report(message: dict):
 
 async def publish_to_pubsub(msg: dict):
     """
-    Publikacja asynchroniczna wiadomości do Pub/Sub.
+    Publikacja asynchroniczna do Pub/Sub.
     """
     loop = asyncio.get_running_loop()
     data = json.dumps(msg).encode('utf-8')

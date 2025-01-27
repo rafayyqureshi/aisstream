@@ -150,7 +150,7 @@ function createShipIcon(shipData, isSelected, mapZoom=5) {
   const half = svgSize/2;
 
   let shapeHTML = '';
-  if (mapZoom >= 12 && dimA>0 && dimB>0 && dimC>0 && dimD>0) {
+  if (mapZoom >= 14 && dimA>0 && dimB>0 && dimC>0 && dimD>0) {
     // Rysujemy poligon
     const hull = buildHullPoints(dimA, dimB, dimC, dimD);
     if (hull) {
