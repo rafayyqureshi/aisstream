@@ -13,18 +13,108 @@ client = bigquery.Client()
 GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bucket")
 GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
 
+###########################################################
+# Funkcje pomocnicze
+###########################################################
+def compute_cpa_tcpa(shipA, shipB):
+    """
+    Oblicza (CPA, TCPA) w milach morskich i minutach, 
+    biorąc pod uwagę bieżącą pozycję (lat/lon), SOG (kn), 
+    i COG (deg). 
+    Zakładamy, że heading NIE wpływa na trajektorię 
+    (COG = kierunek ruchu).
+    
+    Zwraca (cpa_val, tcpa_val).
+    Jeżeli cokolwiek jest niepoprawne, zwracamy (9999, -1).
+    """
+    # Sprawdź kluczowe pola
+    required = ['latitude','longitude','cog','sog']
+    for f in required:
+        if f not in shipA or f not in shipB:
+            return (9999, -1)
+
+    # Możesz pominąć statki <50m, ale to raczej 
+    # w warstwie logiki, 
+    # tut. jedynie demonstrujemy
+    # ...
+
+    latRef = (shipA['latitude'] + shipB['latitude']) / 2.0
+    scaleLat = 111000.0
+    scaleLon = 111000.0 * math.cos(math.radians(latRef))
+
+    def toXY(lat, lon):
+        return (lon * scaleLon, lat * scaleLat)
+
+    xA, yA = toXY(shipA['latitude'], shipA['longitude'])
+    xB, yB = toXY(shipB['latitude'], shipB['longitude'])
+
+    sogA = float(shipA['sog'] or 0)
+    sogB = float(shipB['sog'] or 0)
+
+    def cogToVector(cog_deg, sog_kn):
+        # cog w stopniach, sog w węzłach (nm/h)
+        r = math.radians(cog_deg or 0)
+        vx = sog_kn * math.sin(r)
+        vy = sog_kn * math.cos(r)
+        return (vx, vy)
+
+    vxA, vyA = cogToVector(shipA['cog'], sogA)
+    vxB, vyB = cogToVector(shipB['cog'], sogB)
+
+    dx = xA - xB
+    dy = yA - yB
+
+    # sog w nm/h => w m/min
+    speed_scale = 1852.0 / 60.0
+
+    dvx = (vxA - vxB) * speed_scale
+    dvy = (vyA - vyB) * speed_scale
+
+    VV = dvx**2 + dvy**2
+    PV = dx * dvx + dy * dvy
+
+    if VV == 0:
+        tcpa = 0.0
+    else:
+        tcpa = -PV / VV
+
+    if tcpa < 0:
+        return (9999, -1)
+
+    # Pozycje przy CPA
+    xA2 = xA + vxA*speed_scale*tcpa
+    yA2 = yA + vyA*speed_scale*tcpa
+    xB2 = xB + vxB*speed_scale*tcpa
+    yB2 = yB + vyB*speed_scale*tcpa
+
+    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
+    dist_nm = dist_m / 1852.0
+    return (dist_nm, tcpa)
+
+###########################################################
+# Endpoints
+###########################################################
+
 # 1) Strona główna – Live Map
 @app.route('/')
 def index():
+    """
+    Frontend LIVE (index.html).
+    """
     return render_template('index.html')
 
-# 2) Endpoint /ships – pobiera statki z tabeli positions (z heading) + dołącza wymiary z ships_static
+
+# 2) Endpoint /ships
 @app.route('/ships')
 def ships():
     """
-    Zwraca statki z ostatnich 2 minut, do modułu live.
-    Dodatkowo łączy z tabelą ships_static, aby pobrać dim_a..d.
-    Zwracamy również heading, by front-end mógł obrócić symbol statku.
+    Zwraca statki z ostatnich 2 minut, do modułu LIVE.
+    Dołączamy heading (z positions) i wymiary (dim_a..d) z ships_static.
+
+    Uwaga:
+    - ANY_VALUE(ship_name) => "fallback" dla nazwy, jeśli w positions jest kilka.
+    - ORDER BY r.timestamp DESC => by ewentualnie 
+      zwrócić nowsze na górze. 
     """
     query = """
     WITH recent AS (
@@ -69,9 +159,9 @@ def ships():
             "longitude": r.longitude,
             "cog": r.cog,
             "sog": r.sog,
-            "heading": r.heading,   # <-- kluczowe pole, do obrotu symbolu
+            "heading": r.heading,  
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            "ship_name": r.ship_name,  # dynamiczny fallback
+            "ship_name": r.ship_name,
             "dim_a": r.dim_a,
             "dim_b": r.dim_b,
             "dim_c": r.dim_c,
@@ -79,9 +169,18 @@ def ships():
         })
     return jsonify(out)
 
-# 3) Endpoint /collisions – do wyświetlania listy kolizji
+
+# 3) Endpoint /collisions
 @app.route('/collisions')
 def collisions():
+    """
+    Zwraca listę kolizji w collisions, 
+    filtrowaną parametrami max_cpa, max_tcpa.
+
+    W razie potrzeby możesz tutaj dołączyć wymiary statków, 
+    ale póki co w collisions trzymamy tylko lat/lon 
+    z momentu zbliżenia oraz cpa/tcpa.
+    """
     max_cpa = float(request.args.get('max_cpa', 0.5))
     max_tcpa = float(request.args.get('max_tcpa', 10.0))
 
@@ -93,7 +192,7 @@ def collisions():
         MAX(timestamp) AS latest_ts
       FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
-    ), 
+    ),
     latestB AS (
       SELECT
         mmsi,
@@ -151,15 +250,20 @@ def collisions():
         })
     return jsonify(result)
 
-# 4) On-demand CPA/TCPA (opcjonalnie)
+
+# 4) On-demand CPA/TCPA
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
+    """
+    Wywoływane z front-endu (app.js) 
+    w momencie zaznaczenia 2 statków (selectedShips).
+    """
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
     if not mmsi_a or not mmsi_b:
         return jsonify({'error': 'Missing mmsi_a or mmsi_b'}), 400
 
-    # Przykładowo – pobieramy ostanie 2 min:
+    # Bierzemy ostanie 2 min
     query = f"""
     SELECT
       mmsi,
@@ -174,7 +278,7 @@ def calculate_cpa_tcpa():
     ORDER BY MAX(timestamp) DESC
     """
     rows = list(client.query(query).result())
-    
+
     data_by_mmsi = {}
     for r in rows:
         data_by_mmsi[r.mmsi] = {
@@ -188,20 +292,26 @@ def calculate_cpa_tcpa():
     if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
         return jsonify({'error': 'No recent data for one or both ships'}), 404
 
-    # Na potrzeby demo:
-    cpa_val = 9999
-    tcpa_val = -1
-    # cpa_val, tcpa_val = compute_cpa(...)
+    # Rzeczywiste obliczenie CPA/TCPA
+    cpa_val, tcpa_val = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
 
     return jsonify({'cpa': cpa_val, 'tcpa': tcpa_val})
+
 
 # 5) Moduł HISTORY (pliki GCS)
 @app.route('/history')
 def history():
+    """
+    Frontend HISTORY (history.html).
+    """
     return render_template('history.html')
 
 @app.route("/history_filelist")
 def history_filelist():
+    """
+    Zwraca listę plików w GCS (prefix=GCS_HISTORY_PREFIX)
+    z ostatnich X dni (domyślnie 7), do front-endu history_app.js
+    """
     days_back = int(request.args.get("days", 7))
     cutoff_utc = datetime.utcnow() - timedelta(days=days_back)
 
@@ -230,6 +340,10 @@ def history_filelist():
 
 @app.route("/history_file")
 def history_file():
+    """
+    Zwraca zawartość konkretnego pliku JSON w GCS, 
+    generowanego przez pipeline history.
+    """
     filename = request.args.get("file", "")
     if not filename:
         return jsonify({"error": "Missing 'file' parameter"}), 400
@@ -251,5 +365,10 @@ def history_file():
 
     return app.response_class(data_str, mimetype="application/json")
 
+
+###########################################################
+# Uruchom
+###########################################################
 if __name__ == '__main__':
+    # UWAGA: debug=True w produkcji niezalecane.
     app.run(host='0.0.0.0', port=5000, debug=True)
