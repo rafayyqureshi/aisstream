@@ -1,8 +1,9 @@
 //
 // common.js
 //
-// Zawiera funkcje współdzielone przez moduły "live" i "history".
-// ŁADOWANY PRZED app.js / history_app.js!
+// Wspólne funkcje i logika wizualizacji
+// używane przez moduły "live" (app.js) i "history" (history_app.js).
+// UWAGA: plik ten musi być załadowany PRZED app.js / history_app.js!
 //
 
 // -----------------------------------------------------------
@@ -21,7 +22,7 @@ function initSharedMap(mapContainerId) {
   );
   osmLayer.addTo(map);
 
-  // Warstwa OpenSeaMap (opcjonalnie)
+  // (Opcjonalnie) warstwa nawigacyjna OpenSeaMap
   const openSeaMapLayer = L.tileLayer(
     'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
     { maxZoom: 18, opacity: 0.7 }
@@ -32,11 +33,11 @@ function initSharedMap(mapContainerId) {
 }
 
 // -----------------------------------------------------------
-// 2) Pomocnicze: kolorowanie i skala
+// 2) Pomocnicze: kolorowanie i skalowanie
 // -----------------------------------------------------------
 /**
  * getShipColorFromDims: logika kolorowania na podstawie (dim_a + dim_b).
- * Jeżeli a,b nie są dostępne, zwraca 'gray'.
+ * Jeśli a,b nie dostępne => zwraca 'gray'.
  */
 function getShipColorFromDims(dimA, dimB) {
   if (!dimA || !dimB) {
@@ -50,9 +51,7 @@ function getShipColorFromDims(dimA, dimB) {
 }
 
 /**
- * getShipColor: (z poprzedniej wersji), fallback – jeżeli w starym kodzie
- * mamy "ship_length" – można użyć tej funkcji. Ale teraz możesz używać
- * getShipColorFromDims zamiast.
+ * getShipColor: fallback dla pojedynczego lengthValue (np. stare dane).
  */
 function getShipColor(len) {
   if (len === null || isNaN(len)) return 'gray';
@@ -63,7 +62,7 @@ function getShipColor(len) {
 }
 
 /**
- * getShipScale: zależne od koloru (z poprzedniej wersji).
+ * getShipScale – skala ikony zależna od koloru.
  */
 function getShipScale(color) {
   switch (color) {
@@ -76,66 +75,59 @@ function getShipScale(color) {
 }
 
 // -----------------------------------------------------------
-// 3) Rysowanie poligonu kadłuba
+// 3) Rysowanie kadłuba w local coords
 // -----------------------------------------------------------
 /**
- * Tworzymy w local coords 5 punktów:
- *  - rufa-left  = (-b, -c)
- *  - rufa-right = (-b, +d)
- *  - dziób-left = (a - (c+d)/2, -c)
- *  - wierzchołek dziobu = (a, 0)
- *  - dziób-right= (a - (c+d)/2, +d)
- * 
- * Zwraca string "x1,y1 x2,y2 ..." do <polygon points="...">
+ * buildHullPoints(a,b,c,d):
+ *  Zwraca string "x1,y1 x2,y2 ..." do <polygon points="..."> w local coords (px).
+ *   - rufa-left  = (-b, -c)
+ *   - rufa-right = (-b, +d)
+ *   - dziób-left = (a - (c+d)/2, -c)
+ *   - wierzchołek dziobu = (a, 0)
+ *   - dziób-right= (a - (c+d)/2, +d)
+ * Jeśli a,b,c,d są niepełne -> return null
  */
 function buildHullPoints(a, b, c, d) {
   if (!a || !b || !c || !d) {
-    return null; // Brak wymiarów
+    return null;
   }
-  // Konstruujemy w local coords
-  // (0,0) to antena
+  // Local coords, (0,0) = antena
   const pts = [
-    [-b, -c],                                // rufa-left
-    [-b, +d],                                // rufa-right
-    [a - (c + d)/2, +d],                     // dziób-right
-    [a, 0],                                  // wierzchołek dziobu
-    [a - (c + d)/2, -c]                      // dziób-left
+    [-b, -c],                               // rufa-left
+    [-b,  d],                               // rufa-right
+    [ a - (c + d)/2,  d],                   // dziób-right
+    [ a,  0],                               // wierzchołek dziobu
+    [ a - (c + d)/2, -c]                    // dziób-left
   ];
 
-  // Transformujemy w prosty 2D *bez* rotacji – bo i tak polygon
-  // rotujemy w <svg> -> rotate(cog).
-  // Ale jeżeli chcesz inną geometrię, zmodyfikuj tu.
-
-  // Budujemy string
-  const strPoints = pts.map(pt => `${pt[0]},${pt[1]}`).join(' ');
-  return strPoints;
+  return pts.map(pt => `${pt[0]},${pt[1]}`).join(' ');
 }
 
 // -----------------------------------------------------------
-// 4) createShipIcon - wersja rozbudowana
+// 4) Tworzenie ikony statku / kadłuba
 // -----------------------------------------------------------
 /**
- * createShipIcon(shipData, isSelected, mapZoom=5)
- *  - Jeżeli zoom <12 => rysuje stary trójkąt
- *  - Jeżeli zoom >=12 i dim_a,b,c,d => rysuje poligon kadłuba
+ * createShipIcon(shipData, isSelected, mapZoom=5):
+ *   - jeśli zoom <14 => rysujemy uproszczony trójkąt
+ *   - jeśli zoom >=14 => rysujemy polygon kadłuba
+ * Uwaga: do rotacji używamy heading (TrueHeading),
+ *        a w razie braku => fallback do cog.
  */
-function createShipIcon(shipData, isSelected, mapZoom=5) {
-  // Pobierz wymiary
+function createShipIcon(shipData, isSelected, mapZoom = 5) {
+  // Wymiary (dim_a..d)
   const dimA = parseFloat(shipData.dim_a) || 0;
   const dimB = parseFloat(shipData.dim_b) || 0;
   const dimC = parseFloat(shipData.dim_c) || 0;
   const dimD = parseFloat(shipData.dim_d) || 0;
 
-  // Kolor z dims
+  // Kolor
   const color = getShipColorFromDims(dimA, dimB);
+  const scaleVal = getShipScale(color);
 
-  // Skala (z poprzedniej logiki)
-  const scale = getShipScale(color);
-
-  // Ewentualny highlight
+  // highlight?
   let highlightRect = '';
   if (isSelected) {
-    const w = 16 * scale;
+    const w = 16 * scaleVal;
     highlightRect = `
       <rect x="${-w/2 - 2}" y="${-w/2 - 2}"
             width="${w + 4}" height="${w + 4}"
@@ -144,38 +136,32 @@ function createShipIcon(shipData, isSelected, mapZoom=5) {
     `;
   }
 
-  // Rotation
-  const rotationDeg = shipData.cog || 0;
-  const svgSize = 32;
-  const half = svgSize/2;
+  // Rotation – prefer heading, fallback to cog
+  const hdg = (shipData.heading != null) ? shipData.heading : (shipData.cog || 0);
 
+  // Size
+  const svgSize = 32;
+  const half = svgSize / 2;
+
+  // Tworzymy shape (polygon kadłuba) lub trójkąt
   let shapeHTML = '';
   if (mapZoom >= 14 && dimA>0 && dimB>0 && dimC>0 && dimD>0) {
-    // Rysujemy poligon
-    const hull = buildHullPoints(dimA, dimB, dimC, dimD);
-    if (hull) {
-      shapeHTML = `
-        <polygon points="${hull}"
-                 fill="${color}" stroke="black" stroke-width="1" />
-      `;
+    // Poligon kadłuba
+    const hullStr = buildHullPoints(dimA, dimB, dimC, dimD);
+    if (hullStr) {
+      shapeHTML = `<polygon points="${hullStr}" fill="${color}" stroke="black" stroke-width="1" />`;
     } else {
-      // w razie braku, fallback do trójkąta
-      shapeHTML = `
-        <polygon points="0,-8 6,8 -6,8"
-                 fill="${color}" stroke="black" stroke-width="1" />
-      `;
+      // fallback => trójkąt
+      shapeHTML = `<polygon points="0,-8 6,8 -6,8" fill="${color}" stroke="black" stroke-width="1" />`;
     }
   } else {
-    // Zoom za mały => stary trójkąt
-    shapeHTML = `
-      <polygon points="0,-8 6,8 -6,8"
-               fill="${color}" stroke="black" stroke-width="1" />
-    `;
+    // Mniejszy zoom => trójkąt
+    shapeHTML = `<polygon points="0,-8 6,8 -6,8" fill="${color}" stroke="black" stroke-width="1" />`;
   }
 
   const svgHTML = `
     <svg width="${svgSize}" height="${svgSize}" viewBox="0 0 32 32">
-      <g transform="translate(16,16) scale(${scale}) rotate(${rotationDeg})">
+      <g transform="translate(16,16) scale(${scaleVal}) rotate(${hdg})">
         ${highlightRect}
         ${shapeHTML}
       </g>
@@ -191,7 +177,7 @@ function createShipIcon(shipData, isSelected, mapZoom=5) {
 }
 
 // -----------------------------------------------------------
-// 5) splitted circle - do kolizji
+// 5) Splitted circle do kolizji
 // -----------------------------------------------------------
 function createSplittedCircle(colorA, colorB) {
   return `
@@ -206,9 +192,8 @@ function createSplittedCircle(colorA, colorB) {
 }
 
 /**
- * getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers)
- *  - Jeśli w shipMarkers[mmsi] mamy dim_a, dim_b -> liczymy length i kolor.
- *  - W razie braku => fallbackLen.
+ * getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers):
+ *  Tworzy splitted circle do listy kolizji
  */
 function getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipMarkers) {
   let lenA = parseFloat(fallbackLenA) || 0;
@@ -228,19 +213,22 @@ function getCollisionSplitCircle(mmsiA, mmsiB, fallbackLenA, fallbackLenB, shipM
   const L_B = getLenFromMarker(mmsiB);
   if (L_B !== null) lenB = L_B;
 
-  const colorA = getShipColor(lenA);   // lub getShipColorFromDims(a,b)
+  const colorA = getShipColor(lenA);
   const colorB = getShipColor(lenB);
 
   return createSplittedCircle(colorA, colorB);
 }
 
 // -----------------------------------------------------------
-// 6) Eksporty w global scope
+// 6) Eksport do global scope
 // -----------------------------------------------------------
 window.initSharedMap = initSharedMap;
-window.createShipIcon = createShipIcon;          // rysuje trójkąt/poligon
-window.getShipColor = getShipColor;              // fallback
+window.createShipIcon = createShipIcon;
+window.buildHullPoints = buildHullPoints;
+
+window.getShipColor = getShipColor;
+window.getShipColorFromDims = getShipColorFromDims;
 window.getShipScale = getShipScale;
-window.getShipColorFromDims = getShipColorFromDims; // nowa
+
 window.createSplittedCircle = createSplittedCircle;
 window.getCollisionSplitCircle = getCollisionSplitCircle;

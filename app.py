@@ -9,20 +9,22 @@ from google.cloud import storage
 app = Flask(__name__, static_folder='static', template_folder='templates')
 client = bigquery.Client()
 
+# Konfiguracja GCS do modułu history
 GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bucket")
 GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
 
-# 1) Strona główna
+# 1) Strona główna – Live Map
 @app.route('/')
 def index():
     return render_template('index.html')
 
-# 2) Endpoint /ships – Łączymy ships_positions (dynamic) z ships_static
+# 2) Endpoint /ships – pobiera statki z tabeli positions (z heading) + dołącza wymiary z ships_static
 @app.route('/ships')
 def ships():
     """
     Zwraca statki z ostatnich 2 minut, do modułu live.
-    Pobiera dim_a..d z tabeli ships_static (LEFT JOIN).
+    Dodatkowo łączy z tabelą ships_static, aby pobrać dim_a..d.
+    Zwracamy również heading, by front-end mógł obrócić symbol statku.
     """
     query = """
     WITH recent AS (
@@ -32,11 +34,12 @@ def ships():
         longitude,
         cog,
         sog,
+        heading,
         timestamp,
         ANY_VALUE(ship_name) AS dyn_name
       FROM `ais_dataset_us.ships_positions`
       WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
-      GROUP BY mmsi, latitude, longitude, cog, sog, timestamp
+      GROUP BY mmsi, latitude, longitude, cog, sog, heading, timestamp
     )
     SELECT
       r.mmsi,
@@ -44,6 +47,7 @@ def ships():
       r.longitude,
       r.cog,
       r.sog,
+      r.heading,
       r.timestamp,
       r.dyn_name AS ship_name,
       s.dim_a,
@@ -65,8 +69,9 @@ def ships():
             "longitude": r.longitude,
             "cog": r.cog,
             "sog": r.sog,
+            "heading": r.heading,   # <-- kluczowe pole, do obrotu symbolu
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            "ship_name": r.ship_name,   # z recent/dyn_name lub static
+            "ship_name": r.ship_name,  # dynamiczny fallback
             "dim_a": r.dim_a,
             "dim_b": r.dim_b,
             "dim_c": r.dim_c,
@@ -74,7 +79,7 @@ def ships():
         })
     return jsonify(out)
 
-# 3) Endpoint /collisions
+# 3) Endpoint /collisions – do wyświetlania listy kolizji
 @app.route('/collisions')
 def collisions():
     max_cpa = float(request.args.get('max_cpa', 0.5))
@@ -82,11 +87,18 @@ def collisions():
 
     query = f"""
     WITH latestA AS (
-      SELECT mmsi, ANY_VALUE(ship_name) AS ship_name, MAX(timestamp) AS latest_ts
+      SELECT
+        mmsi,
+        ANY_VALUE(ship_name) AS ship_name,
+        MAX(timestamp) AS latest_ts
       FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
-    ), latestB AS (
-      SELECT mmsi, ANY_VALUE(ship_name) AS ship_name, MAX(timestamp) AS latest_ts
+    ), 
+    latestB AS (
+      SELECT
+        mmsi,
+        ANY_VALUE(ship_name) AS ship_name,
+        MAX(timestamp) AS latest_ts
       FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
     )
@@ -118,27 +130,28 @@ def collisions():
         shipA = r.ship1_name or str(r.mmsi_a)
         shipB = r.ship2_name or str(r.mmsi_b)
         t_str = r.timestamp.isoformat() if r.timestamp else None
+
         collision_id = None
         if r.timestamp:
             collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}"
 
         result.append({
-            'collision_id': collision_id,
-            'mmsi_a': r.mmsi_a,
-            'mmsi_b': r.mmsi_b,
-            'timestamp': t_str,
-            'cpa': r.cpa,
-            'tcpa': r.tcpa,
-            'latitude_a': r.latitude_a,
-            'longitude_a': r.longitude_a,
-            'latitude_b': r.latitude_b,
-            'longitude_b': r.longitude_b,
-            'ship1_name': shipA,
-            'ship2_name': shipB
+            "collision_id": collision_id,
+            "mmsi_a": r.mmsi_a,
+            "mmsi_b": r.mmsi_b,
+            "timestamp": t_str,
+            "cpa": r.cpa,
+            "tcpa": r.tcpa,
+            "latitude_a": r.latitude_a,
+            "longitude_a": r.longitude_a,
+            "latitude_b": r.latitude_b,
+            "longitude_b": r.longitude_b,
+            "ship1_name": shipA,
+            "ship2_name": shipB
         })
     return jsonify(result)
 
-# 4) On-demand CPA/TCPA
+# 4) On-demand CPA/TCPA (opcjonalnie)
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
     mmsi_a = request.args.get('mmsi_a', type=int)
@@ -146,10 +159,7 @@ def calculate_cpa_tcpa():
     if not mmsi_a or not mmsi_b:
         return jsonify({'error': 'Missing mmsi_a or mmsi_b'}), 400
 
-    # W nowym schemacie, dynamicznie nie mamy "ship_length".
-    # Jeśli jednak chcesz tu liczyć CPA/TCPA, musisz ewentualnie
-    # zignorować warunek min. 50m (albo dołączyć static i sumować a+b).
-    # Poniżej przykład z "2min" – or we do 5 min etc.
+    # Przykładowo – pobieramy ostanie 2 min:
     query = f"""
     SELECT
       mmsi,
@@ -164,7 +174,7 @@ def calculate_cpa_tcpa():
     ORDER BY MAX(timestamp) DESC
     """
     rows = list(client.query(query).result())
-
+    
     data_by_mmsi = {}
     for r in rows:
         data_by_mmsi[r.mmsi] = {
@@ -178,16 +188,14 @@ def calculate_cpa_tcpa():
     if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
         return jsonify({'error': 'No recent data for one or both ships'}), 404
 
-    # Prosty CPA/TCPA – lub zignoruj warunek >50m
+    # Na potrzeby demo:
     cpa_val = 9999
     tcpa_val = -1
-
-    # Ewentualnie tu dopisujesz swoją logikę
-    # cpa_val, tcpa_val = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
+    # cpa_val, tcpa_val = compute_cpa(...)
 
     return jsonify({'cpa': cpa_val, 'tcpa': tcpa_val})
 
-# 5) History – pliki GCS
+# 5) Moduł HISTORY (pliki GCS)
 @app.route('/history')
 def history():
     return render_template('history.html')
