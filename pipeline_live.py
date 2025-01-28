@@ -27,63 +27,86 @@ TCPA_THRESHOLD       = 10.0
 STATE_RETENTION_SEC  = 120
 
 def compute_cpa_tcpa(shipA, shipB):
+    """Prosta funkcja do wyliczania (cpa, tcpa)."""
     required = ['latitude', 'longitude', 'cog', 'sog']
     for ship in [shipA, shipB]:
         if not all(field in ship and ship[field] is not None for field in required):
             return (9999, -1)
     cogA_rad = math.radians(shipA['cog'])
     cogB_rad = math.radians(shipB['cog'])
-    sogA = shipA['sog']
-    sogB = shipB['sog']
+    sogA = float(shipA['sog'] or 0)
+    sogB = float(shipB['sog'] or 0)
+
+    # Zakładamy sog w kn -> w min => /60
     speedA = sogA / 60.0
     speedB = sogB / 60.0
+
     vxA = speedA * math.sin(cogA_rad)
     vyA = speedA * math.cos(cogA_rad)
     vxB = speedB * math.sin(cogB_rad)
     vyB = speedB * math.cos(cogB_rad)
+
     dx = shipA['longitude'] - shipB['longitude']
-    dy = shipA['latitude'] - shipB['latitude']
+    dy = shipA['latitude']  - shipB['latitude']
     dvx = vxA - vxB
     dvy = vyA - vyB
     dv2 = dvx**2 + dvy**2
     if dv2 == 0:
         return (9999, -1)
     pv = dx*dvx + dy*dvy
-    tcpa = -pv/dv2
-    if tcpa < 0: return (9999, -1)
-    closest_x = dx + dvx*tcpa
-    closest_y = dy + dvy*tcpa
-    cpa_deg = math.sqrt(closest_x**2 + closest_y**2)
-    cpa_nm  = cpa_deg * 60.0
-    return (cpa_nm, tcpa)
+    tcpa = -pv / dv2
+    if tcpa < 0:
+        return (9999, -1)
+
+    # Pozycja minimalnego zbliżenia
+    close_x = dx + dvx*tcpa
+    close_y = dy + dvy*tcpa
+    dist_deg = math.sqrt(close_x**2 + close_y**2)
+    dist_nm  = dist_deg * 60.0
+    return (dist_nm, tcpa)
 
 def parse_ais(record_bytes):
+    """Parsuje JSON AIS z Pub/Sub."""
     try:
         data = json.loads(record_bytes.decode("utf-8"))
         req = ["mmsi","latitude","longitude","cog","sog","timestamp"]
-        if not all(r in data for r in req): return None
+        if not all(r in data for r in req):
+            return None
+
         data["mmsi"]      = int(data["mmsi"])
         data["latitude"]  = float(data["latitude"])
         data["longitude"] = float(data["longitude"])
         data["cog"]       = float(data["cog"])
         data["sog"]       = float(data["sog"])
-        data.pop("ship_length", None)
+        data.pop("ship_length", None)  # usuwamy stare pole
+
+        # heading
         hdg = data.get("heading")
         if hdg is not None:
-            try: data["heading"] = float(hdg)
-            except: data["heading"] = None
+            try:
+                data["heading"] = float(hdg)
+            except:
+                data["heading"] = None
         else:
             data["heading"] = None
+
+        # wymiary
         for d in ["dim_a","dim_b","dim_c","dim_d"]:
             v = data.get(d)
             data[d] = float(v) if v is not None else None
+
+        # nazwa statku
         data["ship_name"] = data.get("ship_name","Unknown")
+
+        # geohash
         data["geohash"]   = data.get("geohash","none")
+
         return data
     except:
         return None
 
 class CollisionDoFn(beam.DoFn):
+    """Stateful DoFn do wykrywania kolizji w ramach geohash."""
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.TupleCoder((
         beam.coders.FastPrimitivesCoder(),
         beam.coders.FastPrimitivesCoder()
@@ -92,16 +115,25 @@ class CollisionDoFn(beam.DoFn):
     def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
         gh, ship = element
         now_sec = time.time()
+
+        # Zapis
         records_state.add((ship, now_sec))
+
+        # Odczyt i filtrowanie
         old_list = list(records_state.read())
         fresh = [(s,t) for (s,t) in old_list if (now_sec - t)<=STATE_RETENTION_SEC]
+
         records_state.clear()
-        for (s,t) in fresh: records_state.add((s,t))
+        for (s,t) in fresh:
+            records_state.add((s,t))
+
+        # Wykrycie kolizji
         for (old_ship, _) in fresh:
-            if old_ship["mmsi"]==ship["mmsi"]: continue
+            if old_ship["mmsi"] == ship["mmsi"]:
+                continue
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
-            if cpa<CPA_THRESHOLD and 0<=tcpa<TCPA_THRESHOLD:
-                logger.info(f"Collision detected: {old_ship['mmsi']} & {ship['mmsi']} (CPA:{cpa},TCPA:{tcpa})")
+            if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
+                logging.info(f"Collision detected between {old_ship['mmsi']} & {ship['mmsi']} cpa={cpa},tcpa={tcpa}")
                 yield {
                     "mmsi_a": old_ship["mmsi"],
                     "mmsi_b": ship["mmsi"],
@@ -115,6 +147,7 @@ class CollisionDoFn(beam.DoFn):
                 }
 
 def remove_geohash_and_dims(row):
+    """Usunięcie geohash i dim_* z docelowego wiersza do ships_positions."""
     new_row = dict(row)
     new_row.pop("geohash", None)
     for d in ["dim_a","dim_b","dim_c","dim_d"]:
@@ -122,15 +155,22 @@ def remove_geohash_and_dims(row):
     return new_row
 
 class DeduplicateStaticDoFn(beam.DoFn):
+    """
+    Naiwna deduplikacja w pamięci (cache w worker).
+    Uwaga: Jeśli autoscaling >1 w pewnym momencie,
+    to ta metoda może pominąć część duplikatów, bo stan jest rozproszony.
+    """
     def __init__(self):
-        self.seen_mmsi = set()
+        self.seen = set()
+
     def process(self, row):
         mmsi = row["mmsi"]
-        if mmsi not in self.seen_mmsi:
-            self.seen_mmsi.add(mmsi)
+        if mmsi not in self.seen:
+            self.seen.add(mmsi)
             yield row
 
 def keep_static_fields(row):
+    """Zostawiamy tylko statyczne kolumny + update_time."""
     return {
         "mmsi": row["mmsi"],
         "ship_name": row["ship_name"],
@@ -142,33 +182,41 @@ def keep_static_fields(row):
     }
 
 class CreateBQTableDoFn(beam.DoFn):
+    """
+    Tworzy tabele w BigQuery w formacie:
+      project.dataset.table
+    (zamiast "project:dataset.table").
+    """
     def process(self, table_ref):
         from google.cloud import bigquery
         client_local = bigquery.Client()
-        table_id = table_ref['table_id']
-        schema = table_ref['schema']
-        time_partitioning = table_ref.get('time_partitioning')
-        clustering_fields = table_ref.get('clustering_fields')
+
+        table_id = table_ref['table_id']             # "project.dataset.table"
+        schema    = table_ref['schema']
+        time_part = table_ref.get('time_partitioning')
+        cluster   = table_ref.get('clustering_fields')
+
+        # Zwróć uwagę, że table_id MUSI być "project.dataset.table"
         table = bigquery.Table(table_id, schema=schema)
-        if time_partitioning:
-            table.time_partitioning = bigquery.TimePartitioning(**time_partitioning)
-        if clustering_fields:
-            table.clustering_fields = clustering_fields
+
+        if time_part:
+            table.time_partitioning = bigquery.TimePartitioning(**time_part)
+        if cluster:
+            table.clustering_fields = cluster
+
         try:
             client_local.get_table(table_id)
-            logger.info(f"Tabela {table_id} już istnieje.")
+            logging.info(f"Tabela {table_id} już istnieje.")
         except bigquery.NotFound:
             client_local.create_table(table)
-            logger.info(f"Tabela {table_id} została utworzona.")
+            logging.info(f"Utworzono nową tabelę: {table_id}")
         except Exception as e:
-            logger.error(f"Error creating table {table_id}: {e}")
+            logging.error(f"Nie można utworzyć tabeli {table_id}: {e}")
 
 def run():
     logging.getLogger().setLevel(logging.INFO)
 
-    from apache_beam.runners.dataflow.dataflow_runner import DataflowRunner
-    from google.cloud import bigquery
-
+    # Konfiguracja z .env
     project_id  = os.getenv("GOOGLE_CLOUD_PROJECT","ais-collision-detection")
     dataset     = os.getenv("LIVE_DATASET","ais_dataset_us")
     input_sub   = os.getenv("INPUT_SUBSCRIPTION","projects/ais-collision-detection/subscriptions/ais-data-sub")
@@ -177,23 +225,24 @@ def run():
     staging_loc = os.getenv("STAGING_LOCATION","gs://ais-collision-detection-bucket/staging")
     job_name    = os.getenv("JOB_NAME","ais-collision-job")
 
-    table_positions  = f"{project_id}:{dataset}.ships_positions"
-    table_collisions = f"{project_id}:{dataset}.collisions"
-    table_static     = f"{project_id}:{dataset}.ships_static"
+    # ZAMIANA ':' NA '.' W NAZWACH TABEL
+    table_positions  = f"{project_id}.{dataset}.ships_positions"
+    table_collisions = f"{project_id}.{dataset}.collisions"
+    table_static     = f"{project_id}.{dataset}.ships_static"
 
     tables_to_create = [
         {
-            'table_id': table_positions,
+            'table_id': table_positions,  # "project.dataset.ships_positions"
             'schema': {
                 "fields": [
-                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "latitude", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "longitude", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "cog", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "sog", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "heading", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
+                    {"name": "mmsi",       "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name",  "type": "STRING",  "mode": "NULLABLE"},
+                    {"name": "latitude",   "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude",  "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "cog",       "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "sog",       "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "heading",   "type": "FLOAT",   "mode": "NULLABLE"},
+                    {"name": "timestamp", "type": "TIMESTAMP","mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -207,15 +256,15 @@ def run():
             'table_id': table_collisions,
             'schema': {
                 "fields": [
-                    {"name": "mmsi_a", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "mmsi_b", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"},
-                    {"name": "cpa", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "tcpa", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "latitude_a", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "longitude_a", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "latitude_b", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "longitude_b", "type": "FLOAT", "mode": "REQUIRED"}
+                    {"name": "mmsi_a",       "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "mmsi_b",       "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "timestamp",    "type": "TIMESTAMP","mode": "REQUIRED"},
+                    {"name": "cpa",          "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "tcpa",         "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "latitude_a",   "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude_a",  "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "latitude_b",   "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude_b",  "type": "FLOAT",   "mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -229,13 +278,13 @@ def run():
             'table_id': table_static,
             'schema': {
                 "fields": [
-                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "dim_a", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "dim_b", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "dim_c", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "dim_d", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "update_time", "type": "TIMESTAMP", "mode": "REQUIRED"}
+                    {"name": "mmsi",        "type": "INTEGER","mode": "REQUIRED"},
+                    {"name": "ship_name",   "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "dim_a",       "type": "FLOAT",  "mode": "NULLABLE"},
+                    {"name": "dim_b",       "type": "FLOAT",  "mode": "NULLABLE"},
+                    {"name": "dim_c",       "type": "FLOAT",  "mode": "NULLABLE"},
+                    {"name": "dim_d",       "type": "FLOAT",  "mode": "NULLABLE"},
+                    {"name": "update_time", "type": "TIMESTAMP","mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': None,
@@ -257,25 +306,26 @@ def run():
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # A) Tworzenie tabel
+        # 1) Tworzymy tabele, o ile nie istnieją
         _ = (tables_to_create
              | "CreateTables" >> beam.ParDo(CreateBQTableDoFn()))
 
-        # B) Odczyt i parsowanie
+        # 2) Odczyt z PubSub i parse
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
         parsed = (lines
-            | "ParseAIS" >> beam.Map(parse_ais)
-            | "FilterNone" >> beam.Filter(lambda x: x is not None))
+                  | "ParseAIS"   >> beam.Map(parse_ais)
+                  | "FilterNone" >> beam.Filter(lambda x: x is not None))
 
-        # C) ships_positions
-        windowed_positions = parsed | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
-        group_pos = (windowed_positions
-            | "KeyPos" >> beam.Map(lambda r: (None, r))
-            | "GroupPos" >> beam.GroupByKey())
-        flatten_pos = group_pos | "FlattenPos" >> beam.FlatMap(lambda kv: kv[1])
-        final_positions = flatten_pos | "RemoveDims" >> beam.Map(remove_geohash_and_dims)
+        # 3) ships_positions (co 10s)
+        w_pos = (parsed
+            | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyPositions" >> beam.Map(lambda r: (None, r))
+            | "GroupPositions" >> beam.GroupByKey()
+            | "FlatPositions"  >> beam.FlatMap(lambda kv: kv[1])
+            | "RmGeohashDims"  >> beam.Map(remove_geohash_and_dims)
+        )
 
-        final_positions | "WritePositions" >> WriteToBigQuery(
+        w_pos | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
             schema="""
               mmsi:INTEGER,
@@ -292,16 +342,16 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # D) ships_static (deduplicate) – CREATE_IF_NEEDED
+        # 4) ships_static (deduplicate in-memory)
         with_dims = (parsed
             | "FilterDims" >> beam.Filter(
                 lambda r: any(r.get(dim) for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
         )
-        deduped_static = with_dims | "DedupStatic" >> beam.ParDo(DeduplicateStaticDoFn())
-        prepared_static = deduped_static | "KeepStaticFields" >> beam.Map(keep_static_fields)
+        dedup_static = with_dims | "DeduplicateStatic" >> beam.ParDo(DeduplicateStaticDoFn())
+        prep_static  = dedup_static | "PrepStatic" >> beam.Map(keep_static_fields)
 
-        prepared_static | "WriteStatic" >> WriteToBigQuery(
+        prep_static | "WriteStatic" >> WriteToBigQuery(
             table=table_static,
             schema="""
               mmsi:INTEGER,
@@ -317,18 +367,17 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # E) collisions w oknach 10s
-        keyed = parsed | "KeyByGeo" >> beam.Map(lambda r: (r["geohash"], r))
+        # 5) collisions
+        keyed = parsed | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        windowed_coll = (collisions_raw
-            | "WinColl" >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyColl" >> beam.Map(lambda c: (None, c))
-            | "GroupColl" >> beam.GroupByKey()
-            | "FlattenColl" >> beam.FlatMap(lambda kv: kv[1])
+        w_coll = (collisions_raw
+            | "WinColl"    >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyColl"    >> beam.Map(lambda c: (None, c))
+            | "GroupColl"  >> beam.GroupByKey()
+            | "FlatColl"   >> beam.FlatMap(lambda kv: kv[1])
         )
-
-        windowed_coll | "WriteCollisions" >> WriteToBigQuery(
+        w_coll | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
             schema="""
               mmsi_a:INTEGER,
