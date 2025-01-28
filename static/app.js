@@ -38,7 +38,7 @@ function initLiveApp() {
   //    nastąpi przełączanie marker vs polygon.
   map.on('zoomend', () => {
     // Ewentualnie można wymusić natychmiastowe odświeżenie, np.:
-    // fetchShips();
+  fetchShips();
   });
 
   // D) UI: suwak wektora
