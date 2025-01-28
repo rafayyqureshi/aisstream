@@ -5,6 +5,7 @@ import math
 import time
 import logging
 import datetime
+from dotenv import load_dotenv
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
@@ -14,6 +15,9 @@ from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
 from apache_beam import window
+
+# Załaduj zmienne środowiskowe z .env
+load_dotenv()
 
 # Konfiguracja loggera
 logging.basicConfig(level=logging.INFO)
@@ -135,7 +139,7 @@ def parse_ais(record_bytes):
         for dim in ["dim_a", "dim_b", "dim_c", "dim_d"]:
             val = data.get(dim)
             if val is not None:
-                try:
+                try:    
                     data[dim] = float(val)
                 except:
                     data[dim] = None
@@ -292,11 +296,12 @@ def run():
     options = PipelineOptions(
         runner='DataflowRunner',
         project=os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection"),
-        temp_location='gs://your-bucket/temp',  # Zamień na właściwą ścieżkę
-        region='your-region',                    # Zamień na właściwą region
-        num_workers=1,
-        max_num_workers=10,                      # Pozostaw autoscaling do maksymalnej liczby workerów
-        autoscaling_algorithm='THROUGHPUT_BASED' # Domyślna metoda autoscalingu
+        temp_location=os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp"),
+        staging_location=os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging"),
+        region=os.getenv("REGION", "us-east1"),
+        num_workers=1,                      # Startuj z jednym workerem
+        max_num_workers=10,                 # Maksymalna liczba workerów (autoscaling)
+        autoscaling_algorithm='THROUGHPUT_BASED'  # Domyślna metoda autoscalingu
     )
 
     # Pipeline Options
@@ -488,7 +493,7 @@ def run():
         )
 
 ###############################################################################
-# 6) Tworzenie Tabel BigQuery
+# Tworzenie Tabel BigQuery
 ###############################################################################
 class CreateBQTableDoFn(beam.DoFn):
     """
