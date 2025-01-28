@@ -116,9 +116,9 @@ function computeHullPolygonLatLon(lat0, lon0, headingDeg, a, b, c, d) {
   const localPts = [
     { x: -b, y: -c }, // rufa-left
     { x: -b, y:  d }, // rufa-right
-    { x:  a - (c + d)/2, y: d },  // dziób-right
+    { x:  a - (c + d), y: d },  // dziób-right
     { x:  a, y: 0 },             // wierzchołek dziobu
-    { x:  a - (c + d)/2, y: -c } // dziób-left
+    { x:  a - (c + d), y: -c } // dziób-left
   ];
 
   const hdgRad = (headingDeg||0) * Math.PI/180;
