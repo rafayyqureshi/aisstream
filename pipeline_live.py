@@ -31,11 +31,6 @@ TCPA_THRESHOLD       = 10.0  # minuty
 STATE_RETENTION_SEC  = 120   # 2 min
 
 ###############################################################################
-# Klient BigQuery
-###############################################################################
-client = bigquery.Client()
-
-###############################################################################
 # 1) compute_cpa_tcpa – obliczanie CPA/TCPA
 ###############################################################################
 def compute_cpa_tcpa(shipA, shipB):
@@ -292,7 +287,7 @@ class CreateBQTableDoFn(beam.DoFn):
 # 6) Główny potok
 ###############################################################################
 def run():
-    logging.getLogger().setLevel(logging.INFO)
+    # Ustawienia PipelineOptions z wykorzystaniem zmiennych środowiskowych
     options = PipelineOptions(
         runner='DataflowRunner',
         project=os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection"),
