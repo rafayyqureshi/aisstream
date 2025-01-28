@@ -194,14 +194,16 @@ class CreateBQTableDoFn(beam.DoFn):
         client_local = bigquery.Client()
 
         table_id = table_ref['table_id']             # "project.dataset.table"
-        schema    = table_ref['schema']['fields']    # Poprawka: przekazujemy listę pól
+        schema    = table_ref['schema']['fields']    # Przekazujemy listę pól
         time_part = table_ref.get('time_partitioning')
         cluster   = table_ref.get('clustering_fields')
 
         table = bigquery.Table(table_id, schema=schema)
 
         if time_part:
-            table.time_partitioning = bigquery.TimePartitioning(**time_part)
+            # Zmieniono 'type' na 'type_'
+            time_part_corrected = {k if k != 'type' else 'type_': v for k, v in time_part.items()}
+            table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
         if cluster:
             table.clustering_fields = cluster
 
@@ -363,7 +365,7 @@ def run():
               dim_d:FLOAT,
               update_time:TIMESTAMP
             """,
-            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,  # Poprawka: CREATE_IF_NEEDED
+            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,  # CREATE_IF_NEEDED
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             method="STREAMING_INSERTS",
         )
