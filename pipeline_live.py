@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
-from google.cloud.bigquery.exceptions import NotFound  # Poprawiony import
+from google.api_core.exceptions import NotFound  # Poprawiony import
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
