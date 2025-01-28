@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
+from google.cloud.bigquery.exceptions import NotFound  # Poprawiony import
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
@@ -190,7 +191,6 @@ class CreateBQTableDoFn(beam.DoFn):
     (zamiast "project:dataset.table").
     """
     def process(self, table_ref):
-        from google.cloud import bigquery
         client_local = bigquery.Client()
 
         table_id = table_ref['table_id']             # "project.dataset.table"
@@ -210,7 +210,7 @@ class CreateBQTableDoFn(beam.DoFn):
         try:
             client_local.get_table(table_id)
             logging.info(f"Tabela {table_id} już istnieje.")
-        except bigquery.NotFound:
+        except NotFound:
             client_local.create_table(table)
             logging.info(f"Utworzono nową tabelę: {table_id}")
         except Exception as e:
