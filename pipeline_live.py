@@ -19,12 +19,14 @@ from apache_beam import window
 # Załaduj zmienne z .env
 load_dotenv()
 
+# Konfiguracja loggera
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CPA_THRESHOLD        = 0.5
-TCPA_THRESHOLD       = 10.0
-STATE_RETENTION_SEC  = 120
+# Parametry kolizji i state
+CPA_THRESHOLD        = 0.5   # mile morskie
+TCPA_THRESHOLD       = 10.0  # minuty
+STATE_RETENTION_SEC  = 120   # 2 minuty
 
 def compute_cpa_tcpa(shipA, shipB):
     """Prosta funkcja do wyliczania (cpa, tcpa)."""
@@ -192,11 +194,10 @@ class CreateBQTableDoFn(beam.DoFn):
         client_local = bigquery.Client()
 
         table_id = table_ref['table_id']             # "project.dataset.table"
-        schema    = table_ref['schema']
+        schema    = table_ref['schema']['fields']    # Poprawka: przekazujemy listę pól
         time_part = table_ref.get('time_partitioning')
         cluster   = table_ref.get('clustering_fields')
 
-        # Zwróć uwagę, że table_id MUSI być "project.dataset.table"
         table = bigquery.Table(table_id, schema=schema)
 
         if time_part:
@@ -239,10 +240,10 @@ def run():
                     {"name": "ship_name",  "type": "STRING",  "mode": "NULLABLE"},
                     {"name": "latitude",   "type": "FLOAT",   "mode": "REQUIRED"},
                     {"name": "longitude",  "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "cog",       "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "sog",       "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "heading",   "type": "FLOAT",   "mode": "NULLABLE"},
-                    {"name": "timestamp", "type": "TIMESTAMP","mode": "REQUIRED"}
+                    {"name": "cog",        "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "sog",        "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "heading",    "type": "FLOAT",   "mode": "NULLABLE"},
+                    {"name": "timestamp",  "type": "TIMESTAMP","mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -256,15 +257,15 @@ def run():
             'table_id': table_collisions,
             'schema': {
                 "fields": [
-                    {"name": "mmsi_a",       "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "mmsi_b",       "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "timestamp",    "type": "TIMESTAMP","mode": "REQUIRED"},
-                    {"name": "cpa",          "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "tcpa",         "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "latitude_a",   "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude_a",  "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "latitude_b",   "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude_b",  "type": "FLOAT",   "mode": "REQUIRED"}
+                    {"name": "mmsi_a",      "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "mmsi_b",      "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "timestamp",   "type": "TIMESTAMP","mode": "REQUIRED"},
+                    {"name": "cpa",         "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "tcpa",        "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "latitude_a",  "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude_a", "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "latitude_b",  "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude_b", "type": "FLOAT",   "mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -362,7 +363,7 @@ def run():
               dim_d:FLOAT,
               update_time:TIMESTAMP
             """,
-            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,  # Poprawka: CREATE_IF_NEEDED
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             method="STREAMING_INSERTS",
         )
