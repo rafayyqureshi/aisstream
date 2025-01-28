@@ -249,7 +249,7 @@ def run():
                 ]
             },
             'time_partitioning': {
-                "type": "DAY",
+                "type_": "DAY",  # Poprawiony klucz z 'type' na 'type_'
                 "field": "timestamp",
                 "expiration_ms": None
             },
@@ -271,7 +271,7 @@ def run():
                 ]
             },
             'time_partitioning': {
-                "type": "DAY",
+                "type_": "DAY",  # Poprawiony klucz z 'type' na 'type_'
                 "field": "timestamp",
                 "expiration_ms": None
             },
@@ -305,7 +305,8 @@ def run():
         num_workers=1,
         max_num_workers=10,
         autoscaling_algorithm='THROUGHPUT_BASED',
-        save_main_session=True
+        save_main_session=True,
+        streaming=True  # Dodano ustawienie potoku jako strumieniowego
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
@@ -345,16 +346,22 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # 4) ships_static (deduplicate in-memory)
-        with_dims = (parsed
+        # 4) ships_static (deduplicate in-memory) z oknami 5 minutowymi
+        ships_static = (parsed
             | "FilterDims" >> beam.Filter(
                 lambda r: any(r.get(dim) for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
+            | "WindowStatic" >> beam.WindowInto(window.FixedWindows(300))  # 5 minut
+            | "KeyStatic" >> beam.Map(lambda r: (r["mmsi"], r))
+            | "GroupStaticByMMSI" >> beam.GroupByKey()
+            | "LatestStaticPerMMSI" >> beam.Map(
+                lambda kv: max(kv[1], key=lambda x: x["timestamp"])  # Wybierz najnowszy rekord
+            )
+            | "DeduplicateStatic" >> beam.ParDo(DeduplicateStaticDoFn())
+            | "PrepStatic" >> beam.Map(keep_static_fields)
         )
-        dedup_static = with_dims | "DeduplicateStatic" >> beam.ParDo(DeduplicateStaticDoFn())
-        prep_static  = dedup_static | "PrepStatic" >> beam.Map(keep_static_fields)
 
-        prep_static | "WriteStatic" >> WriteToBigQuery(
+        ships_static | "WriteStatic" >> WriteToBigQuery(
             table=table_static,
             schema="""
               mmsi:INTEGER,
