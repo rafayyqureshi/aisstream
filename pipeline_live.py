@@ -235,7 +235,7 @@ def run():
 
     tables_to_create = [
         {
-            'table_id': table_positions,  # "project.dataset.ships_positions"
+            'table_id': table_positions,
             'schema': {
                 "fields": [
                     {"name": "mmsi",       "type": "INTEGER", "mode": "REQUIRED"},
@@ -249,7 +249,7 @@ def run():
                 ]
             },
             'time_partitioning': {
-                "type_": "DAY",  # Poprawiony klucz z 'type' na 'type_'
+                "type_": "DAY",
                 "field": "timestamp",
                 "expiration_ms": None
             },
@@ -271,7 +271,7 @@ def run():
                 ]
             },
             'time_partitioning': {
-                "type_": "DAY",  # Poprawiony klucz z 'type' na 'type_'
+                "type_": "DAY",
                 "field": "timestamp",
                 "expiration_ms": None
             },
@@ -306,8 +306,17 @@ def run():
         max_num_workers=10,
         autoscaling_algorithm='THROUGHPUT_BASED',
         save_main_session=True,
-        streaming=True  # Dodano ustawienie potoku jako strumieniowego
+        streaming=True
     )
+
+    # Funkcja pomocnicza do filtrowania statków
+    def is_ship_long_enough(ship):
+        dim_a = ship.get("dim_a")
+        dim_b = ship.get("dim_b")
+        # Odrzucamy, jeśli brak wymiaru (None) lub jeśli długość <= 50m
+        if dim_a is None or dim_b is None:
+            return False
+        return (dim_a + dim_b) > 50
 
     with beam.Pipeline(options=pipeline_options) as p:
         # 1) Tworzymy tabele, o ile nie istnieją
@@ -372,13 +381,19 @@ def run():
               dim_d:FLOAT,
               update_time:TIMESTAMP
             """,
-            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,  # CREATE_IF_NEEDED
+            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
             method="STREAMING_INSERTS",
         )
 
         # 5) collisions
-        keyed = parsed | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+        # --- FILTRUJEMY TUTAJ PRZED DETEKCJĄ KOLIZJI ---
+        filtered_for_collision = (
+            parsed
+            | "FilterLength" >> beam.Filter(is_ship_long_enough)  # Odrzucamy statki <=50m lub bez wymiarów
+        )
+
+        keyed = filtered_for_collision | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
         w_coll = (collisions_raw
@@ -387,6 +402,7 @@ def run():
             | "GroupColl"  >> beam.GroupByKey()
             | "FlatColl"   >> beam.FlatMap(lambda kv: kv[1])
         )
+
         w_coll | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
             schema="""
