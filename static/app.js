@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – poprawiony zgodnie z #2 i #3
+// app.js (moduł LIVE) – poprawka formatu "updated Xs/m s ago"
 // ==========================
 
 // ---------------
@@ -38,7 +38,8 @@ let tcpaFilter = 10;     // [1..10] param w sliderze
  * buildShipTooltip(ship):
  *   Tworzy zawartość HTML tooltipu
  *   z podstawowymi informacjami: nazwa, COG, SOG, HDG,
- *   + ile czasu (sekundy/minuty) minęło od aktualizacji pozycji.
+ *   + ile czasu upłynęło od aktualizacji pozycji w formacie
+ *   "Xs ago" lub "Xm Ys ago".
  */
 function buildShipTooltip(ship) {
   const sogVal = (ship.sog || 0).toFixed(1);
@@ -47,7 +48,7 @@ function buildShipTooltip(ship) {
 
   let updatedAgo = '';
   if (ship.timestamp) {
-    updatedAgo = computeTimeAgo(ship.timestamp); 
+    updatedAgo = computeTimeAgo(ship.timestamp);
   }
 
   return `
@@ -61,8 +62,9 @@ function buildShipTooltip(ship) {
 
 /**
  * computeTimeAgo(timestamp):
- *   Precyzyjne odliczanie w sekundach do 59s,
- *   od 60s wzwyż – w minutach.
+ *   Zwraca czas w formacie:
+ *     - "Xs ago"  (gdy < 60s)
+ *     - "Xm Ys ago" (gdy >= 60s)
  */
 function computeTimeAgo(timestamp) {
   if (!timestamp) return '';
@@ -73,9 +75,11 @@ function computeTimeAgo(timestamp) {
 
   if (diffSec < 60) {
     return `${diffSec}s ago`;
+  } else {
+    const mm = Math.floor(diffSec / 60);
+    const ss = diffSec % 60;
+    return `${mm}m ${ss}s ago`;
   }
-  const diffMin = Math.floor(diffSec / 60);
-  return `${diffMin}min ago`;
 }
 
 // ---------------
@@ -91,7 +95,7 @@ async function initLiveApp() {
     fetchShips();
   });
 
-  // Obsługa suwaka wektora prędkości
+  // Obsługa suwaka wektora
   const vectorSlider = document.getElementById('vectorLengthSlider');
   vectorSlider.addEventListener('input', e => {
     vectorLength = parseInt(e.target.value, 10) || 15;
@@ -121,7 +125,7 @@ async function initLiveApp() {
   await fetchShips();
   await fetchCollisions();
 
-  // Interwały (np. statki co 10s, kolizje co 5s)
+  // Interwały
   shipsInterval = setInterval(fetchShips, 10000);
   collisionsInterval = setInterval(fetchCollisions, 5000);
 }
@@ -145,7 +149,7 @@ async function fetchShips() {
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
-  // Usunięcie starych
+  // Usuwamy stare
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -268,7 +272,6 @@ function updateCollisionsList() {
   });
 
   let finalColls = Object.values(pairsMap);
-  // sort wg rosnącego tcpa
   finalColls.sort((a, b) => a.tcpa - b.tcpa);
 
   if (finalColls.length === 0) {
@@ -284,10 +287,9 @@ function updateCollisionsList() {
     const cpaStr = c.cpa.toFixed(2);
     const tcpaStr = c.tcpa.toFixed(2);
 
-    // Dodajemy "updated X s ago"
-    let updatedSeconds = '';
+    let updatedStr = '';
     if (c.timestamp) {
-      updatedSeconds = computeTimeAgo(c.timestamp); 
+      updatedStr = computeTimeAgo(c.timestamp);
     }
 
     const shipAName = c.ship1_name || String(c.mmsi_a);
@@ -301,7 +303,7 @@ function updateCollisionsList() {
           <strong>${shipAName}</strong>
           ${splittedHTML}
           <strong>${shipBName}</strong><br/>
-          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min, updated: ${updatedSeconds}
+          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min, updated: ${updatedStr}
         </div>
         <button class="zoom-button">🔍</button>
       </div>
@@ -394,7 +396,7 @@ function updateSelectedShipsInfo(selectionChanged) {
     return null;
   }).filter(Boolean);
 
-  // Usuwanie starych wektorów
+  // Usuwamy wektory
   for (const mmsi in overlayVectors) {
     overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
   }
@@ -406,7 +408,7 @@ function updateSelectedShipsInfo(selectionChanged) {
     const hdgVal = (sd.heading !== undefined && sd.heading !== null)
       ? sd.heading.toFixed(1)
       : cogVal;
-    
+
     let updatedAgo = sd.timestamp ? computeTimeAgo(sd.timestamp) : '';
 
     const infoDiv = document.createElement('div');
@@ -420,17 +422,16 @@ function updateSelectedShipsInfo(selectionChanged) {
     `;
     panel.appendChild(infoDiv);
 
-    // Rysowanie wektora
+    // Rysowanie wektorów
     drawVector(sd.mmsi, sd);
   });
 
-  // 2 statki => oblicz cpa/tcpa z /calculate_cpa_tcpa
+  // 2 statki => cpa/tcpa (on-demand)
   if (selectedShips.length === 2) {
     const [mA, mB] = selectedShips;
     const sorted = [mA, mB].sort((x, y) => x - y);
     const url = `/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`;
 
-    // Dist w nm (opcjonalnie)
     let distNm = null;
     if (sData.length === 2) {
       const posA = sData[0];
@@ -494,7 +495,7 @@ function drawVector(mmsi, sd) {
 }
 
 // ---------------
-// 9) computeDistanceNm – dystans w nm
+// 9) Funkcja do obliczania dystansu w nm
 // ---------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const R_NM = 3440.065;
@@ -506,6 +507,3 @@ function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R_NM*c;
 }
-
-// createShipIcon i createShipPolygon, getShipColor*, initSharedMap, getCollisionSplitCircle
-// ... -> pozostawiamy bez zmian, jeśli nie jest wymagane w zadaniu.
