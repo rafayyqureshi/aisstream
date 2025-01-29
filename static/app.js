@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – poprawiona wersja
+// app.js (moduł LIVE) – nowa poprawiona wersja
 // ==========================
 
 // ---------------
@@ -32,6 +32,49 @@ let cpaFilter = 0.5;     // [0..0.5] param w sliderze
 let tcpaFilter = 10;     // [1..10] param w sliderze
 
 // ---------------
+// Funkcje pomocnicze
+// ---------------
+/**
+ * buildShipTooltip(ship):
+ *   Tworzy zawartość HTML tooltipu
+ *   z podstawowymi informacjami: nazwa, COG, SOG, HDG, dł.
+ */
+function buildShipTooltip(ship) {
+  const sogVal = (ship.sog || 0).toFixed(1);
+  const cogVal = (ship.cog || 0).toFixed(1);
+  const hdgVal = (ship.heading != null) ? ship.heading.toFixed(1) : cogVal;
+  let lengthStr = 'N/A';
+  if (ship.dim_a && ship.dim_b) {
+    lengthStr = (parseFloat(ship.dim_a) + parseFloat(ship.dim_b)).toFixed(1);
+  }
+
+  return `
+    <div>
+      <b>${ship.ship_name || 'Unknown'}</b><br/>
+      SOG: ${sogVal} kn | COG: ${cogVal}° | HDG: ${hdgVal}°<br/>
+      Len: ${lengthStr} m
+    </div>
+  `;
+}
+
+/**
+ * computeTimeAgo(timestamp):
+ *   Zwraca krótki opis ile czasu minęło od zdarzenia (np. "12s ago", "2min ago")
+ */
+function computeTimeAgo(timestamp) {
+  if (!timestamp) return '';
+  const now = Date.now();
+  const then = new Date(timestamp).getTime();
+  let diffSec = Math.floor((now - then) / 1000);
+  if (diffSec < 0) diffSec = 0;
+  if (diffSec < 60) {
+    return `${diffSec}s ago`;
+  }
+  const diffMin = Math.floor(diffSec / 60);
+  return `${diffMin}m ago`;
+}
+
+// ---------------
 // 3) Funkcja główna – inicjalizacja aplikacji
 // ---------------
 async function initLiveApp() {
@@ -43,8 +86,6 @@ async function initLiveApp() {
   map.addLayer(markerClusterGroup);
 
   // C) Obsługa zdarzenia zoomend:
-  //    Po zmianie zoomu odświeżamy dane, aby natychmiast przełączyć
-  //    poligony <-> ikonki (zamiast czekać na interwał 30s).
   map.on('zoomend', () => {
     fetchShips();  // Wymuszone natychmiastowe odświeżenie
   });
@@ -102,25 +143,25 @@ async function fetchShips() {
 }
 
 function updateShips(shipsArray) {
-  // A) Zbiór bieżących (aktualnie otrzymanych) MMSI
+  // A) Zbiór bieżących MMSI
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
-  // B) Usuwamy z mapy i struktur statki, których nie ma w nowym zestawie
-  //    1) Markery
+  // B) Usuwamy statki spoza nowego zestawu
+  // 1) Markery
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
       delete shipMarkers[mmsi];
     }
   }
-  //    2) Polygony
+  // 2) Polygony
   for (const mmsi in shipPolygonLayers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       map.removeLayer(shipPolygonLayers[mmsi]);
       delete shipPolygonLayers[mmsi];
     }
   }
-  //    3) Wektory
+  // 3) Wektory
   for (const mmsi in overlayVectors) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
@@ -128,58 +169,62 @@ function updateShips(shipsArray) {
     }
   }
 
-  // C) Dodajemy / aktualizujemy obiekty
+  // C) Dodajemy / aktualizujemy
   const zoomLevel = map.getZoom();
   shipsArray.forEach(ship => {
     const { mmsi, latitude, longitude } = ship;
     const isSelected = selectedShips.includes(mmsi);
 
+    // --- Funkcja do tworzenia tooltipu ---
+    const tooltipContent = buildShipTooltip(ship);
+
     if (zoomLevel < 14) {
-      // -> Rysujemy marker (ikonka)
-      // Usunięcie polygonu, jeśli istniał
+      // => Marker
       if (shipPolygonLayers[mmsi]) {
         map.removeLayer(shipPolygonLayers[mmsi]);
         delete shipPolygonLayers[mmsi];
       }
-      // Tworzymy lub aktualizujemy marker
       let marker = shipMarkers[mmsi];
       if (!marker) {
         const icon = createShipIcon(ship, isSelected, zoomLevel);
         marker = L.marker([latitude, longitude], { icon })
           .on('click', () => selectShip(mmsi));
         marker.shipData = ship;
+        // Nowy tooltip
+        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
         shipMarkers[mmsi] = marker;
         markerClusterGroup.addLayer(marker);
       } else {
         marker.setLatLng([latitude, longitude]);
         marker.setIcon(createShipIcon(ship, isSelected, zoomLevel));
         marker.shipData = ship;
+        // Aktualizacja tooltipu
+        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
       }
 
     } else {
-      // -> Rysujemy georeferencyjny polygon
-      // Usuwamy marker, jeśli istniał
+      // => Polygon
       if (shipMarkers[mmsi]) {
         markerClusterGroup.removeLayer(shipMarkers[mmsi]);
         delete shipMarkers[mmsi];
       }
-      // Usuwamy stary polygon
       if (shipPolygonLayers[mmsi]) {
         map.removeLayer(shipPolygonLayers[mmsi]);
         delete shipPolygonLayers[mmsi];
       }
-      // Tworzymy nowy polygon (jeśli mamy wymiary)
       const poly = createShipPolygon(ship);
       if (poly) {
         poly.on('click', () => selectShip(mmsi));
         poly.addTo(map);
         poly.shipData = ship;
+        // Tooltip
+        poly.bindTooltip(tooltipContent, { direction: 'top', sticky: true });
         shipPolygonLayers[mmsi] = poly;
       }
     }
   });
 
-  // D) Odśwież zaznaczone statki
+  // D) Odśwież "selected"
   updateSelectedShipsInfo(false);
 }
 
@@ -204,11 +249,10 @@ function updateCollisionsList() {
   const collisionList = document.getElementById('collision-list');
   collisionList.innerHTML = '';
 
-  // Czyścimy poprzednie markery kolizyjne z mapy
+  // Usuwamy stare markery kolizyjne
   collisionMarkers.forEach(m => map.removeLayer(m));
   collisionMarkers = [];
 
-  // Jeśli brak kolizji
   if (!collisionsData || collisionsData.length === 0) {
     const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
@@ -217,7 +261,7 @@ function updateCollisionsList() {
     return;
   }
 
-  // Mechanizm - pary A-B (bierzemy najnowsze zdarzenie)
+  // Mechanizm - pary A-B (nowsze nadpisują starsze)
   const pairsMap = {};
   collisionsData.forEach(c => {
     const a = Math.min(c.mmsi_a, c.mmsi_b);
@@ -233,7 +277,10 @@ function updateCollisionsList() {
       }
     }
   });
-  const finalColls = Object.values(pairsMap);
+  let finalColls = Object.values(pairsMap);
+
+  // -- Sortujemy wg rosnącego tcpa --
+  finalColls.sort((a, b) => a.tcpa - b.tcpa);
 
   if (finalColls.length === 0) {
     const d = document.createElement('div');
@@ -243,24 +290,30 @@ function updateCollisionsList() {
     return;
   }
 
-  // Tworzymy elementy listy i markery kolizyjne
   finalColls.forEach(c => {
+    // splitted circle => 
     const splittedHTML = getCollisionSplitCircle(c.mmsi_a, c.mmsi_b, 0, 0, shipMarkers);
-    const timeStr = c.timestamp
-      ? new Date(c.timestamp).toLocaleTimeString('pl-PL', { hour12: false })
-      : '';
     const cpaStr = c.cpa.toFixed(2);
     const tcpaStr = c.tcpa.toFixed(2);
 
-    // Element w liście kolizji
+    // Zakładamy, że backend zwraca c.ship1_name i c.ship2_name 
+    // lub fallback do c.mmsi_a i c.mmsi_b
+    const shipAName = c.ship1_name || String(c.mmsi_a);
+    const shipBName = c.ship2_name || String(c.mmsi_b);
+
+    // Czas "last updated"
+    const updatedStr = computeTimeAgo(c.timestamp);
+
+    // Wyświetlenie
     const item = document.createElement('div');
     item.classList.add('collision-item');
     item.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
+          <strong>${shipAName}</strong>
           ${splittedHTML}
-          <strong>Ships ${c.mmsi_a} – ${c.mmsi_b}</strong><br>
-          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min ${timeStr ? '@ ' + timeStr : ''}
+          <strong>${shipBName}</strong><br/>
+          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min, <span style="color:gray;">${updatedStr}</span>
         </div>
         <button class="zoom-button">🔍</button>
       </div>
@@ -284,12 +337,12 @@ function updateCollisionsList() {
       iconAnchor: [12, 12]
     });
     const mark = L.marker([latC, lonC], { icon: collisionIcon })
-      .bindTooltip(`Kolizja: ${c.mmsi_a} & ${c.mmsi_b}`, { direction: 'top', sticky: true })
+      .bindTooltip(`Kolizja: ${shipAName} & ${shipBName}`, { direction: 'top', sticky: true })
       .on('click', () => zoomToCollision(c));
     mark.addTo(map);
     collisionMarkers.push(mark);
 
-    // Obsługa kliknięcia w przycisk „zoom”
+    // Obsługa kliknięcia "zoom"
     const zoomBtn = item.querySelector('.zoom-button');
     zoomBtn.addEventListener('click', () => {
       zoomToCollision(c);
@@ -324,7 +377,7 @@ function selectShip(mmsi) {
 
 function clearSelectedShips() {
   selectedShips = [];
-  // Usuwamy wektory prędkości z mapy
+  // Wektory
   for (const mmsi in overlayVectors) {
     overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
   }
@@ -342,12 +395,11 @@ function updateSelectedShipsInfo(selectionChanged) {
   panel.innerHTML = '';
   pairInfo.innerHTML = '';
 
-  // Jeśli żaden statek nie jest zaznaczony
   if (selectedShips.length === 0) {
     return;
   }
 
-  // Budujemy listę danych o zaznaczonych statkach
+  // Lista danych z markerów / polygonów
   const sData = selectedShips.map(mmsi => {
     if (shipMarkers[mmsi]?.shipData) {
       return shipMarkers[mmsi].shipData;
@@ -357,24 +409,20 @@ function updateSelectedShipsInfo(selectionChanged) {
     return null;
   }).filter(Boolean);
 
-  // Czyścimy stare wektory prędkości
+  // Czyścimy stare wektory
   for (const mmsi in overlayVectors) {
     overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
   }
   overlayVectors = {};
 
-  // Wyświetlanie informacji i rysowanie wektorów
   sData.forEach(sd => {
     const approxLen = (sd.dim_a && sd.dim_b)
       ? (parseFloat(sd.dim_a) + parseFloat(sd.dim_b)).toFixed(1)
       : 'N/A';
-
-    // Kąt rzeczywisty (heading) lub COG
     const hdgVal = (sd.heading !== undefined && sd.heading !== null)
       ? sd.heading
       : (sd.cog || 0);
 
-    // Tworzymy blok HTML z danymi
     const infoDiv = document.createElement('div');
     infoDiv.innerHTML = `
       <b>${sd.ship_name || 'Unknown'}</b><br>
@@ -386,11 +434,11 @@ function updateSelectedShipsInfo(selectionChanged) {
     `;
     panel.appendChild(infoDiv);
 
-    // Rysowanie wektora prędkości
+    // Rysuj wektor
     drawVector(sd.mmsi, sd);
   });
 
-  // Jeżeli wybrano dokładnie 2 statki – oblicz i wyświetl CPA/TCPA
+  // Jeśli 2 statki -> oblicz CPA/TCPA
   if (selectedShips.length === 2) {
     const [mA, mB] = selectedShips;
     const posA = sData.find(s => s?.mmsi === mA);
@@ -437,34 +485,24 @@ function updateSelectedShipsInfo(selectionChanged) {
 // 8) Rysowanie wektora prędkości
 // ---------------
 function drawVector(mmsi, sd) {
-  // Sprawdzamy, czy mamy dane o prędkości
   if (!sd.sog || !sd.cog) return;
 
   const { latitude: lat, longitude: lon, sog: sogKn, cog: cogDeg } = sd;
-  const distNm = sogKn * (vectorLength / 60);  // miles w danym czasie
+  const distNm = sogKn * (vectorLength / 60);
   const cogRad = (cogDeg * Math.PI) / 180;
 
-  // 1° szerokości geograficznej ≈ 60 nm
-  // 1° długości geograficznej ≈ 60 nm * cos(lat)
-  const endLat = lat + (distNm / 60) * Math.cos(cogRad);
+  // 1° szer. geogr. ~ 60 nm
+  let endLat = lat + (distNm / 60) * Math.cos(cogRad);
   let lonScale = Math.cos(lat * Math.PI / 180);
   if (lonScale < 1e-6) lonScale = 1e-6;
-  const endLon = lon + ((distNm / 60) * Math.sin(cogRad) / lonScale);
+  let endLon = lon + ((distNm / 60) * Math.sin(cogRad) / lonScale);
 
-  // Rysujemy linię
-  const line = L.polyline(
-    [
-      [lat, lon],
-      [endLat, endLon]
-    ],
-    {
-      color: 'blue',
-      dashArray: '4,4'
-    }
-  );
+  const line = L.polyline([[lat, lon],[endLat, endLon]], {
+    color: 'blue',
+    dashArray: '4,4'
+  });
   line.addTo(map);
 
-  // Zapis w strukturze overlayVectors
   if (!overlayVectors[mmsi]) {
     overlayVectors[mmsi] = [];
   }
@@ -475,12 +513,12 @@ function drawVector(mmsi, sd) {
 // 9) Funkcja pomocnicza do obliczania dystansu (nm)
 // ---------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
-  const R_NM = 3440.065; // promień Ziemi w milach morskich
+  const R_NM = 3440.065;
   const rad = Math.PI / 180;
   const dLat = (lat2 - lat1) * rad;
   const dLon = (lon2 - lon1) * rad;
-  const a = Math.sin(dLat / 2) ** 2
-    + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R_NM * c;
+  const a = Math.sin(dLat / 2)**2
+          + Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin(dLon / 2)**2;
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R_NM*c;
 }
