@@ -20,23 +20,14 @@ def compute_cpa_tcpa(shipA, shipB):
     """
     Oblicza (CPA, TCPA) w milach morskich i minutach, 
     biorąc pod uwagę bieżącą pozycję (lat/lon), SOG (kn), 
-    i COG (deg). 
-    Zakładamy, że heading NIE wpływa na trajektorię 
-    (COG = kierunek ruchu).
-    
-    Zwraca (cpa_val, tcpa_val).
-    Jeżeli cokolwiek jest niepoprawne, zwracamy (9999, -1).
+    i COG (deg). Zakładamy, że heading NIE wpływa na trajektorię.
+
+    Zwraca (cpa_val, tcpa_val). Jeśli brak danych, zwracamy (9999, -1).
     """
-    # Sprawdź kluczowe pola
     required = ['latitude','longitude','cog','sog']
     for f in required:
         if f not in shipA or f not in shipB:
             return (9999, -1)
-
-    # Możesz pominąć statki <50m, ale to raczej 
-    # w warstwie logiki, 
-    # tut. jedynie demonstrujemy
-    # ...
 
     latRef = (shipA['latitude'] + shipB['latitude']) / 2.0
     scaleLat = 111000.0
@@ -52,7 +43,7 @@ def compute_cpa_tcpa(shipA, shipB):
     sogB = float(shipB['sog'] or 0)
 
     def cogToVector(cog_deg, sog_kn):
-        # cog w stopniach, sog w węzłach (nm/h)
+        # cog w stopniach, sog_kn w węzłach (nm/h)
         r = math.radians(cog_deg or 0)
         vx = sog_kn * math.sin(r)
         vy = sog_kn * math.cos(r)
@@ -82,10 +73,10 @@ def compute_cpa_tcpa(shipA, shipB):
         return (9999, -1)
 
     # Pozycje przy CPA
-    xA2 = xA + vxA*speed_scale*tcpa
-    yA2 = yA + vyA*speed_scale*tcpa
-    xB2 = xB + vxB*speed_scale*tcpa
-    yB2 = yB + vyB*speed_scale*tcpa
+    xA2 = xA + vxA * speed_scale * tcpa
+    yA2 = yA + vyA * speed_scale * tcpa
+    xB2 = xB + vxB * speed_scale * tcpa
+    yB2 = yB + vyB * speed_scale * tcpa
 
     dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
     dist_nm = dist_m / 1852.0
@@ -110,11 +101,6 @@ def ships():
     """
     Zwraca statki z ostatnich 2 minut, do modułu LIVE.
     Dołączamy heading (z positions) i wymiary (dim_a..d) z ships_static.
-
-    Uwaga:
-    - ANY_VALUE(ship_name) => "fallback" dla nazwy, jeśli w positions jest kilka.
-    - ORDER BY r.timestamp DESC => by ewentualnie 
-      zwrócić nowsze na górze. 
     """
     query = """
     WITH recent AS (
@@ -159,7 +145,7 @@ def ships():
             "longitude": r.longitude,
             "cog": r.cog,
             "sog": r.sog,
-            "heading": r.heading,  
+            "heading": r.heading,
             "timestamp": r.timestamp.isoformat() if r.timestamp else None,
             "ship_name": r.ship_name,
             "dim_a": r.dim_a,
@@ -174,12 +160,11 @@ def ships():
 @app.route('/collisions')
 def collisions():
     """
-    Zwraca listę kolizji w collisions, 
+    Zwraca listę kolizji w collisions,
     filtrowaną parametrami max_cpa, max_tcpa.
 
-    W razie potrzeby możesz tutaj dołączyć wymiary statków, 
-    ale póki co w collisions trzymamy tylko lat/lon 
-    z momentu zbliżenia oraz cpa/tcpa.
+    Uwaga: odfiltrowujemy kolizje "rozwiązane" (cpa > max_cpa),
+    więc statki, które już się rozminęły, nie pojawiają się na liście.
     """
     max_cpa = float(request.args.get('max_cpa', 0.5))
     max_tcpa = float(request.args.get('max_tcpa', 10.0))
@@ -255,7 +240,7 @@ def collisions():
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa():
     """
-    Wywoływane z front-endu (app.js) 
+    Wywoływane z front-endu (app.js)
     w momencie zaznaczenia 2 statków (selectedShips).
     """
     mmsi_a = request.args.get('mmsi_a', type=int)
@@ -341,7 +326,7 @@ def history_filelist():
 @app.route("/history_file")
 def history_file():
     """
-    Zwraca zawartość konkretnego pliku JSON w GCS, 
+    Zwraca zawartość konkretnego pliku JSON w GCS,
     generowanego przez pipeline history.
     """
     filename = request.args.get("file", "")
