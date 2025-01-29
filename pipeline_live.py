@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
 from google.cloud import bigquery
-from google.api_core.exceptions import NotFound  # Poprawiony import
+from google.api_core.exceptions import NotFound
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
@@ -24,7 +24,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Parametry kolizji i state
+# Parametry kolizji i retencji
 CPA_THRESHOLD        = 0.5   # mile morskie
 TCPA_THRESHOLD       = 10.0  # minuty
 STATE_RETENTION_SEC  = 120   # 2 minuty
@@ -35,12 +35,13 @@ def compute_cpa_tcpa(shipA, shipB):
     for ship in [shipA, shipB]:
         if not all(field in ship and ship[field] is not None for field in required):
             return (9999, -1)
+
     cogA_rad = math.radians(shipA['cog'])
     cogB_rad = math.radians(shipB['cog'])
     sogA = float(shipA['sog'] or 0)
     sogB = float(shipB['sog'] or 0)
 
-    # Zakładamy sog w kn -> w min => /60
+    # sog w kn -> w min => /60
     speedA = sogA / 60.0
     speedB = sogB / 60.0
 
@@ -109,7 +110,10 @@ def parse_ais(record_bytes):
         return None
 
 class CollisionDoFn(beam.DoFn):
-    """Stateful DoFn do wykrywania kolizji w ramach geohash."""
+    """
+    Stateful DoFn do wykrywania kolizji w ramach geohash.
+    Tutaj odrzucamy kolizje, jeśli cpa >= 0.5 nm lub tcpa >= 10 min.
+    """
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.TupleCoder((
         beam.coders.FastPrimitivesCoder(),
         beam.coders.FastPrimitivesCoder()
@@ -119,13 +123,14 @@ class CollisionDoFn(beam.DoFn):
         gh, ship = element
         now_sec = time.time()
 
-        # Zapis
+        # Zapis do stanu
         records_state.add((ship, now_sec))
 
-        # Odczyt i filtrowanie
+        # Czytamy dotychczasowe dane i czyścimy stare
         old_list = list(records_state.read())
         fresh = [(s,t) for (s,t) in old_list if (now_sec - t)<=STATE_RETENTION_SEC]
 
+        # Nadpisujemy nową listę w stanie
         records_state.clear()
         for (s,t) in fresh:
             records_state.add((s,t))
@@ -134,9 +139,11 @@ class CollisionDoFn(beam.DoFn):
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
+
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
+            # Filtr: cpa < 0.5 i 0 <= tcpa < 10
             if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
-                logging.info(f"Collision detected between {old_ship['mmsi']} & {ship['mmsi']} cpa={cpa},tcpa={tcpa}")
+                logging.info(f"Collision detected between {old_ship['mmsi']} & {ship['mmsi']} cpa={cpa}, tcpa={tcpa}")
                 yield {
                     "mmsi_a": old_ship["mmsi"],
                     "mmsi_b": ship["mmsi"],
@@ -160,8 +167,7 @@ def remove_geohash_and_dims(row):
 class DeduplicateStaticDoFn(beam.DoFn):
     """
     Naiwna deduplikacja w pamięci (cache w worker).
-    Uwaga: Jeśli autoscaling >1 w pewnym momencie,
-    to ta metoda może pominąć część duplikatów, bo stan jest rozproszony.
+    Jeśli autoscaling >1, to może nieco przepuszczać duplikaty.
     """
     def __init__(self):
         self.seen = set()
@@ -188,20 +194,18 @@ class CreateBQTableDoFn(beam.DoFn):
     """
     Tworzy tabele w BigQuery w formacie:
       project.dataset.table
-    (zamiast "project:dataset.table").
     """
     def process(self, table_ref):
         client_local = bigquery.Client()
 
-        table_id = table_ref['table_id']             # "project.dataset.table"
-        schema    = table_ref['schema']['fields']    # Przekazujemy listę pól
+        table_id = table_ref['table_id']
+        schema    = table_ref['schema']['fields']
         time_part = table_ref.get('time_partitioning')
         cluster   = table_ref.get('clustering_fields')
 
         table = bigquery.Table(table_id, schema=schema)
 
         if time_part:
-            # Zmieniono 'type' na 'type_'
             time_part_corrected = {k if k != 'type' else 'type_': v for k, v in time_part.items()}
             table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
         if cluster:
@@ -309,15 +313,6 @@ def run():
         streaming=True
     )
 
-    # Funkcja pomocnicza do filtrowania statków
-    def is_ship_long_enough(ship):
-        dim_a = ship.get("dim_a")
-        dim_b = ship.get("dim_b")
-        # Odrzucamy, jeśli brak wymiaru (None) lub jeśli długość <= 50m
-        if dim_a is None or dim_b is None:
-            return False
-        return (dim_a + dim_b) > 50
-
     with beam.Pipeline(options=pipeline_options) as p:
         # 1) Tworzymy tabele, o ile nie istnieją
         _ = (tables_to_create
@@ -387,13 +382,7 @@ def run():
         )
 
         # 5) collisions
-        # --- FILTRUJEMY TUTAJ PRZED DETEKCJĄ KOLIZJI ---
-        filtered_for_collision = (
-            parsed
-            | "FilterLength" >> beam.Filter(is_ship_long_enough)  # Odrzucamy statki <=50m lub bez wymiarów
-        )
-
-        keyed = filtered_for_collision | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+        keyed = parsed | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
         w_coll = (collisions_raw
