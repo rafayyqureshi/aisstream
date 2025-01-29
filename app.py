@@ -18,8 +18,8 @@ GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly"
 ###########################################################
 def compute_cpa_tcpa(shipA, shipB):
     """
-    Oblicza (CPA, TCPA) w milach morskich i minutach, 
-    biorąc pod uwagę bieżącą pozycję (lat/lon), SOG (kn), 
+    Oblicza (CPA, TCPA) w milach morskich i minutach,
+    biorąc pod uwagę bieżącą pozycję (lat/lon), SOG (kn),
     i COG (deg). Zakładamy, że heading NIE wpływa na trajektorię.
 
     Zwraca (cpa_val, tcpa_val). Jeśli brak danych, zwracamy (9999, -1).
@@ -162,9 +162,8 @@ def collisions():
     """
     Zwraca listę kolizji w collisions,
     filtrowaną parametrami max_cpa, max_tcpa.
-
-    Uwaga: odfiltrowujemy kolizje "rozwiązane" (cpa > max_cpa),
-    więc statki, które już się rozminęły, nie pojawiają się na liście.
+    Dodatkowo odrzucamy kolizje, jeśli "moment kolizji" (timestamp + tcpa)
+    już minął w stosunku do bieżącego czasu.
     """
     max_cpa = float(request.args.get('max_cpa', 0.5))
     max_tcpa = float(request.args.get('max_tcpa', 10.0))
@@ -204,6 +203,7 @@ def collisions():
     WHERE c.cpa <= {max_cpa}
       AND c.tcpa <= {max_tcpa}
       AND c.tcpa >= 0
+      AND TIMESTAMP_ADD(c.timestamp, INTERVAL CAST(c.tcpa AS INT64) MINUTE) > CURRENT_TIMESTAMP()
     ORDER BY c.timestamp DESC
     LIMIT 100
     """
