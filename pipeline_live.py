@@ -30,43 +30,91 @@ TCPA_THRESHOLD       = 10.0  # minuty
 STATE_RETENTION_SEC  = 120   # 2 minuty
 
 def compute_cpa_tcpa(shipA, shipB):
-    """Prosta funkcja do wyliczania (cpa, tcpa)."""
-    required = ['latitude', 'longitude', 'cog', 'sog']
-    for ship in [shipA, shipB]:
-        if not all(field in ship and ship[field] is not None for field in required):
+    """
+    Oblicza (CPA, TCPA) w milach morskich i minutach, 
+    wykorzystując lokalny układ współrzędnych:
+      - Pozycje lat/lon konwertowane na (x,y) w metrach,
+      - SOG w węzłach przeliczane na m/min,
+      - COG w stopniach (0° = North, rosnąco cw).
+    
+    Wymagane pola:
+      shipX['latitude']  (°)
+      shipX['longitude'] (°)
+      shipX['cog']       (°)
+      shipX['sog']       (kn)
+    
+    Zwraca (cpa_val, tcpa_val):
+      cpa_val w milach morskich (nm),
+      tcpa_val w minutach.
+    Jeśli dane nie są wystarczające, lub TCPA <0, zwraca (9999, -1).
+    """
+
+    required = ['latitude','longitude','cog','sog']
+    for f in required:
+        if f not in shipA or f not in shipB:
             return (9999, -1)
 
-    cogA_rad = math.radians(shipA['cog'])
-    cogB_rad = math.radians(shipB['cog'])
-    sogA = float(shipA['sog'] or 0)
+    # Średnia szerokość geogr. jako punkt odniesienia
+    latRef = (shipA['latitude'] + shipB['latitude']) / 2.0
+
+    # Skale w metrach (przybliżenie 1° lat ~ 111 km)
+    scaleLat = 111000.0
+    scaleLon = 111000.0 * math.cos(math.radians(latRef))
+
+    def toXY(lat, lon):
+        # Konwersja lat/lon -> (x, y) w METRACH (lokalny układ)
+        x = lon * scaleLon
+        y = lat * scaleLat
+        return (x, y)
+
+    xA, yA = toXY(shipA['latitude'], shipA['longitude'])
+    xB, yB = toXY(shipB['latitude'], shipB['longitude'])
+
+    sogA = float(shipA['sog'] or 0)  # kn
     sogB = float(shipB['sog'] or 0)
 
-    # sog w kn -> w min => /60
-    speedA = sogA / 60.0
-    speedB = sogB / 60.0
+    def cogToVector(cog_deg, sog_kn):
+        # sog_kn (nm/h), cog_deg (stopnie)
+        # vx, vy w nm/h (przed skalowaniem do m/min)
+        r = math.radians(cog_deg or 0)
+        vx = sog_kn * math.sin(r)
+        vy = sog_kn * math.cos(r)
+        return (vx, vy)
 
-    vxA = speedA * math.sin(cogA_rad)
-    vyA = speedA * math.cos(cogA_rad)
-    vxB = speedB * math.sin(cogB_rad)
-    vyB = speedB * math.cos(cogB_rad)
+    vxA_kn, vyA_kn = cogToVector(shipA['cog'], sogA)
+    vxB_kn, vyB_kn = cogToVector(shipB['cog'], sogB)
 
-    dx = shipA['longitude'] - shipB['longitude']
-    dy = shipA['latitude']  - shipB['latitude']
-    dvx = vxA - vxB
-    dvy = vyA - vyB
-    dv2 = dvx**2 + dvy**2
-    if dv2 == 0:
-        return (9999, -1)
-    pv = dx*dvx + dy*dvy
-    tcpa = -pv / dv2
+    # Pozycja względna
+    dx = xA - xB  # metry
+    dy = yA - yB  # metry
+
+    # Przeliczenie prędkości z nm/h na m/min (1 nm = 1852 m, 1 h = 60 min)
+    speed_scale = 1852.0 / 60.0
+
+    dvx = (vxA_kn - vxB_kn) * speed_scale  # m/min
+    dvy = (vyA_kn - vyB_kn) * speed_scale  # m/min
+
+    VV = dvx**2 + dvy**2
+    PV = dx * dvx + dy * dvy
+
+    if VV == 0:
+        # Statki "stoją" względem siebie w tym modelu
+        tcpa = 0.0
+    else:
+        tcpa = -PV / VV
+
     if tcpa < 0:
         return (9999, -1)
 
-    # Pozycja minimalnego zbliżenia
-    close_x = dx + dvx*tcpa
-    close_y = dy + dvy*tcpa
-    dist_deg = math.sqrt(close_x**2 + close_y**2)
-    dist_nm  = dist_deg * 60.0
+    # Pozycje przy CPA
+    xA2 = xA + vxA_kn * speed_scale * tcpa
+    yA2 = yA + vyA_kn * speed_scale * tcpa
+    xB2 = xB + vxB_kn * speed_scale * tcpa
+    yB2 = yB + vyB_kn * speed_scale * tcpa
+
+    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
+    dist_nm = dist_m / 1852.0
+
     return (dist_nm, tcpa)
 
 def parse_ais(record_bytes):
