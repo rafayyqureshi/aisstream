@@ -109,6 +109,17 @@ def parse_ais(record_bytes):
     except:
         return None
 
+def is_ship_long_enough(ship):
+    """
+    Zwraca True, jeśli statek ma dim_a i dim_b (nie None),
+    a ich suma > 50. W przeciwnym razie False.
+    """
+    dim_a = ship.get("dim_a")
+    dim_b = ship.get("dim_b")
+    if dim_a is None or dim_b is None:
+        return False
+    return (dim_a + dim_b) > 50
+
 class CollisionDoFn(beam.DoFn):
     """
     Stateful DoFn do wykrywania kolizji w ramach geohash.
@@ -391,7 +402,14 @@ def run():
         )
 
         # 5) collisions
-        keyed = parsed | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+        #  - Dodajemy dodatkowy krok "FilterShortShips" -> is_ship_long_enough
+        #    aby NIE przekazywać do CollisionDoFn statków krótszych niż 50m lub z brakiem wymiarów
+        filtered_for_collisions = (
+            parsed
+            | "FilterShortShips" >> beam.Filter(is_ship_long_enough)
+        )
+
+        keyed = filtered_for_collisions | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
         w_coll = (
