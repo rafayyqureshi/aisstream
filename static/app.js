@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – nowa poprawiona wersja
+// app.js (moduł LIVE) – poprawiony zgodnie z #2 i #3
 // ==========================
 
 // ---------------
@@ -38,17 +38,16 @@ let tcpaFilter = 10;     // [1..10] param w sliderze
  * buildShipTooltip(ship):
  *   Tworzy zawartość HTML tooltipu
  *   z podstawowymi informacjami: nazwa, COG, SOG, HDG,
- *   + ile czasu minęło od aktualizacji pozycji (Updated X s/min ago).
+ *   + ile czasu (sekundy/minuty) minęło od aktualizacji pozycji.
  */
 function buildShipTooltip(ship) {
   const sogVal = (ship.sog || 0).toFixed(1);
   const cogVal = (ship.cog || 0).toFixed(1);
   const hdgVal = (ship.heading != null) ? ship.heading.toFixed(1) : cogVal;
-  
-  // Wyliczenie ile s/min upłynęło
+
   let updatedAgo = '';
   if (ship.timestamp) {
-    updatedAgo = computeTimeAgo(ship.timestamp);
+    updatedAgo = computeTimeAgo(ship.timestamp); 
   }
 
   return `
@@ -62,8 +61,8 @@ function buildShipTooltip(ship) {
 
 /**
  * computeTimeAgo(timestamp):
- *   Zwraca krótki opis, ile czasu minęło od timestamp
- *   np. "12s ago", "5min ago".
+ *   Precyzyjne odliczanie w sekundach do 59s,
+ *   od 60s wzwyż – w minutach.
  */
 function computeTimeAgo(timestamp) {
   if (!timestamp) return '';
@@ -83,19 +82,16 @@ function computeTimeAgo(timestamp) {
 // 3) Funkcja główna – inicjalizacja aplikacji
 // ---------------
 async function initLiveApp() {
-  // A) Tworzymy mapę (z common.js)
   map = initSharedMap('map');
 
-  // B) Warstwa klastrująca do małych ikon
   markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
   map.addLayer(markerClusterGroup);
 
-  // C) Obsługa zoomend
   map.on('zoomend', () => {
     fetchShips();
   });
 
-  // D) Obsługa suwaka wektora prędkości
+  // Obsługa suwaka wektora prędkości
   const vectorSlider = document.getElementById('vectorLengthSlider');
   vectorSlider.addEventListener('input', e => {
     vectorLength = parseInt(e.target.value, 10) || 15;
@@ -103,7 +99,7 @@ async function initLiveApp() {
     updateSelectedShipsInfo(true);
   });
 
-  // E) Filtry kolizji
+  // Filtry kolizji
   const cpaSlider = document.getElementById('cpaFilter');
   cpaSlider.addEventListener('input', e => {
     cpaFilter = parseFloat(e.target.value) || 0.5;
@@ -118,15 +114,14 @@ async function initLiveApp() {
     fetchCollisions();
   });
 
-  // F) Przycisk czyszczący zaznaczone statki
   document.getElementById('clearSelectedShips')
           .addEventListener('click', clearSelectedShips);
 
-  // G) Pierwszy fetch
+  // Pierwszy fetch
   await fetchShips();
   await fetchCollisions();
 
-  // H) Interwały (statki co 10s, kolizje co 5s)
+  // Interwały (np. statki co 10s, kolizje co 5s)
   shipsInterval = setInterval(fetchShips, 10000);
   collisionsInterval = setInterval(fetchCollisions, 5000);
 }
@@ -150,7 +145,7 @@ async function fetchShips() {
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
-  // Usuwamy stare
+  // Usunięcie starych
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -175,6 +170,7 @@ function updateShips(shipsArray) {
   shipsArray.forEach(ship => {
     const { mmsi, latitude, longitude } = ship;
     const isSelected = selectedShips.includes(mmsi);
+
     const tooltipContent = buildShipTooltip(ship);
 
     if (zoomLevel < 14) {
@@ -270,9 +266,9 @@ function updateCollisionsList() {
       }
     }
   });
-  let finalColls = Object.values(pairsMap);
 
-  // Sortujemy wg rosnącego tcpa
+  let finalColls = Object.values(pairsMap);
+  // sort wg rosnącego tcpa
   finalColls.sort((a, b) => a.tcpa - b.tcpa);
 
   if (finalColls.length === 0) {
@@ -288,10 +284,14 @@ function updateCollisionsList() {
     const cpaStr = c.cpa.toFixed(2);
     const tcpaStr = c.tcpa.toFixed(2);
 
+    // Dodajemy "updated X s ago"
+    let updatedSeconds = '';
+    if (c.timestamp) {
+      updatedSeconds = computeTimeAgo(c.timestamp); 
+    }
+
     const shipAName = c.ship1_name || String(c.mmsi_a);
     const shipBName = c.ship2_name || String(c.mmsi_b);
-
-    // Usuwamy "last updated" w kolizjach – więc tu nic nie wyświetlamy
 
     const item = document.createElement('div');
     item.classList.add('collision-item');
@@ -301,7 +301,7 @@ function updateCollisionsList() {
           <strong>${shipAName}</strong>
           ${splittedHTML}
           <strong>${shipBName}</strong><br/>
-          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min
+          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min, updated: ${updatedSeconds}
         </div>
         <button class="zoom-button">🔍</button>
       </div>
@@ -394,56 +394,51 @@ function updateSelectedShipsInfo(selectionChanged) {
     return null;
   }).filter(Boolean);
 
-  // Czyścimy stare wektory
+  // Usuwanie starych wektorów
   for (const mmsi in overlayVectors) {
     overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
   }
   overlayVectors = {};
 
   sData.forEach(sd => {
-    // Zamiast Len: ... wyświetlamy "Updated X s/min ago"
-    let updatedAgo = sd.timestamp ? computeTimeAgo(sd.timestamp) : '';
-
+    const sogVal = (sd.sog || 0).toFixed(1);
+    const cogVal = (sd.cog || 0).toFixed(1);
     const hdgVal = (sd.heading !== undefined && sd.heading !== null)
-      ? sd.heading
-      : (sd.cog || 0);
-
-    // Dodajemy styl obramowania w ikonie (linia przerywana kwadrat)
-    // – w createShipIcon() jest to obsługiwane przez isSelected
-    //   => tam można ustawić rect z dash. (Patrz #5)
+      ? sd.heading.toFixed(1)
+      : cogVal;
+    
+    let updatedAgo = sd.timestamp ? computeTimeAgo(sd.timestamp) : '';
 
     const infoDiv = document.createElement('div');
     infoDiv.innerHTML = `
       <b>${sd.ship_name || 'Unknown'}</b><br>
       MMSI: ${sd.mmsi}<br>
-      SOG: ${(sd.sog || 0).toFixed(1)} kn, 
-      COG: ${(sd.cog || 0).toFixed(1)}°<br>
-      HDG: ${hdgVal.toFixed(1)}°<br>
+      SOG: ${sogVal} kn, 
+      COG: ${cogVal}°<br>
+      HDG: ${hdgVal}°<br>
       Updated: ${updatedAgo}
     `;
     panel.appendChild(infoDiv);
 
-    // Rysuj wektor
+    // Rysowanie wektora
     drawVector(sd.mmsi, sd);
   });
 
-  // Jeśli 2 statki => oblicz CPA/TCPA przez /calculate_cpa_tcpa
+  // 2 statki => oblicz cpa/tcpa z /calculate_cpa_tcpa
   if (selectedShips.length === 2) {
     const [mA, mB] = selectedShips;
-    const posA = sData.find(s => s?.mmsi === mA);
-    const posB = sData.find(s => s?.mmsi === mB);
-
-    let distNm = null;
-    if (posA && posB) {
-      distNm = computeDistanceNm(
-        posA.latitude, posA.longitude,
-        posB.latitude, posB.longitude
-      );
-    }
     const sorted = [mA, mB].sort((x, y) => x - y);
-
-    // Wzywamy backend, który używa pipeline_live.py do obliczeń
     const url = `/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`;
+
+    // Dist w nm (opcjonalnie)
+    let distNm = null;
+    if (sData.length === 2) {
+      const posA = sData[0];
+      const posB = sData[1];
+      distNm = computeDistanceNm(posA.latitude, posA.longitude,
+                                 posB.latitude, posB.longitude);
+    }
+
     fetch(url)
       .then(r => r.json())
       .then(data => {
@@ -481,7 +476,6 @@ function drawVector(mmsi, sd) {
   const distNm = sogKn * (vectorLength / 60);
   const cogRad = (cogDeg * Math.PI) / 180;
 
-  // 1° ~ 60 nm w szerokości geogr.
   let endLat = lat + (distNm / 60) * Math.cos(cogRad);
   let lonScale = Math.cos(lat * Math.PI / 180);
   if (lonScale < 1e-6) lonScale = 1e-6;
@@ -500,7 +494,7 @@ function drawVector(mmsi, sd) {
 }
 
 // ---------------
-// 9) Funkcja pomocnicza do obliczania dystansu (nm)
+// 9) computeDistanceNm – dystans w nm
 // ---------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const R_NM = 3440.065;
@@ -513,55 +507,5 @@ function computeDistanceNm(lat1, lon1, lat2, lon2) {
   return R_NM*c;
 }
 
-// ---------------
-// createShipIcon – modyfikacja obramowania
-// ---------------
-function createShipIcon(shipData, isSelected, mapZoom=5) {
-  const dimA = parseFloat(shipData.dim_a)||0;
-  const dimB = parseFloat(shipData.dim_b)||0;
-  
-  const color = getShipColorFromDims(dimA, dimB);
-  const scaleVal = getShipScale(color);
-
-  // Stwórz prosty trójkąt
-  const svgSize = 32;
-  const half = svgSize / 2;
-
-  let highlightRect = '';
-  if (isSelected) {
-    // Kwadratowa obramówka, linia przerywana
-    const w = 16 * scaleVal;
-    highlightRect = `
-      <rect x="${-w/2 - 2}" y="${-w/2 - 2}"
-            width="${w + 4}" height="${w + 4}"
-            fill="none" stroke="black"
-            stroke-width="2" stroke-dasharray="4,4" />
-    `;
-  }
-
-  // prefer heading, fallback cog
-  const hdg = (shipData.heading != null)
-    ? parseFloat(shipData.heading)
-    : parseFloat(shipData.cog || 0);
-
-  const triHTML = `
-    <polygon points="0,-8 6,8 -6,8"
-             fill="${color}" stroke="black" stroke-width="1"/>
-  `;
-
-  const svgHTML = `
-    <svg width="${svgSize}" height="${svgSize}" viewBox="0 0 32 32">
-      <g transform="translate(16,16) scale(${scaleVal}) rotate(${hdg})">
-        ${highlightRect}
-        ${triHTML}
-      </g>
-    </svg>
-  `;
-
-  return L.divIcon({
-    className: '',
-    html: svgHTML,
-    iconSize: [svgSize, svgSize],
-    iconAnchor: [half, half]
-  });
-}
+// createShipIcon i createShipPolygon, getShipColor*, initSharedMap, getCollisionSplitCircle
+// ... -> pozostawiamy bez zmian, jeśli nie jest wymagane w zadaniu.
