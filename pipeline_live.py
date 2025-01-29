@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import json
-import math
 import time
 import logging
 import datetime
@@ -17,6 +16,9 @@ import apache_beam.coders
 
 from apache_beam import window
 
+# Import wspólnej logiki CPA/TCPA z cpa_utils.py
+from cpa_utils import compute_cpa_tcpa
+
 # Załaduj zmienne z .env
 load_dotenv()
 
@@ -29,96 +31,10 @@ CPA_THRESHOLD        = 0.5   # mile morskie
 TCPA_THRESHOLD       = 10.0  # minuty
 STATE_RETENTION_SEC  = 120   # 2 minuty
 
-def compute_cpa_tcpa(shipA, shipB):
-    """
-    Oblicza (CPA, TCPA) w milach morskich i minutach, 
-    wykorzystując lokalny układ współrzędnych:
-      - Pozycje lat/lon konwertowane na (x,y) w metrach,
-      - SOG w węzłach przeliczane na m/min,
-      - COG w stopniach (0° = North, rosnąco cw).
-    
-    Wymagane pola:
-      shipX['latitude']  (°)
-      shipX['longitude'] (°)
-      shipX['cog']       (°)
-      shipX['sog']       (kn)
-    
-    Zwraca (cpa_val, tcpa_val):
-      cpa_val w milach morskich (nm),
-      tcpa_val w minutach.
-    Jeśli dane nie są wystarczające, lub TCPA <0, zwraca (9999, -1).
-    """
-
-    required = ['latitude','longitude','cog','sog']
-    for f in required:
-        if f not in shipA or f not in shipB:
-            return (9999, -1)
-
-    # Średnia szerokość geogr. jako punkt odniesienia
-    latRef = (shipA['latitude'] + shipB['latitude']) / 2.0
-
-    # Skale w metrach (przybliżenie 1° lat ~ 111 km)
-    scaleLat = 111000.0
-    scaleLon = 111000.0 * math.cos(math.radians(latRef))
-
-    def toXY(lat, lon):
-        # Konwersja lat/lon -> (x, y) w METRACH (lokalny układ)
-        x = lon * scaleLon
-        y = lat * scaleLat
-        return (x, y)
-
-    xA, yA = toXY(shipA['latitude'], shipA['longitude'])
-    xB, yB = toXY(shipB['latitude'], shipB['longitude'])
-
-    sogA = float(shipA['sog'] or 0)  # kn
-    sogB = float(shipB['sog'] or 0)
-
-    def cogToVector(cog_deg, sog_kn):
-        # sog_kn (nm/h), cog_deg (stopnie)
-        # vx, vy w nm/h (przed skalowaniem do m/min)
-        r = math.radians(cog_deg or 0)
-        vx = sog_kn * math.sin(r)
-        vy = sog_kn * math.cos(r)
-        return (vx, vy)
-
-    vxA_kn, vyA_kn = cogToVector(shipA['cog'], sogA)
-    vxB_kn, vyB_kn = cogToVector(shipB['cog'], sogB)
-
-    # Pozycja względna
-    dx = xA - xB  # metry
-    dy = yA - yB  # metry
-
-    # Przeliczenie prędkości z nm/h na m/min (1 nm = 1852 m, 1 h = 60 min)
-    speed_scale = 1852.0 / 60.0
-
-    dvx = (vxA_kn - vxB_kn) * speed_scale  # m/min
-    dvy = (vyA_kn - vyB_kn) * speed_scale  # m/min
-
-    VV = dvx**2 + dvy**2
-    PV = dx * dvx + dy * dvy
-
-    if VV == 0:
-        # Statki "stoją" względem siebie w tym modelu
-        tcpa = 0.0
-    else:
-        tcpa = -PV / VV
-
-    if tcpa < 0:
-        return (9999, -1)
-
-    # Pozycje przy CPA
-    xA2 = xA + vxA_kn * speed_scale * tcpa
-    yA2 = yA + vyA_kn * speed_scale * tcpa
-    xB2 = xB + vxB_kn * speed_scale * tcpa
-    yB2 = yB + vyB_kn * speed_scale * tcpa
-
-    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
-    dist_nm = dist_m / 1852.0
-
-    return (dist_nm, tcpa)
-
 def parse_ais(record_bytes):
-    """Parsuje JSON AIS z Pub/Sub."""
+    """
+    Parsuje JSON AIS z Pub/Sub.
+    """
     try:
         data = json.loads(record_bytes.decode("utf-8"))
         req = ["mmsi","latitude","longitude","cog","sog","timestamp"]
@@ -160,7 +76,7 @@ def parse_ais(record_bytes):
 def is_ship_long_enough(ship):
     """
     Zwraca True, jeśli statek ma dim_a i dim_b (nie None),
-    a ich suma > 50. W przeciwnym razie False.
+    a ich suma > 50m. W przeciwnym razie False.
     """
     dim_a = ship.get("dim_a")
     dim_b = ship.get("dim_b")
@@ -171,7 +87,7 @@ def is_ship_long_enough(ship):
 class CollisionDoFn(beam.DoFn):
     """
     Stateful DoFn do wykrywania kolizji w ramach geohash.
-    Tutaj odrzucamy kolizje, jeśli cpa >= 0.5 nm lub tcpa >= 10 min.
+    Odrzucamy kolizje, jeśli cpa >= 0.5 nm lub tcpa >= 10 min.
     """
     RECORDS_STATE = BagStateSpec("records_state", beam.coders.TupleCoder((
         beam.coders.FastPrimitivesCoder(),
@@ -193,11 +109,12 @@ class CollisionDoFn(beam.DoFn):
         for (s,t) in fresh:
             records_state.add((s,t))
 
-        # Wykrycie kolizji
+        # Sprawdzamy kolizje dla par (old_ship, ship)
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
 
+            # Wywołanie wspólnej funkcji do obliczania cpa/tcpa
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
             # Filtr: cpa < 0.5 i 0 <= tcpa < 10
             if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
@@ -215,7 +132,9 @@ class CollisionDoFn(beam.DoFn):
                 }
 
 def remove_geohash_and_dims(row):
-    """Usunięcie geohash i dim_* z docelowego wiersza do ships_positions."""
+    """
+    Usunięcie geohash i dim_* z docelowego wiersza do ships_positions.
+    """
     new_row = dict(row)
     new_row.pop("geohash", None)
     for d in ["dim_a","dim_b","dim_c","dim_d"]:
@@ -225,7 +144,7 @@ def remove_geohash_and_dims(row):
 class DeduplicateStaticDoFn(beam.DoFn):
     """
     Naiwna deduplikacja w pamięci (cache w worker).
-    Jeśli autoscaling >1, to może nieco przepuszczać duplikaty.
+    Jeśli autoscaling > 1, to może nieco przepuszczać duplikaty.
     """
     def __init__(self):
         self.seen = set()
@@ -237,7 +156,9 @@ class DeduplicateStaticDoFn(beam.DoFn):
             yield row
 
 def keep_static_fields(row):
-    """Zostawiamy tylko statyczne kolumny + update_time."""
+    """
+    Zostawiamy tylko statyczne kolumny + update_time.
+    """
     return {
         "mmsi": row["mmsi"],
         "ship_name": row["ship_name"],
@@ -252,6 +173,7 @@ class CreateBQTableDoFn(beam.DoFn):
     """
     Tworzy tabele w BigQuery w formacie:
       project.dataset.table
+    (zamiast "project:dataset.table").
     """
     def process(self, table_ref):
         client_local = bigquery.Client()
@@ -295,7 +217,7 @@ def run():
     table_collisions = f"{project_id}.{dataset}.collisions"
     table_static     = f"{project_id}.{dataset}.ships_static"
 
-    # Ustawiamy retencję (expiration_ms) na 24h = 86400000 ms w ships_positions i collisions
+    # Retencja 24h
     tables_to_create = [
         {
             'table_id': table_positions,
@@ -314,7 +236,6 @@ def run():
             'time_partitioning': {
                 "type_": "DAY",
                 "field": "timestamp",
-                # retencja 24h (86400000 ms)
                 "expiration_ms": 86400000
             },
             'clustering_fields': ["mmsi"]
@@ -337,7 +258,6 @@ def run():
             'time_partitioning': {
                 "type_": "DAY",
                 "field": "timestamp",
-                # retencja 24h (86400000 ms)
                 "expiration_ms": 86400000
             },
             'clustering_fields': ["mmsi_a","mmsi_b"]
@@ -355,7 +275,6 @@ def run():
                     {"name": "update_time", "type": "TIMESTAMP","mode": "REQUIRED"}
                 ]
             },
-            # Brak retencji w ships_static
             'time_partitioning': None,
             'clustering_fields': ["mmsi"]
         }
@@ -376,13 +295,13 @@ def run():
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # 1) Tworzymy tabele, o ile nie istnieją
+        # 1) Tworzymy tabele (o ile nie istnieją)
         _ = (
             tables_to_create
             | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
         )
 
-        # 2) Odczyt z PubSub i parse
+        # 2) Odczyt z PubSub -> parse
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
         parsed = (
             lines
@@ -393,13 +312,12 @@ def run():
         # 3) ships_positions (co 10s)
         w_pos = (
             parsed
-            | "WinPositions"    >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyPositions"    >> beam.Map(lambda r: (None, r))
-            | "GroupPositions"  >> beam.GroupByKey()
-            | "FlatPositions"   >> beam.FlatMap(lambda kv: kv[1])
-            | "RmGeohashDims"   >> beam.Map(remove_geohash_and_dims)
+            | "WinPositions"   >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyPositions"   >> beam.Map(lambda r: (None, r))
+            | "GroupPositions" >> beam.GroupByKey()
+            | "FlatPositions"  >> beam.FlatMap(lambda kv: kv[1])
+            | "RmGeohashDims"  >> beam.Map(remove_geohash_and_dims)
         )
-
         w_pos | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
             schema="""
@@ -417,13 +335,13 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # 4) ships_static (deduplicate in-memory) z oknami 5 minutowymi
+        # 4) ships_static (deduplicate in-memory), okna 5min
         ships_static = (
             parsed
             | "FilterDims" >> beam.Filter(
                 lambda r: any(r.get(dim) for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
-            | "WindowStatic" >> beam.WindowInto(window.FixedWindows(300))  # 5 minut
+            | "WindowStatic" >> beam.WindowInto(window.FixedWindows(300))
             | "KeyStatic"    >> beam.Map(lambda r: (r["mmsi"], r))
             | "GroupStaticByMMSI" >> beam.GroupByKey()
             | "LatestStaticPerMMSI" >> beam.Map(
@@ -432,7 +350,6 @@ def run():
             | "DeduplicateStatic" >> beam.ParDo(DeduplicateStaticDoFn())
             | "PrepStatic"        >> beam.Map(keep_static_fields)
         )
-
         ships_static | "WriteStatic" >> WriteToBigQuery(
             table=table_static,
             schema="""
@@ -450,13 +367,10 @@ def run():
         )
 
         # 5) collisions
-        #  - Dodajemy dodatkowy krok "FilterShortShips" -> is_ship_long_enough
-        #    aby NIE przekazywać do CollisionDoFn statków krótszych niż 50m lub z brakiem wymiarów
         filtered_for_collisions = (
             parsed
             | "FilterShortShips" >> beam.Filter(is_ship_long_enough)
         )
-
         keyed = filtered_for_collisions | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
@@ -467,7 +381,6 @@ def run():
             | "GroupColl" >> beam.GroupByKey()
             | "FlatColl"  >> beam.FlatMap(lambda kv: kv[1])
         )
-
         w_coll | "WriteCollisions" >> WriteToBigQuery(
             table=table_collisions,
             schema="""

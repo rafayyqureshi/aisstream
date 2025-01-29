@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – uwzględniono poprawki #1 i #2
+// app.js (moduł LIVE) – finalna wersja
 // ==========================
 
 // ---------------
@@ -36,22 +36,22 @@ let tcpaFilter = 10;     // [1..10] param w sliderze
 // ---------------
 /**
  * buildShipTooltip(ship):
- *   - Dodajemy: nazwa, SOG, COG, HDG, LEN (w metrach),
- *     + updated Xs/min
+ *   Wyświetla podstawowe info: nazwa, SOG, COG, HDG, LEN (m),
+ *   oraz czas od ostatniej aktualizacji (updated).
  */
 function buildShipTooltip(ship) {
   const sogVal = (ship.sog || 0).toFixed(1);
   const cogVal = (ship.cog || 0).toFixed(1);
   const hdgVal = (ship.heading != null) ? ship.heading.toFixed(1) : cogVal;
   
-  // LEN w metrach (dim_a + dim_b)
+  // LEN (w metrach) = (dim_a + dim_b)
   let lengthStr = 'N/A';
   if (ship.dim_a && ship.dim_b) {
-    const lenMeters = (parseFloat(ship.dim_a) + parseFloat(ship.dim_b)); // w metrach
+    const lenMeters = parseFloat(ship.dim_a) + parseFloat(ship.dim_b);
     lengthStr = lenMeters.toFixed(1);
   }
 
-  // Updated
+  // "updated"
   let updatedAgo = '';
   if (ship.timestamp) {
     updatedAgo = computeTimeAgo(ship.timestamp);
@@ -69,8 +69,7 @@ function buildShipTooltip(ship) {
 
 /**
  * computeTimeAgo(timestamp):
- *   - formatuje czas w stylu "Xs ago" gdy <60s, 
- *     lub "Xm Ys ago" gdy >=60s.
+ *   Format "Xs ago" (poniżej 60s) lub "Xm Ys ago" (1 min i więcej).
  */
 function computeTimeAgo(timestamp) {
   if (!timestamp) return '';
@@ -92,6 +91,7 @@ function computeTimeAgo(timestamp) {
 // 3) Funkcja główna – inicjalizacja aplikacji
 // ---------------
 async function initLiveApp() {
+  // Inicjalizacja mapy
   map = initSharedMap('map');
 
   markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
@@ -124,6 +124,7 @@ async function initLiveApp() {
     fetchCollisions();
   });
 
+  // Przycisk czyszczący zaznaczone statki
   document.getElementById('clearSelectedShips')
           .addEventListener('click', clearSelectedShips);
 
@@ -131,7 +132,7 @@ async function initLiveApp() {
   await fetchShips();
   await fetchCollisions();
 
-  // Interwały (przykład: 10s / 5s)
+  // Interwały (np. co 10s i 5s)
   shipsInterval = setInterval(fetchShips, 10000);
   collisionsInterval = setInterval(fetchCollisions, 5000);
 }
@@ -155,7 +156,7 @@ async function fetchShips() {
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
-  // Usuwanie starych
+  // Usuwamy statki, których nie ma w nowym zestawie
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -175,15 +176,14 @@ function updateShips(shipsArray) {
     }
   }
 
-  // Dodanie/aktualizacja
   const zoomLevel = map.getZoom();
   shipsArray.forEach(ship => {
     const { mmsi, latitude, longitude } = ship;
     const isSelected = selectedShips.includes(mmsi);
-
     const tooltipContent = buildShipTooltip(ship);
 
     if (zoomLevel < 14) {
+      // Ikonka marker
       if (shipPolygonLayers[mmsi]) {
         map.removeLayer(shipPolygonLayers[mmsi]);
         delete shipPolygonLayers[mmsi];
@@ -204,6 +204,7 @@ function updateShips(shipsArray) {
         marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
       }
     } else {
+      // Poligon
       if (shipMarkers[mmsi]) {
         markerClusterGroup.removeLayer(shipMarkers[mmsi]);
         delete shipMarkers[mmsi];
@@ -258,7 +259,7 @@ function updateCollisionsList() {
     return;
   }
 
-  // Najnowsze pary
+  // Mechanizm: pary A-B (nowsze nadpisują starsze)
   const pairsMap = {};
   collisionsData.forEach(c => {
     const a = Math.min(c.mmsi_a, c.mmsi_b);
@@ -314,7 +315,7 @@ function updateCollisionsList() {
     `;
     collisionList.appendChild(item);
 
-    // Marker kolizyjny
+    // Dodanie markera kolizyjnego
     const latC = (c.latitude_a + c.latitude_b) / 2;
     const lonC = (c.longitude_a + c.longitude_b) / 2;
     const collisionIcon = L.divIcon({
@@ -336,20 +337,19 @@ function updateCollisionsList() {
     mark.addTo(map);
     collisionMarkers.push(mark);
 
+    // Obsługa przycisku zoom
     const zoomBtn = item.querySelector('.zoom-button');
     zoomBtn.addEventListener('click', () => {
       zoomToCollision(c);
 
-      // [1] Automatycznie dopasuj wektor do tcpa
+      // Ustaw automatycznie długość wektorów na ~tcpa
       let newVectorLen = Math.round(c.tcpa);
       if (newVectorLen < 1) newVectorLen = 1;
 
-      // Ustaw suwak i wewnętrzną zmienną
       document.getElementById('vectorLengthSlider').value = newVectorLen;
       document.getElementById('vectorLengthValue').textContent = newVectorLen;
       vectorLength = newVectorLen;
 
-      // Odśwież wektory w panelu selected
       updateSelectedShipsInfo(true);
     });
   });
@@ -403,6 +403,7 @@ function updateSelectedShipsInfo(selectionChanged) {
     return;
   }
 
+  // Budujemy listę statków z markerów / polygonów
   const sData = selectedShips.map(mmsi => {
     if (shipMarkers[mmsi]?.shipData) {
       return shipMarkers[mmsi].shipData;
@@ -412,6 +413,7 @@ function updateSelectedShipsInfo(selectionChanged) {
     return null;
   }).filter(Boolean);
 
+  // Usuwanie starych wektorów
   for (const mmsi in overlayVectors) {
     overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
   }
@@ -424,13 +426,14 @@ function updateSelectedShipsInfo(selectionChanged) {
       ? sd.heading.toFixed(1)
       : cogVal;
 
-    // LEN (m)
+    // LEN w metrach
     let lengthStr = 'N/A';
     if (sd.dim_a && sd.dim_b) {
       const lenMeters = parseFloat(sd.dim_a) + parseFloat(sd.dim_b);
       lengthStr = lenMeters.toFixed(1);
     }
 
+    // updated
     let updatedAgo = sd.timestamp ? computeTimeAgo(sd.timestamp) : '';
 
     const infoDiv = document.createElement('div');
@@ -439,16 +442,16 @@ function updateSelectedShipsInfo(selectionChanged) {
       MMSI: ${sd.mmsi}<br>
       SOG: ${sogVal} kn, 
       COG: ${cogVal}°<br>
-      HDG: ${hdgVal}°,
-      LEN: ${lengthStr} m<br>
+      HDG: ${hdgVal}°, LEN: ${lengthStr} m<br>
       Updated: ${updatedAgo}
     `;
     panel.appendChild(infoDiv);
 
+    // Rysujemy wektor prędkości
     drawVector(sd.mmsi, sd);
   });
 
-  // 2 statki => cpa/tcpa z /calculate_cpa_tcpa
+  // Jeśli wybrano 2 statki -> liczymy cpa/tcpa
   if (selectedShips.length === 2) {
     const [mA, mB] = selectedShips;
     const sorted = [mA, mB].sort((x, y) => x - y);
@@ -456,8 +459,7 @@ function updateSelectedShipsInfo(selectionChanged) {
 
     let distNm = null;
     if (sData.length === 2) {
-      const posA = sData[0];
-      const posB = sData[1];
+      const [posA, posB] = sData;
       distNm = computeDistanceNm(posA.latitude, posA.longitude,
                                  posB.latitude, posB.longitude);
     }
@@ -499,12 +501,12 @@ function drawVector(mmsi, sd) {
   const distNm = sogKn * (vectorLength / 60);
   const cogRad = (cogDeg * Math.PI) / 180;
 
-  let endLat = lat + (distNm / 60) * Math.cos(cogRad);
+  const endLat = lat + (distNm / 60) * Math.cos(cogRad);
   let lonScale = Math.cos(lat * Math.PI / 180);
   if (lonScale < 1e-6) lonScale = 1e-6;
-  let endLon = lon + ((distNm / 60) * Math.sin(cogRad) / lonScale);
+  const endLon = lon + ((distNm / 60) * Math.sin(cogRad) / lonScale);
 
-  const line = L.polyline([[lat, lon],[endLat, endLon]], {
+  const line = L.polyline([[lat, lon], [endLat, endLon]], {
     color: 'blue',
     dashArray: '4,4'
   });
@@ -517,7 +519,7 @@ function drawVector(mmsi, sd) {
 }
 
 // ---------------
-// 9) computeDistanceNm
+// 9) computeDistanceNm (pomocniczo, dystans w nm)
 // ---------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const R_NM = 3440.065;
@@ -526,6 +528,6 @@ function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const dLon = (lon2 - lon1) * rad;
   const a = Math.sin(dLat / 2)**2
           + Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin(dLon / 2)**2;
-  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R_NM*c;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R_NM * c;
 }
