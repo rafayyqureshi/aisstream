@@ -1,359 +1,531 @@
-import os
-import math
-from datetime import datetime, timedelta
+// ==========================
+// app.js (moduł LIVE) – uwzględniono poprawki #1 i #2
+// ==========================
 
-from flask import Flask, jsonify, render_template, request
-from google.cloud import bigquery
-from google.cloud import storage
+// ---------------
+// 1) Zdarzenia startowe
+// ---------------
+document.addEventListener('DOMContentLoaded', () => {
+  initLiveApp().catch(err => console.error("Błąd initLiveApp:", err));
+});
 
-app = Flask(__name__, static_folder='static', template_folder='templates')
-client = bigquery.Client()
+// ---------------
+// 2) Zmienne globalne
+// ---------------
+let map;
+let markerClusterGroup;
+let shipMarkers = {};         // klucz: mmsi -> L.marker
+let shipPolygonLayers = {};   // klucz: mmsi -> L.polygon
+let overlayVectors = {};      // klucz: mmsi -> [L.Polyline wektorów prędkości]
 
-# Konfiguracja GCS do modułu history
-GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bucket")
-GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
+let collisionMarkers = [];
+let collisionsData = [];
+let selectedShips = [];       // wybrane statki (max 2)
 
-###########################################################
-# Funkcje pomocnicze
-###########################################################
-def compute_cpa_tcpa(shipA, shipB):
-    """
-    Oblicza (CPA, TCPA) w milach morskich i minutach,
-    biorąc pod uwagę bieżącą pozycję (lat/lon), SOG (kn),
-    i COG (deg). Zakładamy, że heading NIE wpływa na trajektorię.
+// Interwały
+let shipsInterval = null;
+let collisionsInterval = null;
 
-    Zwraca (cpa_val, tcpa_val). Jeśli brak danych, zwracamy (9999, -1).
-    """
-    required = ['latitude','longitude','cog','sog']
-    for f in required:
-        if f not in shipA or f not in shipB:
-            return (9999, -1)
+// Parametry i filtry
+let vectorLength = 15;   // minuty (dla rysowania wektora prędkości)
+let cpaFilter = 0.5;     // [0..0.5] param w sliderze
+let tcpaFilter = 10;     // [1..10] param w sliderze
 
-    latRef = (shipA['latitude'] + shipB['latitude']) / 2.0
-    scaleLat = 111000.0
-    scaleLon = 111000.0 * math.cos(math.radians(latRef))
+// ---------------
+// Funkcje pomocnicze
+// ---------------
+/**
+ * buildShipTooltip(ship):
+ *   - Dodajemy: nazwa, SOG, COG, HDG, LEN (w metrach),
+ *     + updated Xs/min
+ */
+function buildShipTooltip(ship) {
+  const sogVal = (ship.sog || 0).toFixed(1);
+  const cogVal = (ship.cog || 0).toFixed(1);
+  const hdgVal = (ship.heading != null) ? ship.heading.toFixed(1) : cogVal;
+  
+  // LEN w metrach (dim_a + dim_b)
+  let lengthStr = 'N/A';
+  if (ship.dim_a && ship.dim_b) {
+    const lenMeters = (parseFloat(ship.dim_a) + parseFloat(ship.dim_b)); // w metrach
+    lengthStr = lenMeters.toFixed(1);
+  }
 
-    def toXY(lat, lon):
-        return (lon * scaleLon, lat * scaleLat)
+  // Updated
+  let updatedAgo = '';
+  if (ship.timestamp) {
+    updatedAgo = computeTimeAgo(ship.timestamp);
+  }
 
-    xA, yA = toXY(shipA['latitude'], shipA['longitude'])
-    xB, yB = toXY(shipB['latitude'], shipB['longitude'])
+  return `
+    <div>
+      <b>${ship.ship_name || 'Unknown'}</b><br/>
+      SOG: ${sogVal} kn | COG: ${cogVal}°<br/>
+      HDG: ${hdgVal}°, LEN: ${lengthStr} m<br/>
+      Updated: ${updatedAgo}
+    </div>
+  `;
+}
 
-    sogA = float(shipA['sog'] or 0)
-    sogB = float(shipB['sog'] or 0)
+/**
+ * computeTimeAgo(timestamp):
+ *   - formatuje czas w stylu "Xs ago" gdy <60s, 
+ *     lub "Xm Ys ago" gdy >=60s.
+ */
+function computeTimeAgo(timestamp) {
+  if (!timestamp) return '';
+  const now = Date.now();
+  const then = new Date(timestamp).getTime();
+  let diffSec = Math.floor((now - then) / 1000);
+  if (diffSec < 0) diffSec = 0;
 
-    def cogToVector(cog_deg, sog_kn):
-        # cog w stopniach, sog_kn w węzłach (nm/h)
-        r = math.radians(cog_deg or 0)
-        vx = sog_kn * math.sin(r)
-        vy = sog_kn * math.cos(r)
-        return (vx, vy)
+  if (diffSec < 60) {
+    return `${diffSec}s ago`;
+  } else {
+    const mm = Math.floor(diffSec / 60);
+    const ss = diffSec % 60;
+    return `${mm}m ${ss}s ago`;
+  }
+}
 
-    vxA, vyA = cogToVector(shipA['cog'], sogA)
-    vxB, vyB = cogToVector(shipB['cog'], sogB)
+// ---------------
+// 3) Funkcja główna – inicjalizacja aplikacji
+// ---------------
+async function initLiveApp() {
+  map = initSharedMap('map');
 
-    dx = xA - xB
-    dy = yA - yB
+  markerClusterGroup = L.markerClusterGroup({ maxClusterRadius: 1 });
+  map.addLayer(markerClusterGroup);
 
-    # sog w nm/h => w m/min
-    speed_scale = 1852.0 / 60.0
+  map.on('zoomend', () => {
+    fetchShips();
+  });
 
-    dvx = (vxA - vxB) * speed_scale
-    dvy = (vyA - vyB) * speed_scale
+  // Suwak wektora prędkości
+  const vectorSlider = document.getElementById('vectorLengthSlider');
+  vectorSlider.addEventListener('input', e => {
+    vectorLength = parseInt(e.target.value, 10) || 15;
+    document.getElementById('vectorLengthValue').textContent = vectorLength;
+    updateSelectedShipsInfo(true);
+  });
 
-    VV = dvx**2 + dvy**2
-    PV = dx * dvx + dy * dvy
+  // Filtry kolizji
+  const cpaSlider = document.getElementById('cpaFilter');
+  cpaSlider.addEventListener('input', e => {
+    cpaFilter = parseFloat(e.target.value) || 0.5;
+    document.getElementById('cpaValue').textContent = cpaFilter.toFixed(2);
+    fetchCollisions();
+  });
 
-    if VV == 0:
-        tcpa = 0.0
-    else:
-        tcpa = -PV / VV
+  const tcpaSlider = document.getElementById('tcpaFilter');
+  tcpaSlider.addEventListener('input', e => {
+    tcpaFilter = parseFloat(e.target.value) || 10;
+    document.getElementById('tcpaValue').textContent = tcpaFilter.toFixed(1);
+    fetchCollisions();
+  });
 
-    if tcpa < 0:
-        return (9999, -1)
+  document.getElementById('clearSelectedShips')
+          .addEventListener('click', clearSelectedShips);
 
-    # Pozycje przy CPA
-    xA2 = xA + vxA * speed_scale * tcpa
-    yA2 = yA + vyA * speed_scale * tcpa
-    xB2 = xB + vxB * speed_scale * tcpa
-    yB2 = yB + vyB * speed_scale * tcpa
+  // Pierwszy fetch
+  await fetchShips();
+  await fetchCollisions();
 
-    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
-    dist_nm = dist_m / 1852.0
-    return (dist_nm, tcpa)
+  // Interwały (przykład: 10s / 5s)
+  shipsInterval = setInterval(fetchShips, 10000);
+  collisionsInterval = setInterval(fetchCollisions, 5000);
+}
 
-###########################################################
-# Endpoints
-###########################################################
+// ---------------
+// 4) Pobieranie i wyświetlanie statków
+// ---------------
+async function fetchShips() {
+  try {
+    const res = await fetch('/ships');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} - ${res.statusText}`);
+    }
+    const data = await res.json();
+    updateShips(data);
+  } catch (err) {
+    console.error("Błąd /ships:", err);
+  }
+}
 
-# 1) Strona główna – Live Map
-@app.route('/')
-def index():
-    """
-    Frontend LIVE (index.html).
-    """
-    return render_template('index.html')
+function updateShips(shipsArray) {
+  const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
+  // Usuwanie starych
+  for (const mmsi in shipMarkers) {
+    if (!currentSet.has(parseInt(mmsi, 10))) {
+      markerClusterGroup.removeLayer(shipMarkers[mmsi]);
+      delete shipMarkers[mmsi];
+    }
+  }
+  for (const mmsi in shipPolygonLayers) {
+    if (!currentSet.has(parseInt(mmsi, 10))) {
+      map.removeLayer(shipPolygonLayers[mmsi]);
+      delete shipPolygonLayers[mmsi];
+    }
+  }
+  for (const mmsi in overlayVectors) {
+    if (!currentSet.has(parseInt(mmsi, 10))) {
+      overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
+      delete overlayVectors[mmsi];
+    }
+  }
 
-# 2) Endpoint /ships
-@app.route('/ships')
-def ships():
-    """
-    Zwraca statki z ostatnich 2 minut, do modułu LIVE.
-    Dołączamy heading (z positions) i wymiary (dim_a..d) z ships_static.
-    """
-    query = """
-    WITH recent AS (
-      SELECT
-        mmsi,
-        latitude,
-        longitude,
-        cog,
-        sog,
-        heading,
-        timestamp,
-        ANY_VALUE(ship_name) AS dyn_name
-      FROM `ais_dataset_us.ships_positions`
-      WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
-      GROUP BY mmsi, latitude, longitude, cog, sog, heading, timestamp
-    )
-    SELECT
-      r.mmsi,
-      r.latitude,
-      r.longitude,
-      r.cog,
-      r.sog,
-      r.heading,
-      r.timestamp,
-      r.dyn_name AS ship_name,
-      s.dim_a,
-      s.dim_b,
-      s.dim_c,
-      s.dim_d
-    FROM recent r
-    LEFT JOIN `ais_dataset_us.ships_static` s
-      ON r.mmsi = s.mmsi
-    ORDER BY r.timestamp DESC
-    """
-    rows = list(client.query(query).result())
+  // Dodanie/aktualizacja
+  const zoomLevel = map.getZoom();
+  shipsArray.forEach(ship => {
+    const { mmsi, latitude, longitude } = ship;
+    const isSelected = selectedShips.includes(mmsi);
 
-    out = []
-    for r in rows:
-        out.append({
-            "mmsi": r.mmsi,
-            "latitude": r.latitude,
-            "longitude": r.longitude,
-            "cog": r.cog,
-            "sog": r.sog,
-            "heading": r.heading,
-            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            "ship_name": r.ship_name,
-            "dim_a": r.dim_a,
-            "dim_b": r.dim_b,
-            "dim_c": r.dim_c,
-            "dim_d": r.dim_d
-        })
-    return jsonify(out)
+    const tooltipContent = buildShipTooltip(ship);
 
+    if (zoomLevel < 14) {
+      if (shipPolygonLayers[mmsi]) {
+        map.removeLayer(shipPolygonLayers[mmsi]);
+        delete shipPolygonLayers[mmsi];
+      }
+      let marker = shipMarkers[mmsi];
+      if (!marker) {
+        const icon = createShipIcon(ship, isSelected, zoomLevel);
+        marker = L.marker([latitude, longitude], { icon })
+          .on('click', () => selectShip(mmsi));
+        marker.shipData = ship;
+        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
+        shipMarkers[mmsi] = marker;
+        markerClusterGroup.addLayer(marker);
+      } else {
+        marker.setLatLng([latitude, longitude]);
+        marker.setIcon(createShipIcon(ship, isSelected, zoomLevel));
+        marker.shipData = ship;
+        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
+      }
+    } else {
+      if (shipMarkers[mmsi]) {
+        markerClusterGroup.removeLayer(shipMarkers[mmsi]);
+        delete shipMarkers[mmsi];
+      }
+      if (shipPolygonLayers[mmsi]) {
+        map.removeLayer(shipPolygonLayers[mmsi]);
+        delete shipPolygonLayers[mmsi];
+      }
+      const poly = createShipPolygon(ship);
+      if (poly) {
+        poly.on('click', () => selectShip(mmsi));
+        poly.addTo(map);
+        poly.shipData = ship;
+        poly.bindTooltip(tooltipContent, { direction: 'top', sticky: true });
+        shipPolygonLayers[mmsi] = poly;
+      }
+    }
+  });
 
-# 3) Endpoint /collisions
-@app.route('/collisions')
-def collisions():
-    """
-    Zwraca listę kolizji w collisions,
-    filtrowaną parametrami max_cpa, max_tcpa.
-    Dodatkowo odrzucamy kolizje, jeśli "moment kolizji" (timestamp + tcpa)
-    już minął w stosunku do bieżącego czasu.
-    """
-    max_cpa = float(request.args.get('max_cpa', 0.5))
-    max_tcpa = float(request.args.get('max_tcpa', 10.0))
+  updateSelectedShipsInfo(false);
+}
 
-    query = f"""
-    WITH latestA AS (
-      SELECT
-        mmsi,
-        ANY_VALUE(ship_name) AS ship_name,
-        MAX(timestamp) AS latest_ts
-      FROM `ais_dataset_us.ships_positions`
-      GROUP BY mmsi
-    ),
-    latestB AS (
-      SELECT
-        mmsi,
-        ANY_VALUE(ship_name) AS ship_name,
-        MAX(timestamp) AS latest_ts
-      FROM `ais_dataset_us.ships_positions`
-      GROUP BY mmsi
-    )
-    SELECT
-      c.mmsi_a,
-      c.mmsi_b,
-      c.timestamp,
-      c.cpa,
-      c.tcpa,
-      c.latitude_a,
-      c.longitude_a,
-      c.latitude_b,
-      c.longitude_b,
-      la.ship_name AS ship1_name,
-      lb.ship_name AS ship2_name
-    FROM `ais_dataset_us.collisions` c
-    LEFT JOIN latestA la ON la.mmsi = c.mmsi_a
-    LEFT JOIN latestB lb ON lb.mmsi = c.mmsi_b
-    WHERE c.cpa <= {max_cpa}
-      AND c.tcpa <= {max_tcpa}
-      AND c.tcpa >= 0
-      AND TIMESTAMP_ADD(c.timestamp, INTERVAL CAST(c.tcpa AS INT64) MINUTE) > CURRENT_TIMESTAMP()
-    ORDER BY c.timestamp DESC
-    LIMIT 100
-    """
-    rows = list(client.query(query).result())
+// ---------------
+// 5) Obsługa kolizji
+// ---------------
+async function fetchCollisions() {
+  try {
+    const url = `/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} – ${res.statusText}`);
+    }
+    collisionsData = await res.json() || [];
+    updateCollisionsList();
+  } catch (err) {
+    console.error("Błąd /collisions:", err);
+  }
+}
 
-    result = []
-    for r in rows:
-        shipA = r.ship1_name or str(r.mmsi_a)
-        shipB = r.ship2_name or str(r.mmsi_b)
-        t_str = r.timestamp.isoformat() if r.timestamp else None
+function updateCollisionsList() {
+  const collisionList = document.getElementById('collision-list');
+  collisionList.innerHTML = '';
 
-        collision_id = None
-        if r.timestamp:
-            collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}"
+  collisionMarkers.forEach(m => map.removeLayer(m));
+  collisionMarkers = [];
 
-        result.append({
-            "collision_id": collision_id,
-            "mmsi_a": r.mmsi_a,
-            "mmsi_b": r.mmsi_b,
-            "timestamp": t_str,
-            "cpa": r.cpa,
-            "tcpa": r.tcpa,
-            "latitude_a": r.latitude_a,
-            "longitude_a": r.longitude_a,
-            "latitude_b": r.latitude_b,
-            "longitude_b": r.longitude_b,
-            "ship1_name": shipA,
-            "ship2_name": shipB
-        })
-    return jsonify(result)
+  if (!collisionsData || collisionsData.length === 0) {
+    const noItem = document.createElement('div');
+    noItem.classList.add('collision-item');
+    noItem.innerHTML = '<i>Brak bieżących kolizji</i>';
+    collisionList.appendChild(noItem);
+    return;
+  }
 
+  // Najnowsze pary
+  const pairsMap = {};
+  collisionsData.forEach(c => {
+    const a = Math.min(c.mmsi_a, c.mmsi_b);
+    const b = Math.max(c.mmsi_a, c.mmsi_b);
+    const key = `${a}_${b}`;
+    if (!pairsMap[key]) {
+      pairsMap[key] = c;
+    } else {
+      const oldT = new Date(pairsMap[key].timestamp).getTime();
+      const newT = new Date(c.timestamp).getTime();
+      if (newT > oldT) {
+        pairsMap[key] = c;
+      }
+    }
+  });
 
-# 4) On-demand CPA/TCPA
-@app.route('/calculate_cpa_tcpa')
-def calculate_cpa_tcpa():
-    """
-    Wywoływane z front-endu (app.js)
-    w momencie zaznaczenia 2 statków (selectedShips).
-    """
-    mmsi_a = request.args.get('mmsi_a', type=int)
-    mmsi_b = request.args.get('mmsi_b', type=int)
-    if not mmsi_a or not mmsi_b:
-        return jsonify({'error': 'Missing mmsi_a or mmsi_b'}), 400
+  let finalColls = Object.values(pairsMap);
+  finalColls.sort((a, b) => a.tcpa - b.tcpa);
 
-    # Bierzemy ostanie 2 min
-    query = f"""
-    SELECT
-      mmsi,
-      latitude,
-      longitude,
-      cog,
-      sog
-    FROM `ais_dataset_us.ships_positions`
-    WHERE mmsi IN ({mmsi_a}, {mmsi_b})
-      AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
-    GROUP BY mmsi, latitude, longitude, cog, sog
-    ORDER BY MAX(timestamp) DESC
-    """
-    rows = list(client.query(query).result())
+  if (finalColls.length === 0) {
+    const d = document.createElement('div');
+    d.classList.add('collision-item');
+    d.innerHTML = '<i>Brak bieżących kolizji</i>';
+    collisionList.appendChild(d);
+    return;
+  }
 
-    data_by_mmsi = {}
-    for r in rows:
-        data_by_mmsi[r.mmsi] = {
-            'mmsi': r.mmsi,
-            'latitude': r.latitude,
-            'longitude': r.longitude,
-            'cog': r.cog,
-            'sog': r.sog
+  finalColls.forEach(c => {
+    const splittedHTML = getCollisionSplitCircle(c.mmsi_a, c.mmsi_b, 0, 0, shipMarkers);
+    const cpaStr = c.cpa.toFixed(2);
+    const tcpaStr = c.tcpa.toFixed(2);
+
+    let updatedStr = '';
+    if (c.timestamp) {
+      updatedStr = computeTimeAgo(c.timestamp);
+    }
+
+    const shipAName = c.ship1_name || String(c.mmsi_a);
+    const shipBName = c.ship2_name || String(c.mmsi_b);
+
+    const item = document.createElement('div');
+    item.classList.add('collision-item');
+    item.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <strong>${shipAName}</strong>
+          ${splittedHTML}
+          <strong>${shipBName}</strong><br/>
+          CPA: ${cpaStr} nm, TCPA: ${tcpaStr} min, updated: ${updatedStr}
+        </div>
+        <button class="zoom-button">🔍</button>
+      </div>
+    `;
+    collisionList.appendChild(item);
+
+    // Marker kolizyjny
+    const latC = (c.latitude_a + c.latitude_b) / 2;
+    const lonC = (c.longitude_a + c.longitude_b) / 2;
+    const collisionIcon = L.divIcon({
+      className: '',
+      html: `
+        <svg width="24" height="24" viewBox="-12 -12 24 24">
+          <path d="M0,-7 7,7 -7,7 Z"
+                fill="yellow" stroke="red" stroke-width="2"/>
+          <text x="0" y="4" text-anchor="middle"
+                font-size="8" fill="red">!</text>
+        </svg>
+      `,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
+    const mark = L.marker([latC, lonC], { icon: collisionIcon })
+      .bindTooltip(`Kolizja: ${shipAName} & ${shipBName}`, { direction: 'top', sticky: true })
+      .on('click', () => zoomToCollision(c));
+    mark.addTo(map);
+    collisionMarkers.push(mark);
+
+    const zoomBtn = item.querySelector('.zoom-button');
+    zoomBtn.addEventListener('click', () => {
+      zoomToCollision(c);
+
+      // [1] Automatycznie dopasuj wektor do tcpa
+      let newVectorLen = Math.round(c.tcpa);
+      if (newVectorLen < 1) newVectorLen = 1;
+
+      // Ustaw suwak i wewnętrzną zmienną
+      document.getElementById('vectorLengthSlider').value = newVectorLen;
+      document.getElementById('vectorLengthValue').textContent = newVectorLen;
+      vectorLength = newVectorLen;
+
+      // Odśwież wektory w panelu selected
+      updateSelectedShipsInfo(true);
+    });
+  });
+}
+
+function zoomToCollision(c) {
+  const bounds = L.latLngBounds([
+    [c.latitude_a, c.longitude_a],
+    [c.latitude_b, c.longitude_b]
+  ]);
+  map.fitBounds(bounds, { padding: [15, 15], maxZoom: 13 });
+
+  clearSelectedShips();
+  selectShip(c.mmsi_a);
+  selectShip(c.mmsi_b);
+}
+
+// ---------------
+// 6) Zaznaczanie statków
+// ---------------
+function selectShip(mmsi) {
+  if (!selectedShips.includes(mmsi)) {
+    if (selectedShips.length >= 2) {
+      selectedShips.shift();
+    }
+    selectedShips.push(mmsi);
+    updateSelectedShipsInfo(true);
+  }
+}
+
+function clearSelectedShips() {
+  selectedShips = [];
+  for (const mmsi in overlayVectors) {
+    overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
+  }
+  overlayVectors = {};
+  updateSelectedShipsInfo(false);
+}
+
+// ---------------
+// 7) Aktualizacja informacji o zaznaczonych statkach
+// ---------------
+function updateSelectedShipsInfo(selectionChanged) {
+  const panel = document.getElementById('selected-ships-info');
+  const pairInfo = document.getElementById('pair-info');
+
+  panel.innerHTML = '';
+  pairInfo.innerHTML = '';
+
+  if (selectedShips.length === 0) {
+    return;
+  }
+
+  const sData = selectedShips.map(mmsi => {
+    if (shipMarkers[mmsi]?.shipData) {
+      return shipMarkers[mmsi].shipData;
+    } else if (shipPolygonLayers[mmsi]?.shipData) {
+      return shipPolygonLayers[mmsi].shipData;
+    }
+    return null;
+  }).filter(Boolean);
+
+  for (const mmsi in overlayVectors) {
+    overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
+  }
+  overlayVectors = {};
+
+  sData.forEach(sd => {
+    const sogVal = (sd.sog || 0).toFixed(1);
+    const cogVal = (sd.cog || 0).toFixed(1);
+    const hdgVal = (sd.heading !== undefined && sd.heading !== null)
+      ? sd.heading.toFixed(1)
+      : cogVal;
+
+    // LEN (m)
+    let lengthStr = 'N/A';
+    if (sd.dim_a && sd.dim_b) {
+      const lenMeters = parseFloat(sd.dim_a) + parseFloat(sd.dim_b);
+      lengthStr = lenMeters.toFixed(1);
+    }
+
+    let updatedAgo = sd.timestamp ? computeTimeAgo(sd.timestamp) : '';
+
+    const infoDiv = document.createElement('div');
+    infoDiv.innerHTML = `
+      <b>${sd.ship_name || 'Unknown'}</b><br>
+      MMSI: ${sd.mmsi}<br>
+      SOG: ${sogVal} kn, 
+      COG: ${cogVal}°<br>
+      HDG: ${hdgVal}°,
+      LEN: ${lengthStr} m<br>
+      Updated: ${updatedAgo}
+    `;
+    panel.appendChild(infoDiv);
+
+    drawVector(sd.mmsi, sd);
+  });
+
+  // 2 statki => cpa/tcpa z /calculate_cpa_tcpa
+  if (selectedShips.length === 2) {
+    const [mA, mB] = selectedShips;
+    const sorted = [mA, mB].sort((x, y) => x - y);
+    const url = `/calculate_cpa_tcpa?mmsi_a=${sorted[0]}&mmsi_b=${sorted[1]}`;
+
+    let distNm = null;
+    if (sData.length === 2) {
+      const posA = sData[0];
+      const posB = sData[1];
+      distNm = computeDistanceNm(posA.latitude, posA.longitude,
+                                 posB.latitude, posB.longitude);
+    }
+
+    fetch(url)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          pairInfo.innerHTML = `
+            ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+            <b>CPA/TCPA:</b> N/A (${data.error})
+          `;
+        } else {
+          const cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
+          const tcpaVal = (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
+          pairInfo.innerHTML = `
+            ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+            <b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min
+          `;
         }
+      })
+      .catch(err => {
+        console.error("Błąd /calculate_cpa_tcpa:", err);
+        pairInfo.innerHTML = `
+          ${distNm !== null ? `<b>Distance:</b> ${distNm.toFixed(2)} nm<br>` : ''}
+          <b>CPA/TCPA:</b> N/A
+        `;
+      });
+  }
+}
 
-    if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
-        return jsonify({'error': 'No recent data for one or both ships'}), 404
+// ---------------
+// 8) Rysowanie wektora prędkości
+// ---------------
+function drawVector(mmsi, sd) {
+  if (!sd.sog || !sd.cog) return;
 
-    # Rzeczywiste obliczenie CPA/TCPA
-    cpa_val, tcpa_val = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
+  const { latitude: lat, longitude: lon, sog: sogKn, cog: cogDeg } = sd;
+  const distNm = sogKn * (vectorLength / 60);
+  const cogRad = (cogDeg * Math.PI) / 180;
 
-    return jsonify({'cpa': cpa_val, 'tcpa': tcpa_val})
+  let endLat = lat + (distNm / 60) * Math.cos(cogRad);
+  let lonScale = Math.cos(lat * Math.PI / 180);
+  if (lonScale < 1e-6) lonScale = 1e-6;
+  let endLon = lon + ((distNm / 60) * Math.sin(cogRad) / lonScale);
 
+  const line = L.polyline([[lat, lon],[endLat, endLon]], {
+    color: 'blue',
+    dashArray: '4,4'
+  });
+  line.addTo(map);
 
-# 5) Moduł HISTORY (pliki GCS)
-@app.route('/history')
-def history():
-    """
-    Frontend HISTORY (history.html).
-    """
-    return render_template('history.html')
+  if (!overlayVectors[mmsi]) {
+    overlayVectors[mmsi] = [];
+  }
+  overlayVectors[mmsi].push(line);
+}
 
-@app.route("/history_filelist")
-def history_filelist():
-    """
-    Zwraca listę plików w GCS (prefix=GCS_HISTORY_PREFIX)
-    z ostatnich X dni (domyślnie 7), do front-endu history_app.js
-    """
-    days_back = int(request.args.get("days", 7))
-    cutoff_utc = datetime.utcnow() - timedelta(days=days_back)
-
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
-    prefix = GCS_HISTORY_PREFIX.rstrip("/") + "/"
-
-    try:
-        blobs = list(bucket.list_blobs(prefix=prefix))
-    except Exception as e:
-        return jsonify({"error": f"Error listing blobs: {str(e)}"}), 500
-
-    files = []
-    for blob in blobs:
-        if not blob.time_created:
-            continue
-        blob_t_utc = blob.time_created.replace(tzinfo=None)
-        if blob_t_utc >= cutoff_utc:
-            files.append({
-                "name": blob.name,
-                "time_created": blob.time_created.isoformat()
-            })
-
-    files.sort(key=lambda f: f["time_created"])
-    return jsonify({"files": files})
-
-@app.route("/history_file")
-def history_file():
-    """
-    Zwraca zawartość konkretnego pliku JSON w GCS,
-    generowanego przez pipeline history.
-    """
-    filename = request.args.get("file", "")
-    if not filename:
-        return jsonify({"error": "Missing 'file' parameter"}), 400
-
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
-    blob = bucket.blob(filename)
-
-    try:
-        if not blob.exists():
-            return jsonify({"error": f"File not found: {filename}"}), 404
-    except Exception as e:
-        return jsonify({"error": f"Error checking blob: {str(e)}"}), 500
-
-    try:
-        data_str = blob.download_as_text(encoding="utf-8")
-    except Exception as e:
-        return jsonify({"error": f"Error downloading blob: {str(e)}"}), 500
-
-    return app.response_class(data_str, mimetype="application/json")
-
-
-###########################################################
-# Uruchom
-###########################################################
-if __name__ == '__main__':
-    # UWAGA: debug=True w produkcji niezalecane.
-    app.run(host='0.0.0.0', port=5000, debug=True)
+// ---------------
+// 9) computeDistanceNm
+// ---------------
+function computeDistanceNm(lat1, lon1, lat2, lon2) {
+  const R_NM = 3440.065;
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat / 2)**2
+          + Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin(dLon / 2)**2;
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R_NM*c;
+}
