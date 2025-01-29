@@ -130,7 +130,6 @@ class CollisionDoFn(beam.DoFn):
         old_list = list(records_state.read())
         fresh = [(s,t) for (s,t) in old_list if (now_sec - t)<=STATE_RETENTION_SEC]
 
-        # Nadpisujemy nową listę w stanie
         records_state.clear()
         for (s,t) in fresh:
             records_state.add((s,t))
@@ -237,6 +236,7 @@ def run():
     table_collisions = f"{project_id}.{dataset}.collisions"
     table_static     = f"{project_id}.{dataset}.ships_static"
 
+    # Ustawiamy retencję (expiration_ms) na 24h = 86400000 ms w ships_positions i collisions
     tables_to_create = [
         {
             'table_id': table_positions,
@@ -255,7 +255,8 @@ def run():
             'time_partitioning': {
                 "type_": "DAY",
                 "field": "timestamp",
-                "expiration_ms": None
+                # retencja 24h (86400000 ms)
+                "expiration_ms": 86400000
             },
             'clustering_fields': ["mmsi"]
         },
@@ -277,7 +278,8 @@ def run():
             'time_partitioning': {
                 "type_": "DAY",
                 "field": "timestamp",
-                "expiration_ms": None
+                # retencja 24h (86400000 ms)
+                "expiration_ms": 86400000
             },
             'clustering_fields': ["mmsi_a","mmsi_b"]
         },
@@ -294,6 +296,7 @@ def run():
                     {"name": "update_time", "type": "TIMESTAMP","mode": "REQUIRED"}
                 ]
             },
+            # Brak retencji w ships_static
             'time_partitioning': None,
             'clustering_fields': ["mmsi"]
         }
@@ -315,22 +318,27 @@ def run():
 
     with beam.Pipeline(options=pipeline_options) as p:
         # 1) Tworzymy tabele, o ile nie istnieją
-        _ = (tables_to_create
-             | "CreateTables" >> beam.ParDo(CreateBQTableDoFn()))
+        _ = (
+            tables_to_create
+            | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
+        )
 
         # 2) Odczyt z PubSub i parse
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
-        parsed = (lines
-                  | "ParseAIS"   >> beam.Map(parse_ais)
-                  | "FilterNone" >> beam.Filter(lambda x: x is not None))
+        parsed = (
+            lines
+            | "ParseAIS"   >> beam.Map(parse_ais)
+            | "FilterNone" >> beam.Filter(lambda x: x is not None)
+        )
 
         # 3) ships_positions (co 10s)
-        w_pos = (parsed
-            | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyPositions" >> beam.Map(lambda r: (None, r))
-            | "GroupPositions" >> beam.GroupByKey()
-            | "FlatPositions"  >> beam.FlatMap(lambda kv: kv[1])
-            | "RmGeohashDims"  >> beam.Map(remove_geohash_and_dims)
+        w_pos = (
+            parsed
+            | "WinPositions"    >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyPositions"    >> beam.Map(lambda r: (None, r))
+            | "GroupPositions"  >> beam.GroupByKey()
+            | "FlatPositions"   >> beam.FlatMap(lambda kv: kv[1])
+            | "RmGeohashDims"   >> beam.Map(remove_geohash_and_dims)
         )
 
         w_pos | "WritePositions" >> WriteToBigQuery(
@@ -351,18 +359,19 @@ def run():
         )
 
         # 4) ships_static (deduplicate in-memory) z oknami 5 minutowymi
-        ships_static = (parsed
+        ships_static = (
+            parsed
             | "FilterDims" >> beam.Filter(
                 lambda r: any(r.get(dim) for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
             | "WindowStatic" >> beam.WindowInto(window.FixedWindows(300))  # 5 minut
-            | "KeyStatic" >> beam.Map(lambda r: (r["mmsi"], r))
+            | "KeyStatic"    >> beam.Map(lambda r: (r["mmsi"], r))
             | "GroupStaticByMMSI" >> beam.GroupByKey()
             | "LatestStaticPerMMSI" >> beam.Map(
-                lambda kv: max(kv[1], key=lambda x: x["timestamp"])  # Wybierz najnowszy rekord
+                lambda kv: max(kv[1], key=lambda x: x["timestamp"])
             )
             | "DeduplicateStatic" >> beam.ParDo(DeduplicateStaticDoFn())
-            | "PrepStatic" >> beam.Map(keep_static_fields)
+            | "PrepStatic"        >> beam.Map(keep_static_fields)
         )
 
         ships_static | "WriteStatic" >> WriteToBigQuery(
@@ -385,11 +394,12 @@ def run():
         keyed = parsed | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        w_coll = (collisions_raw
-            | "WinColl"    >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyColl"    >> beam.Map(lambda c: (None, c))
-            | "GroupColl"  >> beam.GroupByKey()
-            | "FlatColl"   >> beam.FlatMap(lambda kv: kv[1])
+        w_coll = (
+            collisions_raw
+            | "WinColl"   >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyColl"   >> beam.Map(lambda c: (None, c))
+            | "GroupColl" >> beam.GroupByKey()
+            | "FlatColl"  >> beam.FlatMap(lambda kv: kv[1])
         )
 
         w_coll | "WriteCollisions" >> WriteToBigQuery(
