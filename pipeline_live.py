@@ -403,29 +403,27 @@ def run():
         keyed = filtered_for_collisions | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        w_coll = (
+        # Zamiast sztucznego klucza None i GroupByKey -> Bezpośrednio zapis do BQ
+        (
             collisions_raw
-            | "WinColl"   >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyColl"   >> beam.Map(lambda c: (None, c))
-            | "GroupColl" >> beam.GroupByKey()
-            | "FlatColl"  >> beam.FlatMap(lambda kv: kv[1])
-        )
-        w_coll | "WriteCollisions" >> WriteToBigQuery(
-            table=table_collisions,
-            schema="""
-              mmsi_a:INTEGER,
-              mmsi_b:INTEGER,
-              timestamp:TIMESTAMP,
-              cpa:FLOAT,
-              tcpa:FLOAT,
-              latitude_a:FLOAT,
-              longitude_a:FLOAT,
-              latitude_b:FLOAT,
-              longitude_b:FLOAT
-            """,
-            create_disposition=BigQueryDisposition.CREATE_NEVER,
-            write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
+            | "WinColl" >> beam.WindowInto(window.FixedWindows(10))
+            | "WriteCollisions" >> WriteToBigQuery(
+                table=table_collisions,
+                schema="""
+                  mmsi_a:INTEGER,
+                  mmsi_b:INTEGER,
+                  timestamp:TIMESTAMP,
+                  cpa:FLOAT,
+                  tcpa:FLOAT,
+                  latitude_a:FLOAT,
+                  longitude_a:FLOAT,
+                  latitude_b:FLOAT,
+                  longitude_b:FLOAT
+                """,
+                create_disposition=BigQueryDisposition.CREATE_NEVER,
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                method="STREAMING_INSERTS",
+            )
         )
 
 if __name__ == "__main__":
