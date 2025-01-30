@@ -19,6 +19,10 @@ pipeline_live:
 	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
 	. venv/bin/activate && \
 	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
+	pipeline_live:
+	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
+	. venv/bin/activate && \
+	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
 	python pipeline_live.py \
 		--runner=DataflowRunner \
 		--project=$$GOOGLE_CLOUD_PROJECT \
@@ -27,7 +31,8 @@ pipeline_live:
 		--temp_location=$$TEMP_LOCATION \
 		--job_name=$$JOB_NAME \
 		--requirements_file=requirements.txt \
-		--save_main_session
+		--save_main_session \
+		--setup_file=./setup.py
 
 history: pipeline_history
 
