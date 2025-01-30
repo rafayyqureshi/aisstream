@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – finalna wersja
+// app.js (moduł LIVE) – finalna wersja + dodanie X-API-Key
 // ==========================
 
 // ---------------
@@ -12,6 +12,8 @@ document.addEventListener('DOMContentLoaded', () => {
 // ---------------
 // 2) Zmienne globalne
 // ---------------
+const API_KEY = "Ais-mon";  // Dodajemy klucz API (tutaj jawnie)
+
 let map;
 let markerClusterGroup;
 let shipMarkers = {};         // klucz: mmsi -> L.marker
@@ -142,7 +144,11 @@ async function initLiveApp() {
 // ---------------
 async function fetchShips() {
   try {
-    const res = await fetch('/ships');
+    const res = await fetch('/ships', {
+      headers: {
+        'X-API-Key': API_KEY
+      }
+    });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} - ${res.statusText}`);
     }
@@ -233,7 +239,11 @@ function updateShips(shipsArray) {
 async function fetchCollisions() {
   try {
     const url = `/collisions?max_cpa=${cpaFilter}&max_tcpa=${tcpaFilter}`;
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        'X-API-Key': API_KEY
+      }
+    });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} – ${res.statusText}`);
     }
@@ -464,7 +474,11 @@ function updateSelectedShipsInfo(selectionChanged) {
                                  posB.latitude, posB.longitude);
     }
 
-    fetch(url)
+    fetch(url, {
+      headers: {
+        'X-API-Key': API_KEY
+      }
+    })
       .then(r => r.json())
       .then(data => {
         if (data.error) {
