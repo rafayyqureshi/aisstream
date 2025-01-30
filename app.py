@@ -40,14 +40,14 @@ app.logger.setLevel(logging.INFO)
 # Mechanizm sprawdzania klucza API
 ###########################################################
 @app.before_request
-def require_api_key():
-    """
-    Sprawdza obecność poprawnego klucza API w nagłówku X-API-Key,
-    dla wszystkich endpointów.
-    """
-    headers_key = request.headers.get("X-API-Key")
-    if headers_key != API_KEY_REQUIRED:
-        return jsonify({"error": "Invalid or missing API Key"}), 403
+#def require_api_key():
+#    """
+#    Sprawdza obecność poprawnego klucza API w nagłówku X-API-Key,
+#    dla wszystkich endpointów.
+#    """
+#    headers_key = request.headers.get("X-API-Key")
+#    if headers_key != API_KEY_REQUIRED:
+#        return jsonify({"error": "Invalid or missing API Key"}), 403
 
 
 ###########################################################
