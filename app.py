@@ -40,11 +40,14 @@ app.logger.setLevel(logging.INFO)
 # Mechanizm sprawdzania klucza API
 ###########################################################
 @app.before_request
+
 def require_api_key():
-    """
-    Sprawdza obecność poprawnego klucza API w nagłówku X-API-Key,
-    dla wszystkich endpointów.
-    """
+    # 1. Zezwól na dostęp do /, /favicon.ico i plików statycznych (katalog /static).
+    #    Bo tam nie potrzebujesz klucza – to ma być publicznie dostępne, by strona mogła się wczytać.
+    if request.path == '/' or request.path.startswith('/static') or request.path == '/favicon.ico':
+        return
+    
+    # 2. Dla pozostałych endpointów sprawdź klucz
     headers_key = request.headers.get("X-API-Key")
     if headers_key != API_KEY_REQUIRED:
         return jsonify({"error": "Invalid or missing API Key"}), 403
