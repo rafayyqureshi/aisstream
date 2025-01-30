@@ -20,9 +20,6 @@ pipeline_live:
 	. venv/bin/activate && \
 	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
 	pipeline_live:
-	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
-	. venv/bin/activate && \
-	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
 	python pipeline_live.py \
 		--runner=DataflowRunner \
 		--project=$$GOOGLE_CLOUD_PROJECT \
