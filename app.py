@@ -1,86 +1,54 @@
 import os
 import math
+import logging
 from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
 from google.cloud import storage
 
+# Import wspólnej funkcji CPA/TCPA z cpa_utils.py
+from cpa_utils import compute_cpa_tcpa
+
 app = Flask(__name__, static_folder='static', template_folder='templates')
 client = bigquery.Client()
+
+# Wczytanie klucza API z .env (domyślnie "Ais-mon")
+API_KEY_REQUIRED = os.getenv("API_KEY", "Ais-mon")
 
 # Konfiguracja GCS do modułu history
 GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bucket")
 GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
 
+# Prosty cache w pamięci dla /ships i /collisions
+SHIPS_CACHE = {
+    "last_update": None,
+    "data": []
+}
+
+COLLISIONS_CACHE = {
+    "last_update": None,
+    "data": []
+}
+
+# Ustaw poziom logowania (opcjonalnie)
+logging.basicConfig(level=logging.INFO)
+app.logger.setLevel(logging.INFO)
+
+
 ###########################################################
-# Funkcje pomocnicze
+# Mechanizm sprawdzania klucza API
 ###########################################################
-def compute_cpa_tcpa(shipA, shipB):
+@app.before_request
+def require_api_key():
     """
-    Oblicza (CPA, TCPA) w milach morskich i minutach,
-    biorąc pod uwagę bieżącą pozycję (lat/lon), SOG (kn),
-    i COG (deg). Zakładamy, że heading NIE wpływa na trajektorię.
-
-    Zwraca (cpa_val, tcpa_val). Jeśli brak danych, zwracamy (9999, -1).
+    Sprawdza obecność poprawnego klucza API w nagłówku X-API-Key,
+    dla wszystkich endpointów.
     """
-    required = ['latitude','longitude','cog','sog']
-    for f in required:
-        if f not in shipA or f not in shipB:
-            return (9999, -1)
+    headers_key = request.headers.get("X-API-Key")
+    if headers_key != API_KEY_REQUIRED:
+        return jsonify({"error": "Invalid or missing API Key"}), 403
 
-    latRef = (shipA['latitude'] + shipB['latitude']) / 2.0
-    scaleLat = 111000.0
-    scaleLon = 111000.0 * math.cos(math.radians(latRef))
-
-    def toXY(lat, lon):
-        return (lon * scaleLon, lat * scaleLat)
-
-    xA, yA = toXY(shipA['latitude'], shipA['longitude'])
-    xB, yB = toXY(shipB['latitude'], shipB['longitude'])
-
-    sogA = float(shipA['sog'] or 0)
-    sogB = float(shipB['sog'] or 0)
-
-    def cogToVector(cog_deg, sog_kn):
-        # cog w stopniach, sog_kn w węzłach (nm/h)
-        r = math.radians(cog_deg or 0)
-        vx = sog_kn * math.sin(r)
-        vy = sog_kn * math.cos(r)
-        return (vx, vy)
-
-    vxA, vyA = cogToVector(shipA['cog'], sogA)
-    vxB, vyB = cogToVector(shipB['cog'], sogB)
-
-    dx = xA - xB
-    dy = yA - yB
-
-    # sog w nm/h => w m/min
-    speed_scale = 1852.0 / 60.0
-
-    dvx = (vxA - vxB) * speed_scale
-    dvy = (vyA - vyB) * speed_scale
-
-    VV = dvx**2 + dvy**2
-    PV = dx * dvx + dy * dvy
-
-    if VV == 0:
-        tcpa = 0.0
-    else:
-        tcpa = -PV / VV
-
-    if tcpa < 0:
-        return (9999, -1)
-
-    # Pozycje przy CPA
-    xA2 = xA + vxA * speed_scale * tcpa
-    yA2 = yA + vyA * speed_scale * tcpa
-    xB2 = xB + vxB * speed_scale * tcpa
-    yB2 = yB + vyB * speed_scale * tcpa
-
-    dist_m = math.sqrt((xA2 - xB2)**2 + (yA2 - yB2)**2)
-    dist_nm = dist_m / 1852.0
-    return (dist_nm, tcpa)
 
 ###########################################################
 # Endpoints
@@ -101,7 +69,16 @@ def ships():
     """
     Zwraca statki z ostatnich 2 minut, do modułu LIVE.
     Dołączamy heading (z positions) i wymiary (dim_a..d) z ships_static.
+    Wprowadzony jest caching na 15 sekund, aby zredukować obciążenie BigQuery.
     """
+    now = datetime.utcnow()
+    cache_age = 15  # sekundy
+
+    # Jeśli cache aktualny (mniej niż 15s), zwracamy z pamięci
+    if (SHIPS_CACHE["last_update"] is not None and
+        (now - SHIPS_CACHE["last_update"]).total_seconds() < cache_age):
+        return jsonify(SHIPS_CACHE["data"])
+
     query = """
     WITH recent AS (
       SELECT
@@ -135,7 +112,12 @@ def ships():
       ON r.mmsi = s.mmsi
     ORDER BY r.timestamp DESC
     """
-    rows = list(client.query(query).result())
+
+    try:
+        rows = list(client.query(query).result())
+    except Exception as e:
+        app.logger.error(f"Błąd zapytania BigQuery (ships): {e}")
+        return jsonify({"error": "Query failed"}), 500
 
     out = []
     for r in rows:
@@ -153,6 +135,11 @@ def ships():
             "dim_c": r.dim_c,
             "dim_d": r.dim_d
         })
+
+    # Zapis do cache
+    SHIPS_CACHE["data"] = out
+    SHIPS_CACHE["last_update"] = now
+
     return jsonify(out)
 
 
@@ -162,13 +149,21 @@ def collisions():
     """
     Zwraca listę kolizji w collisions,
     filtrowaną parametrami max_cpa, max_tcpa.
-    Dodatkowo odrzucamy kolizje, jeśli "moment kolizji" (timestamp + tcpa)
-    już minął w stosunku do bieżącego czasu.
+    Odrzucamy kolizje, jeśli "moment kolizji" (timestamp + tcpa) już minął.
+    Wprowadzono caching (np. 15 sekund).
     """
+    now = datetime.utcnow()
+    cache_age = 15  # sekundy
+
+    # Sprawdzamy cache
+    if (COLLISIONS_CACHE["last_update"] is not None and
+        (now - COLLISIONS_CACHE["last_update"]).total_seconds() < cache_age):
+        return jsonify(COLLISIONS_CACHE["data"])
+
     max_cpa = float(request.args.get('max_cpa', 0.5))
     max_tcpa = float(request.args.get('max_tcpa', 10.0))
 
-    query = f"""
+    query_str = """
     WITH latestA AS (
       SELECT
         mmsi,
@@ -200,14 +195,26 @@ def collisions():
     FROM `ais_dataset_us.collisions` c
     LEFT JOIN latestA la ON la.mmsi = c.mmsi_a
     LEFT JOIN latestB lb ON lb.mmsi = c.mmsi_b
-    WHERE c.cpa <= {max_cpa}
-      AND c.tcpa <= {max_tcpa}
+    WHERE c.cpa <= @param_cpa
+      AND c.tcpa <= @param_tcpa
       AND c.tcpa >= 0
       AND TIMESTAMP_ADD(c.timestamp, INTERVAL CAST(c.tcpa AS INT64) MINUTE) > CURRENT_TIMESTAMP()
     ORDER BY c.timestamp DESC
     LIMIT 100
     """
-    rows = list(client.query(query).result())
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("param_cpa", "FLOAT64", max_cpa),
+            bigquery.ScalarQueryParameter("param_tcpa", "FLOAT64", max_tcpa),
+        ]
+    )
+
+    try:
+        rows = list(client.query(query_str, job_config=job_config).result())
+    except Exception as e:
+        app.logger.error(f"Błąd zapytania BigQuery (collisions): {e}")
+        return jsonify({"error": "Query failed"}), 500
 
     result = []
     for r in rows:
@@ -233,22 +240,27 @@ def collisions():
             "ship1_name": shipA,
             "ship2_name": shipB
         })
+
+    # Zapis do cache
+    COLLISIONS_CACHE["data"] = result
+    COLLISIONS_CACHE["last_update"] = now
+
     return jsonify(result)
 
 
 # 4) On-demand CPA/TCPA
 @app.route('/calculate_cpa_tcpa')
-def calculate_cpa_tcpa():
+def calculate_cpa_tcpa_endpoint():
     """
     Wywoływane z front-endu (app.js)
     w momencie zaznaczenia 2 statków (selectedShips).
+    Używamy cpa_utils.compute_cpa_tcpa().
     """
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
     if not mmsi_a or not mmsi_b:
         return jsonify({'error': 'Missing mmsi_a or mmsi_b'}), 400
 
-    # Bierzemy ostanie 2 min
     query = f"""
     SELECT
       mmsi,
@@ -262,7 +274,12 @@ def calculate_cpa_tcpa():
     GROUP BY mmsi, latitude, longitude, cog, sog
     ORDER BY MAX(timestamp) DESC
     """
-    rows = list(client.query(query).result())
+
+    try:
+        rows = list(client.query(query).result())
+    except Exception as e:
+        app.logger.error(f"Błąd zapytania BigQuery (calculate_cpa_tcpa): {e}")
+        return jsonify({"error": "Query failed"}), 500
 
     data_by_mmsi = {}
     for r in rows:
@@ -277,9 +294,8 @@ def calculate_cpa_tcpa():
     if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
         return jsonify({'error': 'No recent data for one or both ships'}), 404
 
-    # Rzeczywiste obliczenie CPA/TCPA
+    # Wywołanie wspólnej funkcji z cpa_utils
     cpa_val, tcpa_val = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
-
     return jsonify({'cpa': cpa_val, 'tcpa': tcpa_val})
 
 
@@ -307,6 +323,7 @@ def history_filelist():
     try:
         blobs = list(bucket.list_blobs(prefix=prefix))
     except Exception as e:
+        app.logger.error(f"Błąd przy listowaniu blobów GCS: {e}")
         return jsonify({"error": f"Error listing blobs: {str(e)}"}), 500
 
     files = []
@@ -341,11 +358,13 @@ def history_file():
         if not blob.exists():
             return jsonify({"error": f"File not found: {filename}"}), 404
     except Exception as e:
+        app.logger.error(f"Błąd przy sprawdzaniu blobu GCS: {e}")
         return jsonify({"error": f"Error checking blob: {str(e)}"}), 500
 
     try:
         data_str = blob.download_as_text(encoding="utf-8")
     except Exception as e:
+        app.logger.error(f"Błąd pobierania pliku GCS: {e}")
         return jsonify({"error": f"Error downloading blob: {str(e)}"}), 500
 
     return app.response_class(data_str, mimetype="application/json")
@@ -355,5 +374,5 @@ def history_file():
 # Uruchom
 ###########################################################
 if __name__ == '__main__':
-    # UWAGA: debug=True w produkcji niezalecane.
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # W produkcji debug=False
+    app.run(host='0.0.0.0', port=5000, debug=False)
