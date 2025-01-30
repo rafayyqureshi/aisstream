@@ -16,8 +16,12 @@ import apache_beam.coders
 
 from apache_beam import window
 
-# Import wspólnej logiki CPA/TCPA z cpa_utils.py
-from cpa_utils import compute_cpa_tcpa
+# Import funkcji z cpa_utils.py
+from cpa_utils import (
+    compute_cpa_tcpa,
+    local_distance_nm,
+    is_approaching
+)
 
 # Załaduj zmienne z .env
 load_dotenv()
@@ -30,6 +34,9 @@ logger = logging.getLogger(__name__)
 CPA_THRESHOLD        = 0.5   # mile morskie
 TCPA_THRESHOLD       = 10.0  # minuty
 STATE_RETENTION_SEC  = 120   # 2 minuty
+
+# Parametry wstępnego filtra
+DISTANCE_THRESHOLD_NM = 5.0  # Dystans powyżej którego nie liczymy CPA
 
 def parse_ais(record_bytes):
     """
@@ -66,8 +73,8 @@ def parse_ais(record_bytes):
         # nazwa statku
         data["ship_name"] = data.get("ship_name","Unknown")
 
-        # geohash
-        data["geohash"]   = data.get("geohash","none")
+        # geohash (zakładamy, że jest nadawany w rozdzielczości ~5-7 Nm)
+        data["geohash"] = data.get("geohash","none")
 
         return data
     except:
@@ -87,12 +94,16 @@ def is_ship_long_enough(ship):
 class CollisionDoFn(beam.DoFn):
     """
     Stateful DoFn do wykrywania kolizji w ramach geohash.
-    Odrzucamy kolizje, jeśli cpa >= 0.5 nm lub tcpa >= 10 min.
+    Wstępne filtrowanie:
+      1) lokalny dystans < 5 nm,
+      2) statki się zbliżają (dot product < 0).
+    Dopiero potem obliczamy CPA/TCPA i sprawdzamy progi cpa/tcpa.
     """
-    RECORDS_STATE = BagStateSpec("records_state", beam.coders.TupleCoder((
-        beam.coders.FastPrimitivesCoder(),
-        beam.coders.FastPrimitivesCoder()
-    )))
+    RECORDS_STATE = BagStateSpec(
+        "records_state",
+        beam.coders.TupleCoder((beam.coders.FastPrimitivesCoder(),
+                                beam.coders.FastPrimitivesCoder()))
+    )
 
     def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
         gh, ship = element
@@ -103,22 +114,36 @@ class CollisionDoFn(beam.DoFn):
 
         # Czytamy dotychczasowe dane i czyścimy stare
         old_list = list(records_state.read())
-        fresh = [(s,t) for (s,t) in old_list if (now_sec - t)<=STATE_RETENTION_SEC]
+        fresh = [(s, t) for (s, t) in old_list if (now_sec - t) <= STATE_RETENTION_SEC]
 
         records_state.clear()
-        for (s,t) in fresh:
-            records_state.add((s,t))
+        for (s, t) in fresh:
+            records_state.add((s, t))
 
-        # Sprawdzamy kolizje dla par (old_ship, ship)
+        # Sprawdzamy ewentualne kolizje dla par (old_ship, ship)
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
 
-            # Wywołanie wspólnej funkcji do obliczania cpa/tcpa
+            # --- WSTĘPNE FILTROWANIE ---
+            dist_nm = local_distance_nm(old_ship, ship)
+            if dist_nm > DISTANCE_THRESHOLD_NM:
+                # Statki są zbyt daleko (np. >5 nm), pomijamy
+                continue
+
+            if not is_approaching(old_ship, ship):
+                # Statki się nie zbliżają - pomijamy
+                continue
+
+            # --- Jeśli pozytywnie przeszły filtry, liczymy CPA/TCPA ---
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
-            # Filtr: cpa < 0.5 i 0 <= tcpa < 10
+
+            # Filtr końcowy: cpa < 0.5 i 0 <= tcpa < 10
             if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
-                logging.info(f"Collision detected between {old_ship['mmsi']} & {ship['mmsi']} cpa={cpa}, tcpa={tcpa}")
+                logging.info(
+                    f"Collision detected between {old_ship['mmsi']} & {ship['mmsi']} "
+                    f"cpa={cpa}, tcpa={tcpa}"
+                )
                 yield {
                     "mmsi_a": old_ship["mmsi"],
                     "mmsi_b": ship["mmsi"],
@@ -186,8 +211,12 @@ class CreateBQTableDoFn(beam.DoFn):
         table = bigquery.Table(table_id, schema=schema)
 
         if time_part:
-            time_part_corrected = {k if k != 'type' else 'type_': v for k, v in time_part.items()}
+            # Zastępujemy 'type' na 'type_' aby uniknąć kolizji słów kluczowych
+            time_part_corrected = {
+                k if k != 'type' else 'type_': v for k, v in time_part.items()
+            }
             table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
+
         if cluster:
             table.clustering_fields = cluster
 
