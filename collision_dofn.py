@@ -15,10 +15,10 @@ from cpa_utils import (
 )
 
 # Ustawiamy podstawowe progi (bez zmian)
-CPA_THRESHOLD        = 0.5
-TCPA_THRESHOLD       = 10.0
+CPA_THRESHOLD        = 2
+TCPA_THRESHOLD       = 20.0
 STATE_RETENTION_SEC  = 120   # 2 min
-DISTANCE_THRESHOLD_NM = 5.0
+DISTANCE_THRESHOLD_NM = 10.0
 
 class CollisionDoFn(beam.DoFn):
     """
