@@ -13,11 +13,8 @@ from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.utils.timestamp import Duration
 from apache_beam import window
 
-# Import z nowego pliku collision_dofn
+# Import CollisionDoFn z pliku collision_dofn.py
 from collision_dofn import CollisionDoFn
-
-# Z pliku cpa_utils (jeśli potrzeba w parse_ais, itp.)
-# from cpa_utils import compute_cpa_tcpa, local_distance_nm, is_approaching
 
 load_dotenv()
 
@@ -29,7 +26,6 @@ def parse_ais(record_bytes):
     Parsuje JSON AIS z Pub/Sub.
     """
     try:
-        import time
         data = json.loads(record_bytes.decode("utf-8"))
         req = ["mmsi","latitude","longitude","cog","sog","timestamp"]
         if not all(r in data for r in req):
@@ -61,14 +57,18 @@ def parse_ais(record_bytes):
         data["ship_name"] = data.get("ship_name","Unknown")
 
         # geohash
+        # (Jeżeli geohash jest brak, użyj np. "none" lub empty string)
         data["geohash"] = data.get("geohash","none")
 
         return data
     except:
         return None
 
-
 def remove_geohash_and_dims(row):
+    """
+    Usuwa klucz geohash i wymiary z rekordu,
+    by zapisać do ships_positions.
+    """
     new_row = dict(row)
     new_row.pop("geohash", None)
     for d in ["dim_a","dim_b","dim_c","dim_d"]:
@@ -76,8 +76,12 @@ def remove_geohash_and_dims(row):
     return new_row
 
 class DeduplicateStaticDoFn(beam.DoFn):
+    """
+    Naiwna deduplikacja w pamięci.
+    """
     def __init__(self):
         self.seen = set()
+
     def process(self, row):
         mmsi = row["mmsi"]
         if mmsi not in self.seen:
@@ -85,6 +89,9 @@ class DeduplicateStaticDoFn(beam.DoFn):
             yield row
 
 def keep_static_fields(row):
+    """
+    Wyciąga tylko pola statyczne + update_time.
+    """
     return {
         "mmsi": row["mmsi"],
         "ship_name": row["ship_name"],
@@ -96,6 +103,9 @@ def keep_static_fields(row):
     }
 
 class CreateBQTableDoFn(beam.DoFn):
+    """
+    Tworzy tabele w BigQuery (o ile nie istnieją).
+    """
     def process(self, table_ref):
         from google.cloud import bigquery
         client_local = bigquery.Client()
@@ -127,6 +137,9 @@ class CreateBQTableDoFn(beam.DoFn):
             logging.error(f"Nie można utworzyć tabeli {table_id}: {e}")
 
 def is_ship_long_enough(ship):
+    """
+    Filtr – statek "dłuższy" niż 50m (dim_a + dim_b).
+    """
     dim_a = ship.get("dim_a")
     dim_b = ship.get("dim_b")
     if dim_a is None or dim_b is None:
@@ -136,6 +149,7 @@ def is_ship_long_enough(ship):
 def run():
     logging.getLogger().setLevel(logging.INFO)
 
+    # Konfiguracja z .env
     project_id  = os.getenv("GOOGLE_CLOUD_PROJECT","ais-collision-detection")
     dataset     = os.getenv("LIVE_DATASET","ais_dataset_us")
     input_sub   = os.getenv("INPUT_SUBSCRIPTION","projects/ais-collision-detection/subscriptions/ais-data-sub")
@@ -148,7 +162,6 @@ def run():
     table_collisions = f"{project_id}.{dataset}.collisions"
     table_static     = f"{project_id}.{dataset}.ships_static"
 
-    # Dla collisions mamy poszerzone kolumny
     tables_to_create = [
         {
             'table_id': table_positions,
@@ -225,18 +238,18 @@ def run():
         num_workers=1,
         max_num_workers=10,
         autoscaling_algorithm='THROUGHPUT_BASED',
-        save_main_session=True,   # lub False, zależnie od potrzeb
+        save_main_session=True,
         streaming=True
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # 1) Tworzenie tabel
+        # 1) Tworzymy tabele
         _ = (
             tables_to_create
             | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
         )
 
-        # 2) Read PubSub -> parse
+        # 2) Odczyt z PubSub -> parse
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
         parsed = (
             lines
@@ -244,14 +257,14 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 3) ships_positions
+        # 3) ships_positions (co 10s)
         w_pos = (
             parsed
-            | "WinPositions"   >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyPos"         >> beam.Map(lambda r: (None, r))
-            | "GroupPos"       >> beam.GroupByKey()
-            | "FlatPos"        >> beam.FlatMap(lambda kv: kv[1])
-            | "RmGeohash"      >> beam.Map(remove_geohash_and_dims)
+            | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyPos"       >> beam.Map(lambda r: (None, r))
+            | "GroupPos"     >> beam.GroupByKey()
+            | "FlatPos"      >> beam.FlatMap(lambda kv: kv[1])
+            | "RmGeohash"    >> beam.Map(remove_geohash_and_dims)
         )
         w_pos | "WritePositions" >> WriteToBigQuery(
             table=table_positions,
@@ -270,14 +283,14 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # 4) ships_static
+        # 4) ships_static (co 5 min)
         ships_static = (
             parsed
             | "FilterDims" >> beam.Filter(
                 lambda r: any(r.get(dim) for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
-            | "WinStatic"  >> beam.WindowInto(window.FixedWindows(300))
-            | "KeyStatic"  >> beam.Map(lambda r: (r["mmsi"], r))
+            | "WinStatic" >> beam.WindowInto(window.FixedWindows(300))
+            | "KeyStatic" >> beam.Map(lambda r: (r["mmsi"], r))
             | "GroupStaticByMMSI" >> beam.GroupByKey()
             | "LatestStatic" >> beam.Map(lambda kv: max(kv[1], key=lambda x: x["timestamp"]))
             | "DedupStatic"  >> beam.ParDo(DeduplicateStaticDoFn())
@@ -299,7 +312,7 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # Tworzymy side input z ships_static
+        # 5) Tworzymy side input z ships_static (mmsi->(ship_name,...))
         static_dict = (
             ships_static
             | "MapStaticKey" >> beam.Map(lambda row: (row["mmsi"], row))
@@ -308,24 +321,25 @@ def run():
         )
         side_static = beam.pvalue.AsDict(static_dict)
 
-        # 5) collisions
-        filtered_for_collisions = (
-            parsed
-            | "FilterEnough" >> beam.Filter(is_ship_long_enough)
-        )
-        keyed = filtered_for_collisions | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+        # 6) collisions – GŁÓWNA ZMIANA: GroupByKey geohash
+        filtered_for_collisions = parsed | "FilterEnough" >> beam.Filter(is_ship_long_enough)
 
+        # Najpierw kluczujemy
+        keyed = filtered_for_collisions | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+
+        # NOWA ZMIANA: Grupa po geohash, bo chcemy listę statków w danym geohash
+        grouped = keyed | "GroupByGeohash" >> beam.GroupByKey()
+
+        # Tu CollisionDoFn jest zakładane, że przyjmuje (gh, list_of_ships)
         collisions_raw = (
-            keyed
+            grouped
             | "DetectCollisions" >> beam.ParDo(CollisionDoFn(side_static), side_static)
         )
 
+        # Zapisy do collisions
         (
             collisions_raw
-            | "WinColl" >> beam.WindowInto(
-                window.FixedWindows(5),
-                allowed_lateness=Duration(0)
-            )
+            | "WinColl" >> beam.WindowInto(window.FixedWindows(5), allowed_lateness=Duration(0))
             | "WriteCollisions" >> WriteToBigQuery(
                 table=table_collisions,
                 schema="""
