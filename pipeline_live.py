@@ -7,7 +7,7 @@ import datetime
 from dotenv import load_dotenv
 
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
+from apache_beam.options.pipeline_options import PipelineOptions
 from google.cloud import bigquery
 from google.api_core.exceptions import NotFound
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
@@ -15,6 +15,7 @@ from apache_beam.transforms.userstate import BagStateSpec
 import apache_beam.coders
 
 from apache_beam import window
+from apache_beam.utils.timestamp import Duration
 
 # Import funkcji z cpa_utils.py
 from cpa_utils import (
@@ -37,6 +38,7 @@ STATE_RETENTION_SEC  = 120   # 2 minuty
 
 # Parametry wstępnego filtra
 DISTANCE_THRESHOLD_NM = 5.0  # Dystans powyżej którego nie liczymy CPA
+
 
 def parse_ais(record_bytes):
     """
@@ -80,6 +82,7 @@ def parse_ais(record_bytes):
     except:
         return None
 
+
 def is_ship_long_enough(ship):
     """
     Zwraca True, jeśli statek ma dim_a i dim_b (nie None),
@@ -91,25 +94,47 @@ def is_ship_long_enough(ship):
         return False
     return (dim_a + dim_b) > 50
 
+
 class CollisionDoFn(beam.DoFn):
     """
     Stateful DoFn do wykrywania kolizji w ramach geohash.
     Wstępne filtrowanie:
       1) lokalny dystans < 5 nm,
       2) statki się zbliżają (dot product < 0).
-    Dopiero potem obliczamy CPA/TCPA i sprawdzamy progi cpa/tcpa.
+    Następnie obliczanie CPA/TCPA.
+    Dodatkowo:
+      - side input z ships_static => pobieramy ship_name,
+      - obliczamy distance (aktualny),
+      - is_active => true, jeśli aktualny distance <= minimalny distance dotąd; 
+        w momencie, gdy distance zacznie rosnąć, is_active=false.
     """
+
     RECORDS_STATE = BagStateSpec(
         "records_state",
         beam.coders.TupleCoder((beam.coders.FastPrimitivesCoder(),
                                 beam.coders.FastPrimitivesCoder()))
     )
+    # Dodatkowy stan na minimalny distance "per pair"
+    # Będziemy przechowywać krotki ( (mmsi_a,mmsi_b), min_distance )
+    PAIRS_STATE = BagStateSpec(
+        "pairs_state",
+        beam.coders.TupleCoder((
+            beam.coders.FastPrimitivesCoder(),
+            beam.coders.FastPrimitivesCoder()
+        ))
+    )
 
-    def process(self, element, records_state=beam.DoFn.StateParam(RECORDS_STATE)):
+    def __init__(self, static_side):
+        super().__init__()
+        self.static_side = static_side  # side input (dict)
+
+    def process(self, element,
+                records_state=beam.DoFn.StateParam(RECORDS_STATE),
+                pairs_state=beam.DoFn.StateParam(PAIRS_STATE)):
         gh, ship = element
         now_sec = time.time()
 
-        # Zapis do stanu
+        # Zapis do stanu (lista statków w tym geohash)
         records_state.add((ship, now_sec))
 
         # Czytamy dotychczasowe dane i czyścimy stare
@@ -120,41 +145,78 @@ class CollisionDoFn(beam.DoFn):
         for (s, t) in fresh:
             records_state.add((s, t))
 
-        # Sprawdzamy ewentualne kolizje dla par (old_ship, ship)
+        # side input => dict {mmsi: {ship_name, dim_a, dim_b, ...}}
+        static_dict = self.static_side
+
+        # PairsState => [( (mmsi_a,mmsi_b), min_dist ), ... ]
+        pairs_list = list(pairs_state.read())
+        # Zamieniamy to na dict w pamięci, by łatwiej modyfikować
+        pairs_dict = {}
+        for pair_key, dist_val in pairs_list:
+            pairs_dict[pair_key] = dist_val
+        # Wyczyść pairs_state w tym momencie (odtworzymy potem)
+        pairs_state.clear()
+
+        # Sprawdzamy ewentualne kolizje
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
 
-            # --- WSTĘPNE FILTROWANIE ---
             dist_nm = local_distance_nm(old_ship, ship)
             if dist_nm > DISTANCE_THRESHOLD_NM:
-                # Statki są zbyt daleko (np. >5 nm), pomijamy
                 continue
-
             if not is_approaching(old_ship, ship):
-                # Statki się nie zbliżają - pomijamy
                 continue
 
-            # --- Jeśli pozytywnie przeszły filtry, liczymy CPA/TCPA ---
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
+            if cpa < 0.5 and 0 <= tcpa < 10:
+                # Mamy kolizję
+                mA = old_ship["mmsi"]
+                mB = ship["mmsi"]
+                # Upewnijmy się, że klucz jest w porządku (mniejszy,mwiększy)
+                pair_key = tuple(sorted([mA, mB]))
 
-            # Filtr końcowy: cpa < 0.5 i 0 <= tcpa < 10
-            if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
-                logging.info(
-                    f"Collision detected between {old_ship['mmsi']} & {ship['mmsi']} "
-                    f"cpa={cpa}, tcpa={tcpa}"
-                )
+                # Odczytaj poprzedni minimalny dystans (jeśli istnieje)
+                prev_min_dist = pairs_dict.get(pair_key, None)
+                if prev_min_dist is None:
+                    prev_min_dist = dist_nm
+
+                # Czy aktualny dystans jest <= minimalnego?
+                is_active = True
+                if dist_nm > prev_min_dist:
+                    # zaczęło rosnąć => is_active = False
+                    is_active = False
+
+                # Aktualizuj minimalny distance
+                new_min_dist = min(prev_min_dist, dist_nm)
+                pairs_dict[pair_key] = new_min_dist
+
+                # Zbieramy nazwy
+                infoA = static_dict.get(mA, {})
+                infoB = static_dict.get(mB, {})
+                nameA = infoA.get("ship_name", "Unknown")
+                nameB = infoB.get("ship_name", "Unknown")
+
                 yield {
-                    "mmsi_a": old_ship["mmsi"],
-                    "mmsi_b": ship["mmsi"],
+                    "mmsi_a": mA,
+                    "ship_name_a": nameA,
+                    "mmsi_b": mB,
+                    "ship_name_b": nameB,
                     "timestamp": ship["timestamp"],
                     "cpa": cpa,
                     "tcpa": tcpa,
+                    "distance": dist_nm,
+                    "is_active": is_active,
                     "latitude_a": old_ship["latitude"],
                     "longitude_a": old_ship["longitude"],
                     "latitude_b": ship["latitude"],
                     "longitude_b": ship["longitude"]
                 }
+
+        # Zapisz pairs_dict z powrotem do pairs_state
+        for pk, dval in pairs_dict.items():
+            pairs_state.add((pk, dval))
+
 
 def remove_geohash_and_dims(row):
     """
@@ -165,6 +227,7 @@ def remove_geohash_and_dims(row):
     for d in ["dim_a","dim_b","dim_c","dim_d"]:
         new_row.pop(d, None)
     return new_row
+
 
 class DeduplicateStaticDoFn(beam.DoFn):
     """
@@ -180,6 +243,7 @@ class DeduplicateStaticDoFn(beam.DoFn):
             self.seen.add(mmsi)
             yield row
 
+
 def keep_static_fields(row):
     """
     Zostawiamy tylko statyczne kolumny + update_time.
@@ -193,6 +257,7 @@ def keep_static_fields(row):
         "dim_d": row["dim_d"],
         "update_time": datetime.datetime.utcnow().isoformat()+"Z"
     }
+
 
 class CreateBQTableDoFn(beam.DoFn):
     """
@@ -229,6 +294,7 @@ class CreateBQTableDoFn(beam.DoFn):
         except Exception as e:
             logging.error(f"Nie można utworzyć tabeli {table_id}: {e}")
 
+
 def run():
     logging.getLogger().setLevel(logging.INFO)
 
@@ -246,7 +312,7 @@ def run():
     table_collisions = f"{project_id}.{dataset}.collisions"
     table_static     = f"{project_id}.{dataset}.ships_static"
 
-    # Retencja 24h
+    # Dodajemy kolumny: ship_name_a, ship_name_b, distance, is_active
     tables_to_create = [
         {
             'table_id': table_positions,
@@ -273,15 +339,19 @@ def run():
             'table_id': table_collisions,
             'schema': {
                 "fields": [
-                    {"name": "mmsi_a",      "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "mmsi_b",      "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "timestamp",   "type": "TIMESTAMP","mode": "REQUIRED"},
-                    {"name": "cpa",         "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "tcpa",        "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "latitude_a",  "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude_a", "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "latitude_b",  "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude_b", "type": "FLOAT",   "mode": "REQUIRED"}
+                    {"name": "mmsi_a",       "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name_a",  "type": "STRING",  "mode": "NULLABLE"},
+                    {"name": "mmsi_b",       "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name_b",  "type": "STRING",  "mode": "NULLABLE"},
+                    {"name": "timestamp",    "type": "TIMESTAMP","mode": "REQUIRED"},
+                    {"name": "cpa",          "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "tcpa",         "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "distance",     "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "is_active",    "type": "BOOL",    "mode": "REQUIRED"},
+                    {"name": "latitude_a",   "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude_a",  "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "latitude_b",   "type": "FLOAT",   "mode": "REQUIRED"},
+                    {"name": "longitude_b",  "type": "FLOAT",   "mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -395,26 +465,47 @@ def run():
             method="STREAMING_INSERTS",
         )
 
+        # Tworzymy side input z ships_static (mmsi->(ship_name, dim_a,b,c,d))
+        static_dict = (
+            ships_static
+            | "ShipStaticKey" >> beam.Map(lambda row: (row["mmsi"], row))
+            | "GroupByMmsi"   >> beam.GroupByKey()
+            | "PickOne"       >> beam.Map(lambda kv: (kv[0], list(kv[1])[0]))
+        )
+        side_static = beam.pvalue.AsDict(static_dict)
+
         # 5) collisions
         filtered_for_collisions = (
             parsed
             | "FilterShortShips" >> beam.Filter(is_ship_long_enough)
         )
         keyed = filtered_for_collisions | "KeyGeohash" >> beam.Map(lambda r: (r["geohash"], r))
-        collisions_raw = keyed | "DetectCollisions" >> beam.ParDo(CollisionDoFn())
 
-        # Zamiast sztucznego klucza None i GroupByKey -> Bezpośrednio zapis do BQ
+        # Wykrywanie kolizji z logiką is_active
+        collisions_raw = (
+            keyed
+            | "DetectCollisions" >> beam.ParDo(CollisionDoFn(side_static), side_static)
+        )
+
+        # Zapis do collisions (5 sek okno, allowed_lateness=0)
         (
             collisions_raw
-            | "WinColl" >> beam.WindowInto(window.FixedWindows(10))
+            | "WinColl" >> beam.WindowInto(
+                window.FixedWindows(5),
+                allowed_lateness=Duration(0)
+            )
             | "WriteCollisions" >> WriteToBigQuery(
                 table=table_collisions,
                 schema="""
                   mmsi_a:INTEGER,
+                  ship_name_a:STRING,
                   mmsi_b:INTEGER,
+                  ship_name_b:STRING,
                   timestamp:TIMESTAMP,
                   cpa:FLOAT,
                   tcpa:FLOAT,
+                  distance:FLOAT,
+                  is_active:BOOL,
                   latitude_a:FLOAT,
                   longitude_a:FLOAT,
                   latitude_b:FLOAT,
