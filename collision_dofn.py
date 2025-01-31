@@ -90,7 +90,7 @@ class CollisionDoFn(beam.DoFn):
 
             # LOG dist_nm
             dist_nm = local_distance_nm(old_ship, ship)
-            logging.info(
+            logging.warning(
                 f"[DetectCollisions] dist_nm={dist_nm:.3f} nm for pair "
                 f"({old_ship['mmsi']}, {ship['mmsi']})"
             )
@@ -100,7 +100,7 @@ class CollisionDoFn(beam.DoFn):
 
             # LOG is_approaching
             approaching = is_approaching(old_ship, ship)
-            logging.info(
+            logging.warning(
                 f"[DetectCollisions] is_approaching={approaching} for pair "
                 f"({old_ship['mmsi']}, {ship['mmsi']})"
             )
@@ -109,7 +109,7 @@ class CollisionDoFn(beam.DoFn):
 
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
             # LOG cpa, tcpa
-            logging.info(
+            logging.warning(
                 f"[DetectCollisions] cpa={cpa:.3f}, tcpa={tcpa:.3f} for pair "
                 f"({old_ship['mmsi']}, {ship['mmsi']})"
             )
