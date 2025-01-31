@@ -1,6 +1,8 @@
 # collision_dofn.py
 
 import time
+import logging
+
 import apache_beam as beam
 import apache_beam.coders
 from apache_beam.transforms.userstate import BagStateSpec
@@ -12,7 +14,7 @@ from cpa_utils import (
     is_approaching
 )
 
-# Ustawiamy podstawowe progi (możesz je dopasować do potrzeb)
+# Ustawiamy podstawowe progi (bez zmian)
 CPA_THRESHOLD        = 0.5
 TCPA_THRESHOLD       = 10.0
 STATE_RETENTION_SEC  = 120   # 2 min
@@ -79,20 +81,39 @@ class CollisionDoFn(beam.DoFn):
         pairs_dict = {}
         for pair_key, dist_val in pairs_list:
             pairs_dict[pair_key] = dist_val
-        pairs_state.clear()  # wyczyść – zapiszemy aktualne wartości
+        pairs_state.clear()
 
         # 5. Szukamy kolizji
         for (old_ship, _) in fresh:
             if old_ship["mmsi"] == ship["mmsi"]:
                 continue
 
+            # LOG dist_nm
             dist_nm = local_distance_nm(old_ship, ship)
+            logging.info(
+                f"[DetectCollisions] dist_nm={dist_nm:.3f} nm for pair "
+                f"({old_ship['mmsi']}, {ship['mmsi']})"
+            )
+
             if dist_nm > DISTANCE_THRESHOLD_NM:
                 continue
-            if not is_approaching(old_ship, ship):
+
+            # LOG is_approaching
+            approaching = is_approaching(old_ship, ship)
+            logging.info(
+                f"[DetectCollisions] is_approaching={approaching} for pair "
+                f"({old_ship['mmsi']}, {ship['mmsi']})"
+            )
+            if not approaching:
                 continue
 
             cpa, tcpa = compute_cpa_tcpa(old_ship, ship)
+            # LOG cpa, tcpa
+            logging.info(
+                f"[DetectCollisions] cpa={cpa:.3f}, tcpa={tcpa:.3f} for pair "
+                f"({old_ship['mmsi']}, {ship['mmsi']})"
+            )
+
             if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
                 # Mamy kolizję
                 mA = old_ship["mmsi"]
@@ -114,6 +135,12 @@ class CollisionDoFn(beam.DoFn):
                 infoB = static_dict.get(mB, {})
                 nameA = infoA.get("ship_name", "Unknown")
                 nameB = infoB.get("ship_name", "Unknown")
+
+                logging.info(
+                    f"[DetectCollisions] YIELD collision for pair "
+                    f"({mA}, {mB}) cpa={cpa:.3f}, tcpa={tcpa:.3f}, dist={dist_nm:.3f}, "
+                    f"is_active={is_active}"
+                )
 
                 yield {
                     "mmsi_a": mA,
