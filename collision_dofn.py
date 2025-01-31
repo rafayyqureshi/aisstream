@@ -11,9 +11,9 @@ from cpa_utils import (
 )
 
 # Ustawiamy progi
-CPA_THRESHOLD        = 2.0   # nm
-TCPA_THRESHOLD       = 20.0  # min
-DISTANCE_THRESHOLD_NM= 10.0  # nm
+CPA_THRESHOLD        = 0.5   # nm
+TCPA_THRESHOLD       = 10.0  # min
+DISTANCE_THRESHOLD_NM= 5.0  # nm
 
 class CollisionDoFn(beam.DoFn):
     """
