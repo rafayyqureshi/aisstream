@@ -13,8 +13,8 @@ from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.utils.timestamp import Duration
 from apache_beam import window
 
-# Import z nowego pliku collision_dofn (w nowej wersji, która przyjmuje (geohash, [lista_statków]))
-from collision_dofn import CollisionDoFn
+# Importujemy nowe klasy z collision_dofn.py
+from collision_dofn import CollisionGeneratorDoFn, CollisionPairDoFn
 
 load_dotenv()
 
@@ -56,7 +56,7 @@ def parse_ais(record_bytes):
         # nazwa statku
         data["ship_name"] = data.get("ship_name", "Unknown")
 
-        # geohash (zakładamy, że jest nadawany w rozdzielczości ~5-7 Nm)
+        # geohash – zakładamy, że nadawany jest w rozdzielczości ~5-7 Nm
         data["geohash"] = data.get("geohash", "none")
 
         return data
@@ -299,44 +299,39 @@ def run():
         )
         side_static = beam.pvalue.AsDict(static_dict)
 
-        # 6) collisions – grupowanie po geohash
+        # 6) Przetwarzanie kolizji
         filtered_for_collisions = parsed | "FilterEnough" >> beam.Filter(is_ship_long_enough)
         keyed = filtered_for_collisions | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
         windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(
-            window.FixedWindows(10),
-            allowed_lateness=Duration(0)
+            window.FixedWindows(10), allowed_lateness=Duration(0)
         )
         grouped = windowed_keyed | "GroupByGeohash" >> beam.GroupByKey()
 
-        collisions_raw = grouped | "DetectCollisions" >> beam.ParDo(CollisionDoFn(side_static), side_static)
+        # Generowanie par kolizyjnych
+        collisions_gen = grouped | "DetectCollisions" >> beam.ParDo(CollisionGeneratorDoFn(side_static), side_static)
+        # Przetwarzanie par – ustalanie flagi is_active na podstawie historii dystansu
+        final_collisions = collisions_gen | "ProcessCollisionPairs" >> beam.ParDo(CollisionPairDoFn())
 
-        (
-            collisions_raw
-            | "WinColl" >> beam.WindowInto(
-                window.FixedWindows(5),
-                allowed_lateness=Duration(0)
-            )
-            | "WriteCollisions" >> WriteToBigQuery(
-                table=table_collisions,
-                schema="""
-                  mmsi_a:INTEGER,
-                  ship_name_a:STRING,
-                  mmsi_b:INTEGER,
-                  ship_name_b:STRING,
-                  timestamp:TIMESTAMP,
-                  cpa:FLOAT,
-                  tcpa:FLOAT,
-                  distance:FLOAT,
-                  is_active:BOOL,
-                  latitude_a:FLOAT,
-                  longitude_a:FLOAT,
-                  latitude_b:FLOAT,
-                  longitude_b:FLOAT
-                """,
-                create_disposition=BigQueryDisposition.CREATE_NEVER,
-                write_disposition=BigQueryDisposition.WRITE_APPEND,
-                method="STREAMING_INSERTS",
-            )
+        final_collisions | "WriteCollisions" >> WriteToBigQuery(
+            table=table_collisions,
+            schema="""
+              mmsi_a:INTEGER,
+              ship_name_a:STRING,
+              mmsi_b:INTEGER,
+              ship_name_b:STRING,
+              timestamp:TIMESTAMP,
+              cpa:FLOAT,
+              tcpa:FLOAT,
+              distance:FLOAT,
+              is_active:BOOL,
+              latitude_a:FLOAT,
+              longitude_a:FLOAT,
+              latitude_b:FLOAT,
+              longitude_b:FLOAT
+            """,
+            create_disposition=BigQueryDisposition.CREATE_NEVER,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            method="STREAMING_INSERTS",
         )
 
 if __name__ == "__main__":
