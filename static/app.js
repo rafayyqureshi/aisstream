@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – finalna wersja + dodanie X-API-Key, spinnerów oraz debouncingu dla CPA/TCPA
+// app.js (moduł LIVE) – finalna wersja z dodanym debouncingiem dla CPA/TCPA oraz spinnerem ładowania
 // ==========================
 
 // ---------------
@@ -27,7 +27,7 @@ let selectedShips = [];       // wybrane statki (max 2)
 let shipsInterval = null;
 let collisionsInterval = null;
 
-// Globalny timeout dla debouncingu CPA/TCPA
+// Globalny timeout dla debouncingu fetch CPA/TCPA
 let cpaUpdateTimeout = null;
 
 // Parametry i filtry
@@ -36,7 +36,7 @@ let cpaFilter = 0.5;     // [0..0.5] – parametr slidera
 let tcpaFilter = 10;     // [1..10] – parametr slidera
 
 // ---------------
-// Funkcje pomocnicze – Spinner
+// Funkcje pomocnicze – Spinner (mała ikona w rogu)
 // ---------------
 function showSpinner(id) {
   const spinner = document.getElementById(id);
@@ -51,11 +51,9 @@ function hideSpinner(id) {
   }
 }
 
-/**
- * buildShipTooltip(ship):
- *   Wyświetla podstawowe info: nazwa, SOG, COG, HDG, LEN (m),
- *   oraz czas od ostatniej aktualizacji (updated).
- */
+// ---------------
+// Funkcje pomocnicze – Tooltip oraz obliczanie czasu
+// ---------------
 function buildShipTooltip(ship) {
   const sogVal = (ship.sog || 0).toFixed(1);
   const cogVal = (ship.cog || 0).toFixed(1);
@@ -82,10 +80,6 @@ function buildShipTooltip(ship) {
   `;
 }
 
-/**
- * computeTimeAgo(timestamp):
- *   Format "Xs ago" (poniżej 60s) lub "Xm Ys ago" (1 min i więcej).
- */
 function computeTimeAgo(timestamp) {
   if (!timestamp) return '';
   const now = Date.now();
@@ -97,7 +91,7 @@ function computeTimeAgo(timestamp) {
 }
 
 // ---------------
-// 3) Funkcja główna – inicjalizacja aplikacji
+// Funkcja główna – inicjalizacja aplikacji
 // ---------------
 async function initLiveApp() {
   map = initSharedMap('map');
@@ -142,7 +136,7 @@ async function initLiveApp() {
 }
 
 // ---------------
-// 4) Pobieranie i wyświetlanie statków
+// Pobieranie i wyświetlanie statków
 // ---------------
 async function fetchShips() {
   showSpinner('ships-spinner');
@@ -160,7 +154,8 @@ async function fetchShips() {
 
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
-  // Usuwamy statki, których nie ma w nowym zestawie
+  
+  // Usuwanie statków, które już nie są aktualne
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -230,7 +225,7 @@ function updateShips(shipsArray) {
 }
 
 // ---------------
-// 5) Obsługa kolizji
+// Pobieranie i wyświetlanie kolizji
 // ---------------
 async function fetchCollisions() {
   showSpinner('collisions-spinner');
@@ -262,7 +257,7 @@ function updateCollisionsList() {
     return;
   }
   
-  // Grupowanie par: nowsze nadpisują starsze
+  // Grupowanie par – nowsze rekordy nadpisują starsze
   const pairsMap = {};
   collisionsData.forEach(c => {
     const a = Math.min(c.mmsi_a, c.mmsi_b);
@@ -375,20 +370,18 @@ function clearSelectedShips() {
   updateSelectedShipsInfo(false);
 }
 
-
 function updateSelectedShipsInfo(selectionChanged) {
   const panel = document.getElementById('selected-ships-info');
   const pairInfo = document.getElementById('pair-info');
   panel.innerHTML = '';
   pairInfo.innerHTML = '';
   
-  // Jeśli żaden statek nie jest zaznaczony
   if (selectedShips.length === 0) {
     panel.innerHTML = "<i>Select up to two ships to calculate CPA/TCPA.</i>";
     return;
   }
   
-  // Jeśli tylko jeden statek jest zaznaczony – wyświetl dane bez obliczeń
+  // Jeśli tylko jeden statek jest zaznaczony – wyświetl informacje bez obliczeń CPA/TCPA
   if (selectedShips.length === 1) {
     const sData = selectedShips.map(mmsi => {
       if (shipMarkers[mmsi]?.shipData) return shipMarkers[mmsi].shipData;
@@ -419,9 +412,8 @@ function updateSelectedShipsInfo(selectionChanged) {
     return;
   }
   
-  // Dla dokładnie dwóch statków – ustaw debouncing dla fetch CPA/TCPA
+  // Dla dokładnie dwóch statków – ustaw debouncing fetch CPA/TCPA (30 sekund)
   if (selectedShips.length === 2) {
-    // Jeśli timeout już istnieje, wyczyść go
     if (cpaUpdateTimeout) {
       clearTimeout(cpaUpdateTimeout);
     }
@@ -436,14 +428,25 @@ function updateSelectedShipsInfo(selectionChanged) {
           } else {
             const cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
             const tcpaVal = (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
-            pairInfo.innerHTML = `<b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min`;
+            // Oblicz dystans między statkami (jeśli dane dostępne)
+            let distNm = "";
+            const sData = selectedShips.map(mmsi => {
+              if (shipMarkers[mmsi]?.shipData) return shipMarkers[mmsi].shipData;
+              else if (shipPolygonLayers[mmsi]?.shipData) return shipPolygonLayers[mmsi].shipData;
+              return null;
+            }).filter(Boolean);
+            if (sData.length === 2) {
+              const [posA, posB] = sData;
+              distNm = computeDistanceNm(posA.latitude, posA.longitude, posB.latitude, posB.longitude).toFixed(2);
+            }
+            pairInfo.innerHTML = `<b>Distance:</b> ${distNm} nm<br><b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min`;
           }
         })
         .catch(err => {
           console.error("Błąd /calculate_cpa_tcpa:", err);
           pairInfo.innerHTML = `<b>CPA/TCPA:</b> N/A`;
         });
-    }, 30000); // fetch wywołany po 30 sekundach
+    }, 30000);
   }
   
   // Renderowanie danych statków (dla wszystkich zaznaczonych)
@@ -483,7 +486,7 @@ function updateSelectedShipsInfo(selectionChanged) {
 }
 
 // ---------------
-// 8) Rysowanie wektora prędkości
+// Rysowanie wektora prędkości
 // ---------------
 function drawVector(mmsi, sd) {
   if (!sd.sog || !sd.cog) return;
@@ -501,14 +504,16 @@ function drawVector(mmsi, sd) {
 }
 
 // ---------------
-// 9) computeDistanceNm (pomocniczo, dystans w nm)
+// Funkcja pomocnicza – dystans (nm)
 // ---------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const R_NM = 3440.065;
   const rad = Math.PI / 180;
   const dLat = (lat2 - lat1) * rad;
   const dLon = (lon2 - lon1) * rad;
-  const a = Math.sin(dLat / 2)**2 + Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin(dLon / 2)**2;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
+            Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R_NM * c;
 }

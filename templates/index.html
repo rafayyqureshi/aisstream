@@ -13,42 +13,16 @@
   <!-- Własne style -->
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
 
-  <!-- Dodatkowe style dla spinnerów -->
-  <style>
-    .spinner {
-      position: fixed;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background-color: rgba(255, 255, 255, 0.9);
-      padding: 12px 20px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      z-index: 2000;
-      font-size: 16px;
-      text-align: center;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-    }
-  </style>
-
   <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
   <!-- MarkerCluster JS -->
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 </head>
 <body>
+  <!-- Mała ikona spinnera – początkowo ukryta -->
+  <div id="loading-icon" class="spinner-icon" style="display: none;"></div>
 
-  <!-- Spinner dla statków (początkowo ukryty) -->
-  <div id="ships-spinner" class="spinner" style="display: none;">
-    Loading ships…
-  </div>
-  
-  <!-- Spinner dla kolizji (początkowo ukryty) -->
-  <div id="collisions-spinner" class="spinner" style="display: none;">
-    Loading collisions…
-  </div>
-
-  <!-- Lewy panel (np. dla statków) -->
+  <!-- Lewy panel -->
   <div id="left-panel">
     <h2>Selected Ships</h2>
     <div id="selected-ships-info"></div>
@@ -64,7 +38,7 @@
   <!-- Kontener mapy -->
   <div id="map"></div>
 
-  <!-- Prawy panel (np. lista kolizji) -->
+  <!-- Prawy panel -->
   <div id="right-panel">
     <h2>Collisions</h2>
     <div id="collision-filters">
