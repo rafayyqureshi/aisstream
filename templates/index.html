@@ -2,109 +2,97 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AIS Collision Detection – Live</title>
 
   <!-- Leaflet CSS -->
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
-    crossorigin=""
-  />
-
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" crossorigin=""/>
   <!-- MarkerCluster CSS -->
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
-  />
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
-  />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <!-- Własne style -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
 
-  <!-- Your own styles -->
-  <link
-    rel="stylesheet"
-    href="{{ url_for('static', filename='styles.css') }}"
-  />
+  <!-- Dodatkowe style dla spinnerów -->
+  <style>
+    .spinner {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background-color: rgba(255, 255, 255, 0.9);
+      padding: 12px 20px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      z-index: 2000;
+      font-size: 16px;
+      text-align: center;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    }
+  </style>
 
   <!-- Leaflet JS -->
-  <script
-    src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
-    crossorigin=""
-  ></script>
-
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" crossorigin=""></script>
   <!-- MarkerCluster JS -->
-  <script
-    src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"
-  ></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 </head>
 <body>
 
-  <!-- Left panel -->
+  <!-- Spinner dla statków (początkowo ukryty) -->
+  <div id="ships-spinner" class="spinner" style="display: none;">
+    Loading ships…
+  </div>
+  
+  <!-- Spinner dla kolizji (początkowo ukryty) -->
+  <div id="collisions-spinner" class="spinner" style="display: none;">
+    Loading collisions…
+  </div>
+
+  <!-- Lewy panel (np. dla statków) -->
   <div id="left-panel">
-    <h2 style="display:flex;justify-content:space-between;align-items:center;">
-      Selected Ships
-      <button id="clearSelectedShips">Clear</button>
-    </h2>
-    <div id="vector-length-container" style="margin-bottom:8px;">
+    <h2>Selected Ships</h2>
+    <div id="selected-ships-info"></div>
+    <div id="pair-info"></div>
+    <button id="clearSelectedShips">Clear</button>
+    <div id="vector-length-container">
       <label for="vectorLengthSlider">Vector length (min):</label>
       <input type="range" id="vectorLengthSlider" min="1" max="120" value="15">
       <span id="vectorLengthValue">15</span>
     </div>
-    <div id="selected-ships-info"></div>
-    <div id="pair-info" style="margin-top:10px; font-weight:bold;"></div>
   </div>
 
-  <!-- Map container -->
+  <!-- Kontener mapy -->
   <div id="map"></div>
 
-  <!-- Right panel -->
+  <!-- Prawy panel (np. lista kolizji) -->
   <div id="right-panel">
-    <h2 style="display:flex;justify-content:space-between;align-items:center;">
-      Collisions
-      <button id="infoButton" style="font-size:14px;cursor:pointer;">Info</button>
-    </h2>
+    <h2>Collisions</h2>
     <div id="collision-filters">
       <label for="cpaFilter">Max CPA (Nm):</label>
-      <input
-        type="range"
-        id="cpaFilter"
-        min="0"
-        max="0.5"
-        step="0.1"
-        value="0.5"
-      />
+      <input type="range" id="cpaFilter" min="0" max="0.5" step="0.1" value="0.5">
       <span id="cpaValue">0.5</span>
       <br/>
       <label for="tcpaFilter">Max TCPA (min):</label>
-      <input
-        type="range"
-        id="tcpaFilter"
-        min="1"
-        max="10"
-        step="1"
-        value="10"
-      />
+      <input type="range" id="tcpaFilter" min="1" max="10" step="1" value="10">
       <span id="tcpaValue">10</span>
     </div>
     <div id="collision-list"></div>
   </div>
 
-  <!-- Optional modal Info -->
+  <!-- Górny pasek tytułowy -->
+  <div id="top-center-bar">
+    AIS Collision Detection – Live Map
+  </div>
+
+  <!-- Modal z informacjami (opcjonalnie) -->
   <div id="infoModal" class="modal" style="display:none;">
     <div class="modal-content">
       <span id="modalClose" class="modal-close">&times;</span>
-      <p>
-        This is an example Info modal. Add your project details here.
-      </p>
+      <p>This is an example Info modal. Add your project details here.</p>
     </div>
   </div>
 
-  <!-- 
-    IMPORTANT: Load common.js FIRST, then app.js 
-    Make sure these files actually exist in your static/ folder
-  -->
+  <!-- Ładowanie wspólnych skryptów -->
   <script src="{{ url_for('static', filename='common.js') }}"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

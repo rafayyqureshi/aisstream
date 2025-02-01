@@ -1,11 +1,24 @@
+/* Definicje zmiennych – paleta kolorów, czcionka, przejścia */
+:root {
+  --primary-color: #007bff;
+  --secondary-color: #6c757d;
+  --background-color: #f8f9fa;
+  --panel-bg: rgba(255, 255, 255, 0.95);
+  --border-color: #ddd;
+  --shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  --transition-speed: 0.3s;
+  --font-family: 'Roboto', sans-serif;
+}
+
 /* Resetowanie marginesów, wypełnień i podstawowe style */
 body, html {
   margin: 0;
   padding: 0;
   height: 100%;
   width: 100%;
-  font-family: sans-serif;
+  font-family: var(--font-family);
   font-size: 14px;
+  background-color: var(--background-color);
 }
 
 /* Kontener mapy na całe okno (pod panelami) */
@@ -15,35 +28,28 @@ body, html {
   left: 0;
   right: 0;
   bottom: 0;
-  /* Mapa w tle; panele nakładamy absolutnie */
-  z-index: 1; 
+  z-index: 1;
 }
 
-/* Lewy panel:
-   - Z reguły używamy go w module Live do wyświetlania "Selected ships" itp.
-   - W module History może być w trybie "display: none" i dopiero w widoku odtwarzania
-     kolizji pokazujemy go (tak jak w pliku JS).
-*/
+/* Lewy panel */
 #left-panel {
-  position: absolute;
-  top: 120px; /* odsunięcie od góry (poniżej top-center-bar) */
-  left: 0;
+  position: fixed;
+  top: 80px;
+  left: 20px;
   width: 300px;
-  max-height: 80%; /* aby nie przykrywać całej mapy w pionie */
-  background-color: rgba(255, 255, 255, 0.9);
-  padding: 10px;
-  overflow: auto;
+  max-height: 80%;
+  background-color: var(--panel-bg);
+  padding: 15px;
+  overflow-y: auto;
   z-index: 1000;
-  border-radius: 4px;
-  box-shadow: 2px 2px 8px rgba(0,0,0,0.2);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  transition: all var(--transition-speed);
 }
 
-/* Prawy panel:
-   - Lista kolizji na żywo, albo Collisions(History). 
-   - Zajmuje całą wysokość, aby mieć przewijaną listę.
-*/
+/* Prawy panel */
 #right-panel {
-  position: absolute;
+  position: fixed;
   top: 0;
   right: 0;
   width: 300px;
@@ -51,51 +57,51 @@ body, html {
   background-color: #fff;
   overflow-y: auto;
   z-index: 1000;
-  box-shadow: -2px 0 5px rgba(0, 0, 0, 0.3);
-  padding: 10px;
+  box-shadow: -4px 0 8px rgba(0, 0, 0, 0.1);
+  padding: 15px;
+  transition: all var(--transition-speed);
 }
 
-/* Górny pasek do przełączania dni w History 
-   lub do prezentacji tytułu, np. "Historical Mode"
-*/
+/* Górny pasek */
 #top-center-bar {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(255, 255, 255, 0.9);
+  background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+  color: #fff;
   padding: 10px 20px;
   z-index: 1100;
   border-radius: 5px;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+  box-shadow: var(--shadow);
   text-align: center;
 }
 
-/* Dolny pasek do sterowania animacją (History) */
+/* Dolny pasek (np. do sterowania animacją) */
 #bottom-center-bar {
-  position: absolute;
+  position: fixed;
   bottom: 10px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--panel-bg);
   padding: 10px 20px;
   z-index: 1100;
   border-radius: 5px;
   text-align: center;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+  box-shadow: var(--shadow);
 }
 
 /* Lista kolizji – każdy element */
 .collision-item {
-  border-bottom: 1px solid #ccc;
-  padding: 6px;
+  border-bottom: 1px solid var(--border-color);
+  padding: 8px;
   cursor: pointer;
   font-size: 14px;
   background: #fff;
-  transition: background 0.2s;
+  transition: background var(--transition-speed);
 }
 .collision-item:hover {
-  background: #f7f7f7;
+  background: #f1f1f1;
 }
 
 /* Nagłówek w elemencie kolizji */
@@ -105,25 +111,29 @@ body, html {
   justify-content: space-between;
 }
 
-/* Przycisk lupki w kolizjach, lub dowolny "zoom-button" */
+/* Przycisk lupki (zoom-button) */
 .zoom-button {
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 18px;
   margin-left: 8px;
-  color: #333;
+  color: var(--primary-color);
+  transition: color var(--transition-speed);
+}
+.zoom-button:hover {
+  color: var(--secondary-color);
 }
 
-/* Różne sekcje wewnątrz paneli: suwak cpa/tdpa, itp. */
+/* Sekcje paneli */
 #vector-length-container,
 #selected-ships-info,
 #pair-info,
 #collision-filters {
-  margin-bottom: 10px;
+  margin-bottom: 15px;
 }
 
-/* Przykładowa stylizacja day-controls (History) w top-center-bar */
+/* Styl przycisków w day-controls (History) */
 #day-controls {
   display: flex;
   align-items: center;
@@ -132,8 +142,29 @@ body, html {
 }
 #day-controls button {
   cursor: pointer;
-  padding: 4px 8px;
+  padding: 6px 12px;
+  border: none;
+  background-color: var(--primary-color);
+  color: #fff;
+  border-radius: 4px;
+  transition: background var(--transition-speed);
+}
+#day-controls button:hover {
+  background-color: var(--secondary-color);
 }
 
-/* Ewentualnie styl animowanych przycisków, itp. 
-   Możesz dodać transition, hover states, itd. */
+/* Dodatkowe style dla spinnerów (jeśli używane globalnie, można przenieść do oddzielnego pliku) */
+.spinner {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background-color: var(--panel-bg);
+  padding: 12px 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  z-index: 2000;
+  font-size: 16px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
