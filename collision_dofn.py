@@ -1,7 +1,7 @@
 import time
 import logging
 import apache_beam as beam
-from apache_beam.transforms.userstate import ValueStateSpec
+from apache_beam.transforms.userstate import BagStateSpec
 from apache_beam.coders import FloatCoder
 
 # Import funkcji z cpa_utils.py
@@ -25,7 +25,7 @@ class CollisionGeneratorDoFn(beam.DoFn):
       - funkcja is_approaching() zwraca True,
       - obliczone CPA < CPA_THRESHOLD oraz 0 <= TCPA < TCPA_THRESHOLD.
       
-    Side input (static_side) służy do uzupełnienia danych statycznych, np. ship_name.
+    Side input (static_side) służy do uzupełnienia danych statycznych (np. ship_name).
     Wyjściowy rekord ma postać: (pair_key, record)
     """
     def __init__(self, static_side):
@@ -64,13 +64,14 @@ class CollisionGeneratorDoFn(beam.DoFn):
                     mA = shipA["mmsi"]
                     mB = shipB["mmsi"]
                     pair_key = tuple(sorted([mA, mB]))
-
-                    # Uzupełnienie danych statycznych
+                    
+                    # Uzupełnienie danych statycznych – nazwy statków
                     infoA = static_side.get(mA, {})
                     infoB = static_side.get(mB, {})
                     nameA = infoA.get("ship_name", "Unknown")
                     nameB = infoB.get("ship_name", "Unknown")
-
+                    
+                    # Przygotowanie rekordu kolizyjnego; is_active ustalimy później
                     record = {
                         "mmsi_a": mA,
                         "ship_name_a": nameA,
@@ -80,7 +81,7 @@ class CollisionGeneratorDoFn(beam.DoFn):
                         "cpa": cpa,
                         "tcpa": tcpa,
                         "distance": dist_nm,
-                        "is_active": None,  # Do uzupełnienia w CollisionPairDoFn
+                        "is_active": None,  # Uzupełnienie w CollisionPairDoFn
                         "latitude_a": shipA["latitude"],
                         "longitude_a": shipA["longitude"],
                         "latitude_b": shipB["latitude"],
@@ -91,21 +92,20 @@ class CollisionGeneratorDoFn(beam.DoFn):
 class CollisionPairDoFn(beam.DoFn):
     """
     DoFn ustalający flagę is_active na podstawie historii dystansu dla danej pary.
-    Używamy ValueStateSpec do przechowywania pojedynczej wartości – minimalnego dystansu
-    dotychczas obserwowanego dla danej pary.
-      - Jeśli bieżący dystans jest mniejszy lub równy zapisanej wartości, ustawiamy is_active na True
+    Używamy BagStateSpec do symulacji pojedynczej wartości (minimalnego dystansu) dla danej pary.
+      - Jeśli bieżący dystans jest mniejszy lub równy zapisanej wartości, is_active = True;
       - W przeciwnym przypadku is_active = False.
     """
-    MIN_DIST_STATE = ValueStateSpec('min_dist', FloatCoder())
+    MIN_DIST_STATE = BagStateSpec('min_dist', FloatCoder())
 
     def process(self, element, min_dist_state=beam.DoFn.StateParam(MIN_DIST_STATE)):
         pair_key, record = element
         current_distance = record['distance']
-        current_min = min_dist_state.read()
-        if current_min is None:
-            min_dist = current_distance
+        current_state = list(min_dist_state.read())
+        if current_state:
+            min_dist = current_state[0]
         else:
-            min_dist = current_min
+            min_dist = current_distance
 
         if current_distance <= min_dist:
             min_dist = current_distance
@@ -113,11 +113,14 @@ class CollisionPairDoFn(beam.DoFn):
         else:
             is_active = False
 
-        min_dist_state.write(min_dist)
+        min_dist_state.clear()
+        min_dist_state.add(min_dist)
+
         record['is_active'] = is_active
 
         logging.info(
             f"[CollisionPairDoFn] Pair {pair_key}: current_distance={current_distance:.3f}, "
             f"min_dist={min_dist:.3f}, is_active={is_active}"
         )
+
         yield record
