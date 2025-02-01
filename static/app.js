@@ -12,17 +12,17 @@ document.addEventListener('DOMContentLoaded', () => {
 // ---------------
 // 2) Zmienne globalne
 // ---------------
-const API_KEY = "Ais-mon";  // Klucz API (jawnie wpisany do celów testowych)
+const API_KEY = "Ais-mon";  // Klucz API (do celów testowych)
 
 let map;
 let markerClusterGroup;
-let shipMarkers = {};         // klucz: mmsi -> L.marker
-let shipPolygonLayers = {};   // klucz: mmsi -> L.polygon
-let overlayVectors = {};      // klucz: mmsi -> [L.Polyline]
+let shipMarkers = {};         // mmsi -> L.marker
+let shipPolygonLayers = {};   // mmsi -> L.polygon
+let overlayVectors = {};      // mmsi -> [L.Polyline]
 
 let collisionMarkers = [];
 let collisionsData = [];
-let selectedShips = [];       // wybrane statki (max 2)
+let selectedShips = [];       // lista mmsi wybranych statków (max 2)
 
 let shipsInterval = null;
 let collisionsInterval = null;
@@ -31,28 +31,24 @@ let collisionsInterval = null;
 let cpaUpdateTimeout = null;
 
 // Parametry i filtry
-let vectorLength = 15;   // minuty (dla rysowania wektora prędkości)
-let cpaFilter = 0.5;     // [0..0.5] – slider
-let tcpaFilter = 10;     // [1..10] – slider
+let vectorLength = 15;   // minuty (dla rysowania wektora)
+let cpaFilter = 0.5;     // slider CPA (Nm)
+let tcpaFilter = 10;     // slider TCPA (min)
 
 // ---------------
 // Funkcje pomocnicze – Spinner (mała ikona w rogu)
 // ---------------
 function showSpinner(id) {
   const spinner = document.getElementById(id);
-  if (spinner) {
-    spinner.style.display = 'block';
-  }
+  if (spinner) spinner.style.display = 'block';
 }
 function hideSpinner(id) {
   const spinner = document.getElementById(id);
-  if (spinner) {
-    spinner.style.display = 'none';
-  }
+  if (spinner) spinner.style.display = 'none';
 }
 
 // ---------------
-// Funkcje pomocnicze – Tooltip oraz obliczanie czasu
+// Funkcje pomocnicze – Tooltip i czas
 // ---------------
 function buildShipTooltip(ship) {
   const sogVal = (ship.sog || 0).toFixed(1);
@@ -65,10 +61,7 @@ function buildShipTooltip(ship) {
     lengthStr = lenMeters.toFixed(1);
   }
   
-  let updatedAgo = '';
-  if (ship.timestamp) {
-    updatedAgo = computeTimeAgo(ship.timestamp);
-  }
+  let updatedAgo = ship.timestamp ? computeTimeAgo(ship.timestamp) : '';
   
   return `
     <div>
@@ -122,7 +115,7 @@ async function initLiveApp() {
     fetchCollisions();
   });
   
-  // Przycisk czyszczenia statków
+  // Przycisk Clear – zakładamy, że znajduje się w lewym panelu
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
   
   // Pierwsze pobrania
@@ -153,6 +146,7 @@ async function fetchShips() {
 
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
+  // Usuwamy statki, których już nie ma
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -254,7 +248,7 @@ function updateCollisionsList() {
     return;
   }
   
-  // Grupowanie par – nowsze rekordy nadpisują starsze
+  // Grupujemy rekordy – nowsze nadpisują starsze dla danej pary
   const pairsMap = {};
   collisionsData.forEach(c => {
     const a = Math.min(c.mmsi_a, c.mmsi_b);
@@ -337,9 +331,6 @@ function updateCollisionsList() {
   });
 }
 
-// ---------------
-// Funkcja zoomToCollision
-// ---------------
 function zoomToCollision(c) {
   const bounds = L.latLngBounds([
     [c.latitude_a, c.longitude_a],
@@ -351,9 +342,6 @@ function zoomToCollision(c) {
   selectShip(c.mmsi_b);
 }
 
-// ---------------
-// Zaznaczanie statków
-// ---------------
 function selectShip(mmsi) {
   if (!selectedShips.includes(mmsi)) {
     if (selectedShips.length >= 2) {
@@ -374,43 +362,59 @@ function clearSelectedShips() {
 }
 
 // ---------------
-// Aktualizacja informacji o zaznaczonych statkach z debouncingiem fetch CPA/TCPA
+// Aktualizacja informacji w lewym panelu z debouncingiem dla CPA/TCPA
 // ---------------
 function updateSelectedShipsInfo() {
-  const panel = document.getElementById('selected-ships-info');
-  const pairInfo = document.getElementById('pair-info');
-  panel.innerHTML = '';
-  pairInfo.innerHTML = '';
+  // Zakładamy, że w lewym panelu mamy cztery sekcje:
+  // - Nagłówek: id="selected-ships-header"
+  // - Dane pierwszego statku: id="selected-ship-1"
+  // - Dane drugiego statku: id="selected-ship-2"
+  // - Obliczone dane (dystans, CPA, TCPA): id="calculated-info"
   
-  // Gdy nie ma zaznaczonych statków
+  const headerDiv = document.getElementById('selected-ships-header');
+  const ship1Div = document.getElementById('selected-ship-1');
+  const ship2Div = document.getElementById('selected-ship-2');
+  const calcDiv = document.getElementById('calculated-info');
+  
+  // Czyścimy zawartość wszystkich sekcji
+  headerDiv.innerHTML = '<h2>Selected Ships <button id="clearSelectedShips">Clear</button></h2>';
+  ship1Div.innerHTML = '';
+  ship2Div.innerHTML = '';
+  calcDiv.innerHTML = '';
+  
+  // Przypinamy zdarzenie do przycisku Clear (jeśli jeszcze nie przypisano)
+  document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
+  
+  // Gdy nie ma żadnych zaznaczonych statków
   if (selectedShips.length === 0) {
-    panel.innerHTML = "<i>Select up to two ships to calculate CPA/TCPA.</i>";
+    ship1Div.innerHTML = "<i>No ship selected.</i>";
     return;
   }
   
-  // Jeśli tylko jeden statek jest zaznaczony – wyświetl info o statku (bez CPA/TCPA)
-  if (selectedShips.length === 1) {
-    const shipData = getShipData(selectedShips[0]);
-    if (shipData) {
-      panel.innerHTML = renderSingleShipInfo(shipData);
-      drawVector(shipData.mmsi, shipData);
+  // Funkcja pomocnicza: pobiera dane statku po MMSI
+  function getShipData(mmsi) {
+    if (shipMarkers[mmsi] && shipMarkers[mmsi].shipData) return shipMarkers[mmsi].shipData;
+    if (shipPolygonLayers[mmsi] && shipPolygonLayers[mmsi].shipData) return shipPolygonLayers[mmsi].shipData;
+    return null;
+  }
+  
+  // Renderowanie informacji o statkach
+  if (selectedShips.length >= 1) {
+    const data1 = getShipData(selectedShips[0]);
+    if (data1) {
+      ship1Div.innerHTML = renderShipInfo(data1);
+      drawVector(data1.mmsi, data1);
     }
-    return;
   }
-  
-  // Jeśli dokładnie dwa statki są zaznaczone
-  if (selectedShips.length === 2) {
-    // Renderuj informacje o obu statkach
-    const sData = selectedShips.map(getShipData).filter(Boolean);
-    sData.forEach(sd => {
-      panel.innerHTML += renderSingleShipInfo(sd);
-      drawVector(sd.mmsi, sd);
-    });
+  if (selectedShips.length >= 2) {
+    const data2 = getShipData(selectedShips[1]);
+    if (data2) {
+      ship2Div.innerHTML = renderShipInfo(data2);
+      drawVector(data2.mmsi, data2);
+    }
     
-    // Debouncing – odczekaj 30 sekund przed wykonaniem fetch do /calculate_cpa_tcpa
-    if (cpaUpdateTimeout) {
-      clearTimeout(cpaUpdateTimeout);
-    }
+    // Debouncing – aktualizacja obliczeń CPA/TCPA po 30 sekundach
+    if (cpaUpdateTimeout) clearTimeout(cpaUpdateTimeout);
     cpaUpdateTimeout = setTimeout(() => {
       const [mA, mB] = selectedShips.sort((a, b) => a - b);
       const url = `/calculate_cpa_tcpa?mmsi_a=${mA}&mmsi_b=${mB}`;
@@ -418,29 +422,29 @@ function updateSelectedShipsInfo() {
         .then(r => r.json())
         .then(data => {
           let distanceStr = "";
-          const sData = selectedShips.map(getShipData).filter(Boolean);
-          if (sData.length === 2) {
-            const [shipA, shipB] = sData;
-            const dist = computeDistanceNm(shipA.latitude, shipA.longitude, shipB.latitude, shipB.longitude);
+          const d1 = getShipData(mA);
+          const d2 = getShipData(mB);
+          if (d1 && d2) {
+            const dist = computeDistanceNm(d1.latitude, d1.longitude, d2.latitude, d2.longitude);
             distanceStr = `<b>Distance:</b> ${dist.toFixed(2)} nm<br>`;
           }
           if (data.error) {
-            pairInfo.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> N/A (${data.error})`;
+            calcDiv.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> N/A (${data.error})`;
           } else {
             const cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
             const tcpaVal = (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
-            pairInfo.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min`;
+            calcDiv.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min`;
           }
         })
         .catch(err => {
           console.error("Error /calculate_cpa_tcpa:", err);
-          pairInfo.innerHTML = `<b>CPA/TCPA:</b> N/A`;
+          calcDiv.innerHTML = `<b>CPA/TCPA:</b> N/A`;
         });
-    }, 30000);
+    }, 30000); // 30 sekund
   }
   
-  // Helper: render info o statku
-  function renderSingleShipInfo(ship) {
+  // Helper: renderowanie info o statku
+  function renderShipInfo(ship) {
     const sogVal = (ship.sog || 0).toFixed(1);
     const cogVal = (ship.cog || 0).toFixed(1);
     const hdgVal = (ship.heading != null) ? ship.heading.toFixed(1) : cogVal;
@@ -459,13 +463,6 @@ function updateSelectedShipsInfo() {
         Updated: ${updatedAgo}
       </div>
     `;
-  }
-  
-  // Helper: pobierz dane statku
-  function getShipData(mmsi) {
-    if (shipMarkers[mmsi] && shipMarkers[mmsi].shipData) return shipMarkers[mmsi].shipData;
-    if (shipPolygonLayers[mmsi] && shipPolygonLayers[mmsi].shipData) return shipPolygonLayers[mmsi].shipData;
-    return null;
   }
 }
 
@@ -488,7 +485,7 @@ function drawVector(mmsi, sd) {
 }
 
 // ---------------
-// Obliczanie dystansu (nm)
+// Obliczanie dystansu w NM
 // ---------------
 function computeDistanceNm(lat1, lon1, lat2, lon2) {
   const R_NM = 3440.065;

@@ -22,23 +22,31 @@
   <!-- Mała ikona spinnera – początkowo ukryta -->
   <div id="loading-icon" class="spinner-icon" style="display: none;"></div>
 
-  <!-- Lewy panel -->
+  <!-- Lewy panel podzielony na cztery sekcje -->
   <div id="left-panel">
-    <h2>Selected Ships</h2>
-    <div id="selected-ships-info"></div>
-    <div id="pair-info"></div>
-    <button id="clearSelectedShips">Clear</button>
-    <div id="vector-length-container">
-      <label for="vectorLengthSlider">Vector length (min):</label>
-      <input type="range" id="vectorLengthSlider" min="1" max="120" value="15">
-      <span id="vectorLengthValue">15</span>
+    <!-- Sekcja 1: Nagłówek z napisem "Selected Ships" i przyciskiem Clear -->
+    <div id="left-panel-header">
+      <h2>Selected Ships</h2>
+      <button id="clearSelectedShips">Clear</button>
+    </div>
+    <!-- Sekcja 2: Dane pierwszego statku -->
+    <div id="selected-ship-1">
+      <!-- Dane pierwszego statku będą dynamicznie wstawiane tutaj -->
+    </div>
+    <!-- Sekcja 3: Dane drugiego statku -->
+    <div id="selected-ship-2">
+      <!-- Dane drugiego statku będą dynamicznie wstawiane tutaj -->
+    </div>
+    <!-- Sekcja 4: Obliczone dane (dystans, CPA, TCPA) -->
+    <div id="calculated-info">
+      <!-- Obliczone informacje pojawią się tutaj -->
     </div>
   </div>
 
   <!-- Kontener mapy -->
   <div id="map"></div>
 
-  <!-- Prawy panel -->
+  <!-- Prawy panel (lista kolizji) -->
   <div id="right-panel">
     <h2>Collisions</h2>
     <div id="collision-filters">
