@@ -115,7 +115,7 @@ async function initLiveApp() {
     fetchCollisions();
   });
   
-  // Przycisk Clear – zakładamy, że znajduje się w lewym panelu
+  // Przycisk Clear – umieszczony w lewym panelu (element o id "clearSelectedShips" znajduje się już w index.html)
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
   
   // Pierwsze pobrania
@@ -243,7 +243,7 @@ function updateCollisionsList() {
   if (!collisionsData || collisionsData.length === 0) {
     const noItem = document.createElement('div');
     noItem.classList.add('collision-item');
-    noItem.innerHTML = '<i>Brak bieżących kolizji</i>';
+    noItem.innerHTML = '<i>No collisions currently.</i>';
     collisionList.appendChild(noItem);
     return;
   }
@@ -271,7 +271,7 @@ function updateCollisionsList() {
   if (finalColls.length === 0) {
     const d = document.createElement('div');
     d.classList.add('collision-item');
-    d.innerHTML = '<i>Brak bieżących kolizji</i>';
+    d.innerHTML = '<i>No collisions currently.</i>';
     collisionList.appendChild(d);
     return;
   }
@@ -313,7 +313,7 @@ function updateCollisionsList() {
       iconAnchor: [12, 12]
     });
     const mark = L.marker([latC, lonC], { icon: collisionIcon })
-      .bindTooltip(`Kolizja: ${shipAName} & ${shipBName}`, { direction: 'top', sticky: true })
+      .bindTooltip(`Collision: ${shipAName} & ${shipBName}`, { direction: 'top', sticky: true })
       .on('click', () => zoomToCollision(c));
     mark.addTo(map);
     collisionMarkers.push(mark);
@@ -362,36 +362,35 @@ function clearSelectedShips() {
 }
 
 // ---------------
-// Aktualizacja informacji w lewym panelu z debouncingiem dla CPA/TCPA
+// Aktualizacja informacji w lewym panelu z debouncingiem dla fetch CPA/TCPA
 // ---------------
 function updateSelectedShipsInfo() {
-  // Zakładamy, że w lewym panelu mamy cztery sekcje:
-  // - Nagłówek: id="selected-ships-header"
+  // Używamy elementów z index.html:
+  // - Nagłówek: id="left-panel-header"
   // - Dane pierwszego statku: id="selected-ship-1"
   // - Dane drugiego statku: id="selected-ship-2"
-  // - Obliczone dane (dystans, CPA, TCPA): id="calculated-info"
-  
-  const headerDiv = document.getElementById('selected-ships-header');
+  // - Dane obliczone: id="calculated-info"
+  const headerDiv = document.getElementById('left-panel-header');
   const ship1Div = document.getElementById('selected-ship-1');
   const ship2Div = document.getElementById('selected-ship-2');
   const calcDiv = document.getElementById('calculated-info');
   
-  // Czyścimy zawartość wszystkich sekcji
+  // Czyścimy zawartość sekcji
   headerDiv.innerHTML = '<h2>Selected Ships <button id="clearSelectedShips">Clear</button></h2>';
   ship1Div.innerHTML = '';
   ship2Div.innerHTML = '';
   calcDiv.innerHTML = '';
   
-  // Przypinamy zdarzenie do przycisku Clear (jeśli jeszcze nie przypisano)
+  // Przypinamy zdarzenie do przycisku Clear
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
   
-  // Gdy nie ma żadnych zaznaczonych statków
+  // Jeśli żaden statek nie jest zaznaczony
   if (selectedShips.length === 0) {
     ship1Div.innerHTML = "<i>No ship selected.</i>";
     return;
   }
   
-  // Funkcja pomocnicza: pobiera dane statku po MMSI
+  // Helper – pobiera dane statku
   function getShipData(mmsi) {
     if (shipMarkers[mmsi] && shipMarkers[mmsi].shipData) return shipMarkers[mmsi].shipData;
     if (shipPolygonLayers[mmsi] && shipPolygonLayers[mmsi].shipData) return shipPolygonLayers[mmsi].shipData;
@@ -413,7 +412,7 @@ function updateSelectedShipsInfo() {
       drawVector(data2.mmsi, data2);
     }
     
-    // Debouncing – aktualizacja obliczeń CPA/TCPA po 30 sekundach
+    // Debouncing – wykonaj fetch CPA/TCPA raz na 30 sekund
     if (cpaUpdateTimeout) clearTimeout(cpaUpdateTimeout);
     cpaUpdateTimeout = setTimeout(() => {
       const [mA, mB] = selectedShips.sort((a, b) => a - b);
@@ -443,7 +442,7 @@ function updateSelectedShipsInfo() {
     }, 30000); // 30 sekund
   }
   
-  // Helper: renderowanie info o statku
+  // Helper – renderowanie info o statku
   function renderShipInfo(ship) {
     const sogVal = (ship.sog || 0).toFixed(1);
     const cogVal = (ship.cog || 0).toFixed(1);
