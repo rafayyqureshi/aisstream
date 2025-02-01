@@ -168,11 +168,11 @@ body, html {
   background-color: var(--secondary-color);
 }
 
-/* Spinner – mała ikona w prawym górnym rogu */
+/* Spinner – mała ikona w lewym dolnym rogu */
 .spinner-icon {
   position: fixed;
-  top: 10px;
-  right: 10px;
+  bottom: 10px;
+  left: 10px;
   width: 24px;
   height: 24px;
   border: 3px solid var(--primary-color);
