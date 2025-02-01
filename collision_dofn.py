@@ -14,10 +14,10 @@ from cpa_utils import (
 )
 
 # Ustawienia progów
-CPA_THRESHOLD = 2.0            # mile morskie
-TCPA_THRESHOLD = 20.0          # minuty
+CPA_THRESHOLD = 0.5            # mile morskie
+TCPA_THRESHOLD = 10.0          # minuty
 STATE_RETENTION_SEC = 120      # 2 minuty
-DISTANCE_THRESHOLD_NM = 10.0   # mile morskie
+DISTANCE_THRESHOLD_NM = 5.0   # mile morskie
 
 class CollisionGeneratorDoFn(beam.DoFn):
     """
