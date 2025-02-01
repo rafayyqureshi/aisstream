@@ -13,32 +13,25 @@ from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.utils.timestamp import Duration
 from apache_beam import window
 
-# Importujemy nowe klasy z collision_dofn.py
+# Import DoFns z collision_dofn.py
 from collision_dofn import CollisionGeneratorDoFn, CollisionPairDoFn
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def parse_ais(record_bytes):
-    """
-    Parsuje JSON AIS z Pub/Sub.
-    """
     try:
         data = json.loads(record_bytes.decode("utf-8"))
         req = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
         if not all(r in data for r in req):
             return None
-
-        data["mmsi"]      = int(data["mmsi"])
-        data["latitude"]  = float(data["latitude"])
+        data["mmsi"] = int(data["mmsi"])
+        data["latitude"] = float(data["latitude"])
         data["longitude"] = float(data["longitude"])
-        data["cog"]       = float(data["cog"])
-        data["sog"]       = float(data["sog"])
+        data["cog"] = float(data["cog"])
+        data["sog"] = float(data["sog"])
         data.pop("ship_length", None)
-
-        # heading
         hdg = data.get("heading")
         if hdg is not None:
             try:
@@ -47,18 +40,11 @@ def parse_ais(record_bytes):
                 data["heading"] = None
         else:
             data["heading"] = None
-
-        # wymiary
         for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
             v = data.get(d)
             data[d] = float(v) if v is not None else None
-
-        # nazwa statku
         data["ship_name"] = data.get("ship_name", "Unknown")
-
-        # geohash – zakładamy, że nadawany jest w rozdzielczości ~5-7 Nm
         data["geohash"] = data.get("geohash", "none")
-
         return data
     except:
         return None
@@ -94,21 +80,16 @@ class CreateBQTableDoFn(beam.DoFn):
     def process(self, table_ref):
         from google.cloud import bigquery
         client_local = bigquery.Client()
-
         table_id = table_ref['table_id']
-        schema    = table_ref['schema']['fields']
+        schema = table_ref['schema']['fields']
         time_part = table_ref.get('time_partitioning')
-        cluster   = table_ref.get('clustering_fields')
-
+        cluster = table_ref.get('clustering_fields')
         table = bigquery.Table(table_id, schema=schema)
-
         if time_part:
             time_part_corrected = { k if k != 'type' else 'type_': v for k, v in time_part.items() }
             table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
-
         if cluster:
             table.clustering_fields = cluster
-
         try:
             client_local.get_table(table_id)
             logging.info(f"Tabela {table_id} już istnieje.")
@@ -127,32 +108,30 @@ def is_ship_long_enough(ship):
 
 def run():
     logging.getLogger().setLevel(logging.INFO)
-
-    project_id  = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
-    dataset     = os.getenv("LIVE_DATASET", "ais_dataset_us")
-    input_sub   = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
-    region      = os.getenv("REGION", "us-east1")
-    temp_loc    = os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp")
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
+    dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
+    input_sub = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
+    region = os.getenv("REGION", "us-east1")
+    temp_loc = os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp")
     staging_loc = os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging")
-    job_name    = os.getenv("JOB_NAME", "ais-collision-job")
-
-    table_positions  = f"{project_id}.{dataset}.ships_positions"
+    job_name = os.getenv("JOB_NAME", "ais-collision-job")
+    table_positions = f"{project_id}.{dataset}.ships_positions"
     table_collisions = f"{project_id}.{dataset}.collisions"
-    table_static     = f"{project_id}.{dataset}.ships_static"
+    table_static = f"{project_id}.{dataset}.ships_static"
 
     tables_to_create = [
         {
             'table_id': table_positions,
             'schema': {
                 "fields": [
-                    {"name": "mmsi",       "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name",  "type": "STRING",  "mode": "NULLABLE"},
-                    {"name": "latitude",   "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude",  "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "cog",        "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "sog",        "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "heading",    "type": "FLOAT",   "mode": "NULLABLE"},
-                    {"name": "timestamp",  "type": "TIMESTAMP", "mode": "REQUIRED"}
+                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "latitude", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "longitude", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "cog", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "sog", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "heading", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -166,19 +145,19 @@ def run():
             'table_id': table_collisions,
             'schema': {
                 "fields": [
-                    {"name": "mmsi_a",       "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name_a",  "type": "STRING",  "mode": "NULLABLE"},
-                    {"name": "mmsi_b",       "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name_b",  "type": "STRING",  "mode": "NULLABLE"},
-                    {"name": "timestamp",    "type": "TIMESTAMP", "mode": "REQUIRED"},
-                    {"name": "cpa",          "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "tcpa",         "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "distance",     "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "is_active",    "type": "BOOL",    "mode": "REQUIRED"},
-                    {"name": "latitude_a",   "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude_a",  "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "latitude_b",   "type": "FLOAT",   "mode": "REQUIRED"},
-                    {"name": "longitude_b",  "type": "FLOAT",   "mode": "REQUIRED"}
+                    {"name": "mmsi_a", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name_a", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "mmsi_b", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name_b", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"},
+                    {"name": "cpa", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "tcpa", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "distance", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "is_active", "type": "BOOL", "mode": "REQUIRED"},
+                    {"name": "latitude_a", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "longitude_a", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "latitude_b", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "longitude_b", "type": "FLOAT", "mode": "REQUIRED"}
                 ]
             },
             'time_partitioning': {
@@ -192,12 +171,12 @@ def run():
             'table_id': table_static,
             'schema': {
                 "fields": [
-                    {"name": "mmsi",        "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name",   "type": "STRING",  "mode": "NULLABLE"},
-                    {"name": "dim_a",       "type": "FLOAT",   "mode": "NULLABLE"},
-                    {"name": "dim_b",       "type": "FLOAT",   "mode": "NULLABLE"},
-                    {"name": "dim_c",       "type": "FLOAT",   "mode": "NULLABLE"},
-                    {"name": "dim_d",       "type": "FLOAT",   "mode": "NULLABLE"},
+                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "dim_a", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "dim_b", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "dim_c", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "dim_d", "type": "FLOAT", "mode": "NULLABLE"},
                     {"name": "update_time", "type": "TIMESTAMP", "mode": "REQUIRED"}
                 ]
             },
@@ -221,13 +200,11 @@ def run():
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # 1) Tworzenie tabel
         _ = (
             tables_to_create
             | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
         )
 
-        # 2) Odczyt z PubSub -> parse
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
         parsed = (
             lines
@@ -235,7 +212,6 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 3) ships_positions
         w_pos = (
             parsed
             | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
@@ -261,7 +237,6 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # 4) ships_static
         ships_static = (
             parsed
             | "FilterDims" >> beam.Filter(
@@ -290,7 +265,6 @@ def run():
             method="STREAMING_INSERTS",
         )
 
-        # 5) Tworzymy side input z ships_static (mmsi -> statyczne dane)
         static_dict = (
             ships_static
             | "MapStaticKey" >> beam.Map(lambda row: (row["mmsi"], row))
@@ -299,17 +273,12 @@ def run():
         )
         side_static = beam.pvalue.AsDict(static_dict)
 
-        # 6) Przetwarzanie kolizji
         filtered_for_collisions = parsed | "FilterEnough" >> beam.Filter(is_ship_long_enough)
         keyed = filtered_for_collisions | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
-        windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(
-            window.FixedWindows(10), allowed_lateness=Duration(0)
-        )
+        windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(window.FixedWindows(10), allowed_lateness=Duration(0))
         grouped = windowed_keyed | "GroupByGeohash" >> beam.GroupByKey()
 
-        # Generowanie par kolizyjnych
         collisions_gen = grouped | "DetectCollisions" >> beam.ParDo(CollisionGeneratorDoFn(side_static), side_static)
-        # Przetwarzanie par – ustalanie flagi is_active na podstawie historii dystansu
         final_collisions = collisions_gen | "ProcessCollisionPairs" >> beam.ParDo(CollisionPairDoFn())
 
         final_collisions | "WriteCollisions" >> WriteToBigQuery(

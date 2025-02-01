@@ -1,9 +1,7 @@
-# collision_dofn.py
-
 import time
 import logging
 import apache_beam as beam
-from apache_beam.transforms.userstate import BagStateSpec
+from apache_beam.transforms.userstate import ValueStateSpec
 from apache_beam.coders import FloatCoder
 
 # Import funkcji z cpa_utils.py
@@ -17,19 +15,18 @@ from cpa_utils import (
 CPA_THRESHOLD = 0.5            # mile morskie
 TCPA_THRESHOLD = 10.0          # minuty
 STATE_RETENTION_SEC = 120      # 2 minuty
-DISTANCE_THRESHOLD_NM = 5.0   # mile morskie
+DISTANCE_THRESHOLD_NM = 5.0    # mile morskie
 
 class CollisionGeneratorDoFn(beam.DoFn):
     """
-    DoFn przyjmujący elementy w postaci:
-       (geohash, [lista_statków])
-    i generujący dla każdej pary statków (shipA, shipB) rekord kolizyjny, jeśli:
-       - aktualny dystans < DISTANCE_THRESHOLD_NM,
-       - statki się zbliżają (is_approaching zwraca True),
-       - obliczone CPA < CPA_THRESHOLD oraz 0 <= TCPA < TCPA_THRESHOLD.
-       
-    Side input `static_side` (dict: mmsi -> dane statyczne) służy do uzupełnienia nazwy statku.
-    Rekord wyjściowy ma strukturę: (pair_key, record), gdzie pair_key to uporządkowana para (mmsi_a, mmsi_b).
+    Dla każdej grupy statków o tym samym geohash generuje rekordy kolizyjne.
+    Rekord zostaje wygenerowany, jeżeli:
+      - aktualny dystans (liczony metodą lokalną) jest mniejszy lub równy DISTANCE_THRESHOLD_NM,
+      - funkcja is_approaching() zwraca True,
+      - obliczone CPA < CPA_THRESHOLD oraz 0 <= TCPA < TCPA_THRESHOLD.
+      
+    Side input (static_side) służy do uzupełnienia danych statycznych, np. ship_name.
+    Wyjściowy rekord ma postać: (pair_key, record)
     """
     def __init__(self, static_side):
         super().__init__()
@@ -45,8 +42,7 @@ class CollisionGeneratorDoFn(beam.DoFn):
                 # Oblicz aktualny dystans
                 dist_nm = local_distance_nm(shipA, shipB)
                 logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} dist_nm={dist_nm:.3f} nm for pair "
-                    f"({shipA['mmsi']}, {shipB['mmsi']})"
+                    f"[CollisionGeneratorDoFn] GH={geohash} dist_nm={dist_nm:.3f} nm for pair ({shipA['mmsi']}, {shipB['mmsi']})"
                 )
                 if dist_nm > DISTANCE_THRESHOLD_NM:
                     continue
@@ -54,8 +50,7 @@ class CollisionGeneratorDoFn(beam.DoFn):
                 # Sprawdź, czy statki się zbliżają
                 approaching = is_approaching(shipA, shipB)
                 logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} is_approaching={approaching} for pair "
-                    f"({shipA['mmsi']}, {shipB['mmsi']})"
+                    f"[CollisionGeneratorDoFn] GH={geohash} is_approaching={approaching} for pair ({shipA['mmsi']}, {shipB['mmsi']})"
                 )
                 if not approaching:
                     continue
@@ -63,21 +58,19 @@ class CollisionGeneratorDoFn(beam.DoFn):
                 # Oblicz CPA i TCPA
                 cpa, tcpa = compute_cpa_tcpa(shipA, shipB)
                 logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} cpa={cpa:.3f}, tcpa={tcpa:.3f} for pair "
-                    f"({shipA['mmsi']}, {shipB['mmsi']})"
+                    f"[CollisionGeneratorDoFn] GH={geohash} cpa={cpa:.3f}, tcpa={tcpa:.3f} for pair ({shipA['mmsi']}, {shipB['mmsi']})"
                 )
                 if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
                     mA = shipA["mmsi"]
                     mB = shipB["mmsi"]
                     pair_key = tuple(sorted([mA, mB]))
 
-                    # Pobierz dane statyczne – nazwy statków
+                    # Uzupełnienie danych statycznych
                     infoA = static_side.get(mA, {})
                     infoB = static_side.get(mB, {})
                     nameA = infoA.get("ship_name", "Unknown")
                     nameB = infoB.get("ship_name", "Unknown")
 
-                    # Przygotuj rekord kolizyjny; is_active ustawimy na None – do uzupełnienia w kolejnym etapie
                     record = {
                         "mmsi_a": mA,
                         "ship_name_a": nameA,
@@ -87,7 +80,7 @@ class CollisionGeneratorDoFn(beam.DoFn):
                         "cpa": cpa,
                         "tcpa": tcpa,
                         "distance": dist_nm,
-                        "is_active": None,  # Uzupełnienie w CollisionPairDoFn
+                        "is_active": None,  # Do uzupełnienia w CollisionPairDoFn
                         "latitude_a": shipA["latitude"],
                         "longitude_a": shipA["longitude"],
                         "latitude_b": shipB["latitude"],
@@ -97,26 +90,22 @@ class CollisionGeneratorDoFn(beam.DoFn):
 
 class CollisionPairDoFn(beam.DoFn):
     """
-    Stateful DoFn, kluczowany według pary statków (pair_key).
-    Używa stanu do przechowywania minimalnego dystansu obserwowanego dla danej pary.
-    
-    Dla każdej pary:
-      - Jeśli bieżący dystans (record['distance']) jest mniejszy lub równy zapisanej minimalnej wartości,
-        aktualizuje stan i ustawia flagę is_active na True.
-      - Jeśli bieżący dystans jest wyższy, ustawia flagę is_active na False.
+    DoFn ustalający flagę is_active na podstawie historii dystansu dla danej pary.
+    Używamy ValueStateSpec do przechowywania pojedynczej wartości – minimalnego dystansu
+    dotychczas obserwowanego dla danej pary.
+      - Jeśli bieżący dystans jest mniejszy lub równy zapisanej wartości, ustawiamy is_active na True
+      - W przeciwnym przypadku is_active = False.
     """
-    MIN_DIST_STATE = BagStateSpec('min_dist', FloatCoder())
+    MIN_DIST_STATE = ValueStateSpec('min_dist', FloatCoder())
 
     def process(self, element, min_dist_state=beam.DoFn.StateParam(MIN_DIST_STATE)):
         pair_key, record = element
         current_distance = record['distance']
-
-        # Odczytaj stan – minimalny dystans zapisany dla tej pary
-        current_state = list(min_dist_state.read())
-        if current_state:
-            min_dist = current_state[0]
-        else:
+        current_min = min_dist_state.read()
+        if current_min is None:
             min_dist = current_distance
+        else:
+            min_dist = current_min
 
         if current_distance <= min_dist:
             min_dist = current_distance
@@ -124,15 +113,11 @@ class CollisionPairDoFn(beam.DoFn):
         else:
             is_active = False
 
-        # Aktualizuj stan: wyczyść i zapisz nowy minimalny dystans
-        min_dist_state.clear()
-        min_dist_state.add(min_dist)
-
+        min_dist_state.write(min_dist)
         record['is_active'] = is_active
 
         logging.info(
             f"[CollisionPairDoFn] Pair {pair_key}: current_distance={current_distance:.3f}, "
             f"min_dist={min_dist:.3f}, is_active={is_active}"
         )
-
         yield record
