@@ -19,8 +19,10 @@
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 </head>
 <body>
-  <!-- Mała ikona spinnera – początkowo ukryta -->
-  <div id="loading-icon" class="spinner-icon" style="display: none;"></div>
+  <!-- Spinner dla statków – mała ikona w lewym dolnym rogu -->
+  <div id="ships-spinner" class="spinner-icon" style="display: none;">&#8635;</div>
+  <!-- Spinner dla kolizji – mała ikona w lewym dolnym rogu, przesunięta nieco wyżej -->
+  <div id="collisions-spinner" class="spinner-icon" style="display: none; bottom: 80px;">&#8635;</div>
 
   <!-- Lewy panel podzielony na cztery sekcje -->
   <div id="left-panel">
@@ -40,6 +42,12 @@
     <!-- Sekcja 4: Obliczone dane (dystans, CPA, TCPA) -->
     <div id="calculated-info">
       <!-- Obliczone informacje pojawią się tutaj -->
+    </div>
+    <!-- Kontener dla suwaka długości wektorów -->
+    <div id="vector-length-container" style="display: none;">
+      <label for="vectorLengthSlider">Vector length (min):</label>
+      <input type="range" id="vectorLengthSlider" min="1" max="120" value="15">
+      <span id="vectorLengthValue">15</span>
     </div>
   </div>
 
@@ -67,7 +75,7 @@
   </div>
 
   <!-- Modal z informacjami (opcjonalnie) -->
-  <div id="infoModal" class="modal" style="display:none;">
+  <div id="infoModal" class="modal" style="display: none;">
     <div class="modal-content">
       <span id="modalClose" class="modal-close">&times;</span>
       <p>This is an example Info modal. Add your project details here.</p>
