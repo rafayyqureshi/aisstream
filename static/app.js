@@ -36,7 +36,7 @@ let cpaFilter = 0.5;     // slider CPA (Nm)
 let tcpaFilter = 10;     // slider TCPA (min)
 
 // ---------------
-// Funkcje pomocnicze – Spinner (mała ikona w rogu)
+// Funkcje pomocnicze – Spinner (mała ikona w lewym dolnym rogu)
 // ---------------
 function showSpinner(id) {
   const spinner = document.getElementById(id);
@@ -97,7 +97,7 @@ async function initLiveApp() {
   vectorSlider.addEventListener('input', e => {
     vectorLength = parseInt(e.target.value, 10) || 15;
     document.getElementById('vectorLengthValue').textContent = vectorLength;
-    updateSelectedShipsInfo();
+    updateSelectedShipsInfo(true);
   });
   
   // Filtry kolizji
@@ -146,6 +146,7 @@ async function fetchShips() {
 
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
+  
   // Usuwamy statki, których już nie ma
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
@@ -212,7 +213,7 @@ function updateShips(shipsArray) {
     }
   });
   
-  updateSelectedShipsInfo();
+  updateSelectedShipsInfo(true);
 }
 
 // ---------------
@@ -364,27 +365,22 @@ function clearSelectedShips() {
 // ---------------
 // Aktualizacja informacji w lewym panelu z debouncingiem dla fetch CPA/TCPA
 // ---------------
-function updateSelectedShipsInfo() {
-  // Używamy elementów z index.html:
-  // - Nagłówek: id="left-panel-header"
-  // - Dane pierwszego statku: id="selected-ship-1"
-  // - Dane drugiego statku: id="selected-ship-2"
-  // - Dane obliczone: id="calculated-info"
+function updateSelectedShipsInfo(selectionChanged = false) {
   const headerDiv = document.getElementById('left-panel-header');
   const ship1Div = document.getElementById('selected-ship-1');
   const ship2Div = document.getElementById('selected-ship-2');
   const calcDiv = document.getElementById('calculated-info');
   
-  // Czyścimy zawartość sekcji
+  // Aktualizujemy nagłówek z przyciskiem Clear
   headerDiv.innerHTML = '<h2>Selected Ships <button id="clearSelectedShips">Clear</button></h2>';
+  document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
+  
+  // Czyścimy sekcje dla statków i obliczeń
   ship1Div.innerHTML = '';
   ship2Div.innerHTML = '';
   calcDiv.innerHTML = '';
   
-  // Przypinamy zdarzenie do przycisku Clear
-  document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
-  
-  // Jeśli żaden statek nie jest zaznaczony
+  // Jeśli nie wybrano żadnego statku
   if (selectedShips.length === 0) {
     ship1Div.innerHTML = "<i>No ship selected.</i>";
     return;
@@ -397,7 +393,7 @@ function updateSelectedShipsInfo() {
     return null;
   }
   
-  // Renderowanie informacji o statkach
+  // Renderowanie danych pierwszego statku
   if (selectedShips.length >= 1) {
     const data1 = getShipData(selectedShips[0]);
     if (data1) {
@@ -405,6 +401,8 @@ function updateSelectedShipsInfo() {
       drawVector(data1.mmsi, data1);
     }
   }
+  
+  // Jeśli zaznaczono dwa statki, renderujemy dane drugiego statku i pobieramy obliczenia
   if (selectedShips.length >= 2) {
     const data2 = getShipData(selectedShips[1]);
     if (data2) {
@@ -412,37 +410,40 @@ function updateSelectedShipsInfo() {
       drawVector(data2.mmsi, data2);
     }
     
-    // Debouncing – wykonaj fetch CPA/TCPA raz na 30 sekund
-    if (cpaUpdateTimeout) clearTimeout(cpaUpdateTimeout);
-    cpaUpdateTimeout = setTimeout(() => {
-      const [mA, mB] = selectedShips.sort((a, b) => a - b);
-      const url = `/calculate_cpa_tcpa?mmsi_a=${mA}&mmsi_b=${mB}`;
-      fetch(url, { headers: { 'X-API-Key': API_KEY } })
-        .then(r => r.json())
-        .then(data => {
-          let distanceStr = "";
-          const d1 = getShipData(mA);
-          const d2 = getShipData(mB);
-          if (d1 && d2) {
-            const dist = computeDistanceNm(d1.latitude, d1.longitude, d2.latitude, d2.longitude);
-            distanceStr = `<b>Distance:</b> ${dist.toFixed(2)} nm<br>`;
-          }
-          if (data.error) {
-            calcDiv.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> N/A (${data.error})`;
-          } else {
-            const cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
-            const tcpaVal = (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
-            calcDiv.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min`;
-          }
-        })
-        .catch(err => {
-          console.error("Error /calculate_cpa_tcpa:", err);
-          calcDiv.innerHTML = `<b>CPA/TCPA:</b> N/A`;
-        });
-    }, 30000); // 30 sekund
+    // Tylko jeśli nie ma już aktywnego timeoutu, wykonaj fetch CPA/TCPA po 30 sekundach
+    if (selectionChanged && !cpaUpdateTimeout) {
+      cpaUpdateTimeout = setTimeout(() => {
+        const [mA, mB] = selectedShips.slice().sort((a, b) => a - b);
+        const url = `/calculate_cpa_tcpa?mmsi_a=${mA}&mmsi_b=${mB}`;
+        fetch(url, { headers: { 'X-API-Key': API_KEY } })
+          .then(r => r.json())
+          .then(data => {
+            let distanceStr = "";
+            const d1 = getShipData(mA);
+            const d2 = getShipData(mB);
+            if (d1 && d2) {
+              const dist = computeDistanceNm(d1.latitude, d1.longitude, d2.latitude, d2.longitude);
+              distanceStr = `<b>Distance:</b> ${dist.toFixed(2)} nm<br>`;
+            }
+            if (data.error) {
+              calcDiv.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> N/A (${data.error})`;
+            } else {
+              const cpaVal = (data.cpa >= 9999) ? 'n/a' : data.cpa.toFixed(2);
+              const tcpaVal = (data.tcpa < 0) ? 'n/a' : data.tcpa.toFixed(2);
+              calcDiv.innerHTML = `${distanceStr}<b>CPA/TCPA:</b> ${cpaVal} nm / ${tcpaVal} min`;
+            }
+            cpaUpdateTimeout = null;
+          })
+          .catch(err => {
+            console.error("Error /calculate_cpa_tcpa:", err);
+            calcDiv.innerHTML = `<b>CPA/TCPA:</b> N/A`;
+            cpaUpdateTimeout = null;
+          });
+      }, 30000); // 30 sekund
+    }
   }
   
-  // Helper – renderowanie info o statku
+  // Helper – renderowanie informacji o statku
   function renderShipInfo(ship) {
     const sogVal = (ship.sog || 0).toFixed(1);
     const cogVal = (ship.cog || 0).toFixed(1);
