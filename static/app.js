@@ -1,5 +1,5 @@
 // ==========================
-// app.js (moduł LIVE) – finalna wersja z debouncingiem fetch CPA/TCPA oraz spinnerem
+// app.js (moduł LIVE) – finalna wersja z krótkim debouncingiem fetch CPA/TCPA, spinnerem i poprawionym rysowaniem wektorów
 // ==========================
 
 // ---------------
@@ -27,7 +27,7 @@ let selectedShips = [];       // lista mmsi wybranych statków (max 2)
 let shipsInterval = null;
 let collisionsInterval = null;
 
-// Timeout dla debouncingu fetch CPA/TCPA
+// Debounce timeout – skrócony do 500ms
 let cpaUpdateTimeout = null;
 
 // Parametry i filtry
@@ -92,7 +92,7 @@ async function initLiveApp() {
   
   map.on('zoomend', () => { fetchShips(); });
   
-  // Suwak wektora prędkości
+  // Suwak wektora prędkości – zakładamy, że kontener (vector-length-container) istnieje
   const vectorSlider = document.getElementById('vectorLengthSlider');
   vectorSlider.addEventListener('input', e => {
     vectorLength = parseInt(e.target.value, 10) || 15;
@@ -115,7 +115,7 @@ async function initLiveApp() {
     fetchCollisions();
   });
   
-  // Przycisk Clear – umieszczony w lewym panelu (element o id "clearSelectedShips" znajduje się już w index.html)
+  // Przycisk Clear – umieszczony w lewym panelu
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
   
   // Pierwsze pobrania
@@ -147,7 +147,7 @@ async function fetchShips() {
 function updateShips(shipsArray) {
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
   
-  // Usuwamy statki, których już nie ma
+  // Usuń statki, których nie ma już w nowym zestawie
   for (const mmsi in shipMarkers) {
     if (!currentSet.has(parseInt(mmsi, 10))) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
@@ -172,6 +172,12 @@ function updateShips(shipsArray) {
     const { mmsi, latitude, longitude } = ship;
     const isSelected = selectedShips.includes(mmsi);
     const tooltipContent = buildShipTooltip(ship);
+    
+    // Dla każdego statku – przed narysowaniem nowego wektora usuń stary (jeśli istnieje)
+    if (overlayVectors[mmsi]) {
+      overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
+      delete overlayVectors[mmsi];
+    }
     
     if (zoomLevel < 14) {
       if (shipPolygonLayers[mmsi]) {
@@ -213,6 +219,7 @@ function updateShips(shipsArray) {
     }
   });
   
+  // Aktualizuj panel lewy (selected ships)
   updateSelectedShipsInfo(true);
 }
 
@@ -363,7 +370,7 @@ function clearSelectedShips() {
 }
 
 // ---------------
-// Aktualizacja informacji w lewym panelu z debouncingiem dla fetch CPA/TCPA
+// Aktualizacja informacji w lewym panelu – debouncing fetch CPA/TCPA
 // ---------------
 function updateSelectedShipsInfo(selectionChanged = false) {
   const headerDiv = document.getElementById('left-panel-header');
@@ -371,46 +378,47 @@ function updateSelectedShipsInfo(selectionChanged = false) {
   const ship2Div = document.getElementById('selected-ship-2');
   const calcDiv = document.getElementById('calculated-info');
   
-  // Aktualizujemy nagłówek z przyciskiem Clear
+  // Aktualizujemy nagłówek z przyciskiem Clear (przycisk umieszczony na górze)
   headerDiv.innerHTML = '<h2>Selected Ships <button id="clearSelectedShips">Clear</button></h2>';
   document.getElementById('clearSelectedShips').addEventListener('click', clearSelectedShips);
   
-  // Czyścimy sekcje dla statków i obliczeń
+  // Czyścimy sekcje
   ship1Div.innerHTML = '';
   ship2Div.innerHTML = '';
   calcDiv.innerHTML = '';
   
-  // Jeśli nie wybrano żadnego statku
+  // Jeśli brak wybranych statków – komunikat
   if (selectedShips.length === 0) {
     ship1Div.innerHTML = "<i>No ship selected.</i>";
     return;
   }
   
-  // Helper – pobiera dane statku
+  // Helper – pobieranie danych statku
   function getShipData(mmsi) {
     if (shipMarkers[mmsi] && shipMarkers[mmsi].shipData) return shipMarkers[mmsi].shipData;
     if (shipPolygonLayers[mmsi] && shipPolygonLayers[mmsi].shipData) return shipPolygonLayers[mmsi].shipData;
     return null;
   }
   
-  // Renderowanie danych pierwszego statku
-  if (selectedShips.length >= 1) {
-    const data1 = getShipData(selectedShips[0]);
-    if (data1) {
-      ship1Div.innerHTML = renderShipInfo(data1);
-      drawVector(data1.mmsi, data1);
-    }
+  // Renderujemy dane pierwszego statku
+  const data1 = getShipData(selectedShips[0]);
+  if (data1) {
+    ship1Div.innerHTML = renderShipInfo(data1);
+    drawVector(data1.mmsi, data1);
   }
   
-  // Jeśli zaznaczono dwa statki, renderujemy dane drugiego statku i pobieramy obliczenia
-  if (selectedShips.length >= 2) {
+  // Jeśli zaznaczono dwa statki – renderujemy dane drugiego oraz wykonujemy natychmiastowy fetch CPA/TCPA (bez długiego opóźnienia)
+  if (selectedShips.length === 2) {
     const data2 = getShipData(selectedShips[1]);
     if (data2) {
       ship2Div.innerHTML = renderShipInfo(data2);
       drawVector(data2.mmsi, data2);
     }
     
-    // Tylko jeśli nie ma już aktywnego timeoutu, wykonaj fetch CPA/TCPA po 30 sekundach
+    // Upewnij się, że kontener suwaka jest widoczny (jeśli chcesz go pokazywać tylko dla dwóch statków)
+    document.getElementById('vector-length-container').style.display = 'block';
+    
+    // Jeśli nie ma już timeoutu, wykonaj fetch CPA/TCPA niemal natychmiast (debounce 500ms)
     if (selectionChanged && !cpaUpdateTimeout) {
       cpaUpdateTimeout = setTimeout(() => {
         const [mA, mB] = selectedShips.slice().sort((a, b) => a - b);
@@ -439,8 +447,11 @@ function updateSelectedShipsInfo(selectionChanged = false) {
             calcDiv.innerHTML = `<b>CPA/TCPA:</b> N/A`;
             cpaUpdateTimeout = null;
           });
-      }, 30000); // 30 sekund
+      }, 500); // 500ms debounce
     }
+  } else {
+    // Gdy jest tylko jeden statek – ukryj kontener z suwakiem i obliczeniami
+    document.getElementById('vector-length-container').style.display = 'none';
   }
   
   // Helper – renderowanie informacji o statku
@@ -471,6 +482,11 @@ function updateSelectedShipsInfo(selectionChanged = false) {
 // ---------------
 function drawVector(mmsi, sd) {
   if (!sd.sog || !sd.cog) return;
+  // Przed narysowaniem nowego wektora – usuń stary, jeśli istnieje
+  if (overlayVectors[mmsi]) {
+    overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
+    overlayVectors[mmsi] = [];
+  }
   const { latitude: lat, longitude: lon, sog: sogKn, cog: cogDeg } = sd;
   const distNm = sogKn * (vectorLength / 60);
   const cogRad = (cogDeg * Math.PI) / 180;
