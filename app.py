@@ -105,7 +105,7 @@ def index():
 @app.route('/ships')
 def ships():
     now = datetime.datetime.utcnow()
-    cache_age = 30  # 30 sekund cache dla pozycji statków
+    cache_age = 300  # 30 sekund cache dla pozycji statków
     if (SHIPS_CACHE["last_update"] is not None and
         (now - SHIPS_CACHE["last_update"]).total_seconds() < cache_age):
         return jsonify(SHIPS_CACHE["data"])
@@ -173,7 +173,7 @@ def ships():
 @app.route('/collisions')
 def collisions():
     now = datetime.datetime.utcnow()
-    cache_age = 10  # 10 sekund cache dla listy kolizji
+    cache_age = 10  # 100 sekund cache dla listy kolizji
     if (COLLISIONS_CACHE["last_update"] is not None and
         (now - COLLISIONS_CACHE["last_update"]).total_seconds() < cache_age):
         return jsonify(COLLISIONS_CACHE["data"])
