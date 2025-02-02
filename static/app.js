@@ -1,14 +1,17 @@
 // ==========================
-// app.js (LIVE) – wersja z natychmiastowym fetch CPA/TCPA, 
-//                poprawionym wyświetlaniem wektorów i slidera
+// app.js (LIVE) – wersja z usprawnieniami
 // ==========================
 
+// ---------------
 // 1) Zdarzenia startowe
+// ---------------
 document.addEventListener('DOMContentLoaded', () => {
   initLiveApp().catch(err => console.error("Błąd initLiveApp:", err));
 });
 
+// ---------------
 // 2) Zmienne globalne
+// ---------------
 const API_KEY = "Ais-mon";  // Klucz API (na potrzeby testów)
 
 let map;
@@ -21,6 +24,7 @@ let collisionMarkers = [];
 let collisionsData = [];
 let selectedShips = [];       // max 2 statki
 
+// Interwały – rzadsze niż poprzednio
 let shipsInterval = null;
 let collisionsInterval = null;
 
@@ -28,6 +32,11 @@ let collisionsInterval = null;
 let vectorLength = 15; // minuty (do rysowania wektorów)
 let cpaFilter = 0.5;
 let tcpaFilter = 10;
+
+// ---------------
+// Debounce
+// ---------------
+let vectorSliderDebounce = null;
 
 // ---------------
 // Spinner – mała ikona/tekst w rogu
@@ -86,7 +95,7 @@ function computeTimeAgo(timestamp) {
 }
 
 // ---------------
-// Funkcja główna – inicjalizacja
+// 3) Funkcja główna – inicjalizacja
 // ---------------
 async function initLiveApp() {
   map = initSharedMap('map'); // Funkcja z common.js
@@ -98,13 +107,20 @@ async function initLiveApp() {
     fetchShips();
   });
 
-  // Obsługa suwaka wektorów
+  // Obsługa suwaka wektorów: dodajemy debounce
   const vectorSlider = document.getElementById('vectorLengthSlider');
   vectorSlider.addEventListener('input', e => {
-    vectorLength = parseInt(e.target.value, 10) || 15;
-    document.getElementById('vectorLengthValue').textContent = vectorLength;
-    // Gdy zmieniamy długość wektorów, przerysuj je dla zaznaczonych statków
-    updateSelectedShipsInfo(true);
+    const val = parseInt(e.target.value, 10) || 15;
+    document.getElementById('vectorLengthValue').textContent = val;
+    
+    // Opóźnione ustawienie vectorLength i przerysowanie
+    if (vectorSliderDebounce) {
+      clearTimeout(vectorSliderDebounce);
+    }
+    vectorSliderDebounce = setTimeout(() => {
+      vectorLength = val;
+      updateSelectedShipsInfo(true);
+    }, 300); // 300ms debounce
   });
 
   // Obsługa suwaków cpa i tcpa
@@ -126,9 +142,9 @@ async function initLiveApp() {
   await fetchShips();
   await fetchCollisions();
 
-  // Interwały automatycznego odświeżania
-  shipsInterval = setInterval(fetchShips, 10000);
-  collisionsInterval = setInterval(fetchCollisions, 5000);
+  // Interwały automatycznego odświeżania (rzadsze)
+  shipsInterval = setInterval(fetchShips, 15000);      // co 15s
+  collisionsInterval = setInterval(fetchCollisions, 10000); // co 10s
 }
 
 // ---------------
@@ -151,27 +167,26 @@ async function fetchShips() {
 }
 
 function updateShips(shipsArray) {
-  // Mmsi, które przyszły w nowym zbiorze
+  // Zbiór MMSI w nowym zestawie
   const currentSet = new Set(shipsArray.map(s => s.mmsi));
 
   // Usuwamy statki, których już nie ma
   for (const mmsi in shipMarkers) {
-    if (!currentSet.has(parseInt(mmsi, 10))) {
-      // Usuń stary marker
+    if (!currentSet.has(+mmsi)) {
       markerClusterGroup.removeLayer(shipMarkers[mmsi]);
       delete shipMarkers[mmsi];
     }
   }
   // Usuwamy poligony
   for (const mmsi in shipPolygonLayers) {
-    if (!currentSet.has(parseInt(mmsi, 10))) {
+    if (!currentSet.has(+mmsi)) {
       map.removeLayer(shipPolygonLayers[mmsi]);
       delete shipPolygonLayers[mmsi];
     }
   }
-  // Usuwamy wektory
+  // Usuwamy stare wektory
   for (const mmsi in overlayVectors) {
-    if (!currentSet.has(parseInt(mmsi, 10))) {
+    if (!currentSet.has(+mmsi)) {
       overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
       delete overlayVectors[mmsi];
     }
@@ -185,12 +200,13 @@ function updateShips(shipsArray) {
     const isSelected = selectedShips.includes(mmsi);
     const tooltipContent = buildShipTooltip(ship);
 
-    // Zanim narysujemy nowy wektor (dla wybranych statków), usuń stary wektor
+    // Jeśli jest w overlayVectors – usuń; narysuje się ewentualnie na nowo w updateSelectedShipsInfo
     if (overlayVectors[mmsi]) {
       overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
       delete overlayVectors[mmsi];
     }
 
+    // Rozróżnienie: marker vs. poligon
     if (zoomLevel < 14) {
       // -> rysujemy marker
       if (shipPolygonLayers[mmsi]) {
@@ -207,7 +223,6 @@ function updateShips(shipsArray) {
         shipMarkers[mmsi] = marker;
         markerClusterGroup.addLayer(marker);
       } else {
-        // Aktualizujemy pozycję i icon
         marker.setLatLng([latitude, longitude]);
         marker.setIcon(createShipIcon(ship, isSelected, zoomLevel));
         marker.shipData = ship;
@@ -234,7 +249,7 @@ function updateShips(shipsArray) {
     }
   });
 
-  // Po aktualizacji statków – rysujemy ewentualne wektory tylko dla wybranych (update panelu)
+  // Po aktualizacji statków – rysujemy ewentualne wektory
   updateSelectedShipsInfo(true);
 }
 
@@ -343,6 +358,7 @@ function updateCollisionsList() {
     mark.addTo(map);
     collisionMarkers.push(mark);
 
+    // Przycisk zoom
     const zoomBtn = item.querySelector('.zoom-button');
     zoomBtn.addEventListener('click', () => {
       zoomToCollision(c);
@@ -402,7 +418,7 @@ function updateSelectedShipsInfo(selectionChanged = false) {
   const ship2Div = document.getElementById('selected-ship-2');
   const calcDiv = document.getElementById('calculated-info');
 
-  // Nagłówek
+  // Nagłówek + przycisk
   headerDiv.innerHTML = `
     <h2>
       Selected Ships
@@ -416,10 +432,9 @@ function updateSelectedShipsInfo(selectionChanged = false) {
   ship2Div.innerHTML = '';
   calcDiv.innerHTML = '';
 
-  // Brak statków -> info
+  // Brak statków
   if (selectedShips.length === 0) {
     ship1Div.innerHTML = "<i>No ship selected.</i>";
-    // Ukryj slider wektora
     document.getElementById('vector-length-container').style.display = 'none';
     return;
   }
@@ -435,32 +450,32 @@ function updateSelectedShipsInfo(selectionChanged = false) {
   const data1 = getShipData(selectedShips[0]);
   if (data1) {
     ship1Div.innerHTML = renderShipInfo(data1);
-    // Rysujemy wektor
     drawVector(data1.mmsi, data1);
+  } else {
+    ship1Div.innerHTML = "<i>No data for ship #1.</i>";
   }
 
-  // Jeżeli dwa statki
+  // Czy mamy dwa statki?
   if (selectedShips.length === 2) {
     const data2 = getShipData(selectedShips[1]);
     if (data2) {
       ship2Div.innerHTML = renderShipInfo(data2);
       drawVector(data2.mmsi, data2);
+    } else {
+      ship2Div.innerHTML = "<i>No data for ship #2.</i>";
     }
-    // Pokaż slider wektora
+    // Pokaż suwak
     document.getElementById('vector-length-container').style.display = 'block';
 
-    // Natychmiastowy fetch CPA/TCPA
-    // (Za każdym zaznaczeniem lub aktualizacją)
+    // Natychmiastowe obliczenie CPA/TCPA
     const [mA, mB] = selectedShips.slice().sort((a, b) => a - b);
     const url = `/calculate_cpa_tcpa?mmsi_a=${mA}&mmsi_b=${mB}`;
     fetch(url, { headers: { 'X-API-Key': API_KEY } })
       .then(r => r.json())
       .then(data => {
         let distanceStr = '';
-        const d1 = getShipData(mA);
-        const d2 = getShipData(mB);
-        if (d1 && d2) {
-          const dist = computeDistanceNm(d1.latitude, d1.longitude, d2.latitude, d2.longitude);
+        if (data1 && data2) {
+          const dist = computeDistanceNm(data1.latitude, data1.longitude, data2.latitude, data2.longitude);
           distanceStr = `<b>Distance:</b> ${dist.toFixed(2)} nm<br>`;
         }
         if (data.error) {
@@ -476,7 +491,7 @@ function updateSelectedShipsInfo(selectionChanged = false) {
         calcDiv.innerHTML = `<b>CPA/TCPA:</b> N/A`;
       });
   } else {
-    // Tylko jeden statek -> ukrywamy slider, brak obliczeń
+    // Tylko jeden statek -> brak obliczeń
     document.getElementById('vector-length-container').style.display = 'none';
   }
 
@@ -509,7 +524,7 @@ function updateSelectedShipsInfo(selectionChanged = false) {
 function drawVector(mmsi, sd) {
   if (!sd?.sog || !sd?.cog) return;
 
-  // Usuń stare wektory (asekuracyjnie, w razie braku usunięcia w updateShips)
+  // Usuń stare wektory (jeśli pozostały)
   if (overlayVectors[mmsi]) {
     overlayVectors[mmsi].forEach(ln => map.removeLayer(ln));
     overlayVectors[mmsi] = [];
