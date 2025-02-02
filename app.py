@@ -102,15 +102,26 @@ def require_api_key():
 def index():
     return render_template('index.html')
 
+#############################
+# Endpoint: /ships
+#############################
 @app.route('/ships')
 def ships():
+    """
+    Zwraca pozycje statków z ostatnich 2 minut (z tabeli ships_positions), łącząc
+    je z danymi statycznymi (z tabeli ships_static).
+    W celu odciążenia BigQuery – wprowadzone jest odświeżanie co 30 sekund (cache_age=30).
+    """
     now = datetime.datetime.utcnow()
-    cache_age = 300  # 30 sekund cache dla pozycji statków
-    if (SHIPS_CACHE["last_update"] is not None and
-        (now - SHIPS_CACHE["last_update"]).total_seconds() < cache_age):
+    cache_age = 30  # sekundy (czas obowiązywania cache w pamięci)
+
+    # Sprawdzenie cache
+    if (SHIPS_CACHE["last_update"] is not None
+        and (now - SHIPS_CACHE["last_update"]).total_seconds() < cache_age):
         return jsonify(SHIPS_CACHE["data"])
 
-    query = """
+    # Definiujemy zapytanie parametryzowane (np. 2 minuty wstecz)
+    query_str = """
     WITH recent AS (
       SELECT
         mmsi,
@@ -122,7 +133,7 @@ def ships():
         timestamp,
         ANY_VALUE(ship_name) AS dyn_name
       FROM `ais_dataset_us.ships_positions`
-      WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 MINUTE)
+      WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @minutes INT64 MINUTE)
       GROUP BY mmsi, latitude, longitude, cog, sog, heading, timestamp
     )
     SELECT
@@ -143,39 +154,60 @@ def ships():
       ON r.mmsi = s.mmsi
     ORDER BY r.timestamp DESC
     """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("minutes", "INT64", 2)
+        ]
+    )
+
     try:
-        rows = list(client.query(query).result())
+        rows = list(client.query(query_str, job_config=job_config).result())
+
+        # Przygotowanie listy obiektów do zwrócenia
+        out = []
+        for r in rows:
+            out.append({
+                "mmsi": r.mmsi,
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+                "cog": r.cog,
+                "sog": r.sog,
+                "heading": r.heading,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "ship_name": r.ship_name,
+                "dim_a": r.dim_a,
+                "dim_b": r.dim_b,
+                "dim_c": r.dim_c,
+                "dim_d": r.dim_d
+            })
+
+        # Aktualizacja cache
+        SHIPS_CACHE["data"] = out
+        SHIPS_CACHE["last_update"] = now
+        return jsonify(out)
+
     except Exception as e:
-        app.logger.error(f"Błąd zapytania BigQuery (ships): {e}")
+        app.logger.error(f"Błąd zapytania BigQuery (/ships): {e}")
         return jsonify({"error": "Query failed"}), 500
 
-    out = []
-    for r in rows:
-        out.append({
-            "mmsi": r.mmsi,
-            "latitude": r.latitude,
-            "longitude": r.longitude,
-            "cog": r.cog,
-            "sog": r.sog,
-            "heading": r.heading,
-            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-            "ship_name": r.ship_name,
-            "dim_a": r.dim_a,
-            "dim_b": r.dim_b,
-            "dim_c": r.dim_c,
-            "dim_d": r.dim_d
-        })
 
-    SHIPS_CACHE["data"] = out
-    SHIPS_CACHE["last_update"] = now
-    return jsonify(out)
-
+#############################
+# Endpoint: /collisions
+#############################
 @app.route('/collisions')
 def collisions():
+    """
+    Zwraca listę kolizji z tabeli collisions, przefiltrowaną według
+    parametrów max_cpa i max_tcpa przekazanych w query string.
+    Aby nie odpytywać BigQuery zbyt często, caching ustawiono na 10 sekund (cache_age=10).
+    """
     now = datetime.datetime.utcnow()
-    cache_age = 10  # 100 sekund cache dla listy kolizji
-    if (COLLISIONS_CACHE["last_update"] is not None and
-        (now - COLLISIONS_CACHE["last_update"]).total_seconds() < cache_age):
+    cache_age = 10  # sekundy (czas obowiązywania cache w pamięci)
+
+    # Sprawdzenie cache
+    if (COLLISIONS_CACHE["last_update"] is not None
+        and (now - COLLISIONS_CACHE["last_update"]).total_seconds() < cache_age):
         return jsonify(COLLISIONS_CACHE["data"])
 
     max_cpa = float(request.args.get('max_cpa', 0.5))
@@ -183,12 +215,18 @@ def collisions():
 
     query_str = """
     WITH latestA AS (
-      SELECT mmsi, ANY_VALUE(ship_name) AS ship_name, MAX(timestamp) AS latest_ts
+      SELECT
+        mmsi,
+        ANY_VALUE(ship_name) AS ship_name,
+        MAX(timestamp) AS latest_ts
       FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
     ),
     latestB AS (
-      SELECT mmsi, ANY_VALUE(ship_name) AS ship_name, MAX(timestamp) AS latest_ts
+      SELECT
+        mmsi,
+        ANY_VALUE(ship_name) AS ship_name,
+        MAX(timestamp) AS latest_ts
       FROM `ais_dataset_us.ships_positions`
       GROUP BY mmsi
     )
@@ -216,41 +254,47 @@ def collisions():
     """
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("param_cpa", "FLOAT64", max_cpa),
+            bigquery.ScalarQueryParameter("param_cpa",  "FLOAT64", max_cpa),
             bigquery.ScalarQueryParameter("param_tcpa", "FLOAT64", max_tcpa),
         ]
     )
+
     try:
         rows = list(client.query(query_str, job_config=job_config).result())
-    except Exception as e:
-        app.logger.error(f"Błąd zapytania BigQuery (collisions): {e}")
-        return jsonify({"error": "Query failed"}), 500
 
-    result = []
-    for r in rows:
-        shipA = r.ship1_name or str(r.mmsi_a)
-        shipB = r.ship2_name or str(r.mmsi_b)
-        t_str = r.timestamp.isoformat() if r.timestamp else None
-        collision_id = None
-        if r.timestamp:
-            collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}"
-        result.append({
-            "collision_id": collision_id,
-            "mmsi_a": r.mmsi_a,
-            "mmsi_b": r.mmsi_b,
-            "timestamp": t_str,
-            "cpa": r.cpa,
-            "tcpa": r.tcpa,
-            "latitude_a": r.latitude_a,
-            "longitude_a": r.longitude_a,
-            "latitude_b": r.latitude_b,
-            "longitude_b": r.longitude_b,
-            "ship1_name": shipA,
-            "ship2_name": shipB
-        })
-    COLLISIONS_CACHE["data"] = result
-    COLLISIONS_CACHE["last_update"] = now
-    return jsonify(result)
+        result = []
+        for r in rows:
+            shipA = r.ship1_name or str(r.mmsi_a)
+            shipB = r.ship2_name or str(r.mmsi_b)
+            t_str = r.timestamp.isoformat() if r.timestamp else None
+
+            collision_id = None
+            if r.timestamp:
+                collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}"
+
+            result.append({
+                "collision_id": collision_id,
+                "mmsi_a": r.mmsi_a,
+                "mmsi_b": r.mmsi_b,
+                "timestamp": t_str,
+                "cpa": r.cpa,
+                "tcpa": r.tcpa,
+                "latitude_a": r.latitude_a,
+                "longitude_a": r.longitude_a,
+                "latitude_b": r.latitude_b,
+                "longitude_b": r.longitude_b,
+                "ship1_name": shipA,
+                "ship2_name": shipB
+            })
+
+        # Aktualizacja cache
+        COLLISIONS_CACHE["data"] = result
+        COLLISIONS_CACHE["last_update"] = now
+        return jsonify(result)
+
+    except Exception as e:
+        app.logger.error(f"Błąd zapytania BigQuery (/collisions): {e}")
+        return jsonify({"error": "Query failed"}), 500
 
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa_endpoint():
