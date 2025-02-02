@@ -11,54 +11,66 @@ from flask import Flask, jsonify, render_template, request
 from google.cloud import bigquery
 from google.cloud import storage
 
+# Inicjalizacja Flask
 app = Flask(__name__, static_folder='static', template_folder='templates')
+
+# Konfiguracja klienta BigQuery
 client = bigquery.Client()
 
-# Wczytanie klucza API (domyślnie "Ais-mon")
+# Wczytanie klucza API (domyślnie "Ais-mon" jeśli brak w .env)
 API_KEY_REQUIRED = os.getenv("API_KEY", "Ais-mon")
 
-# Konfiguracja GCS dla modułu history
+# Ewentualna konfiguracja GCS (jeśli używamy modułu history)
 GCS_HISTORY_BUCKET = os.getenv("GCS_HISTORY_BUCKET", "ais-collision-detection-bucket")
 GCS_HISTORY_PREFIX = os.getenv("GCS_HISTORY_PREFIX", "history_collisions/hourly")
 
-# Prosty cache w pamięci dla endpointów /ships i /collisions
+# Prosty cache w pamięci
 SHIPS_CACHE = {"last_update": None, "data": []}
 COLLISIONS_CACHE = {"last_update": None, "data": []}
 
+# Logger
 logging.basicConfig(level=logging.INFO)
 app.logger.setLevel(logging.INFO)
 
-##################################################
-# Funkcje pomocnicze — obliczenia lokalne CPA/TCPA
-##################################################
+# ———————————————————————————————————————————————
+# 1. Mechanizm sprawdzania klucza API (opcjonalny)
+# ———————————————————————————————————————————————
+@app.before_request
+def require_api_key():
+    # Zwolnij z klucza ścieżki statyczne i "/" 
+    if request.path in ('/', '/favicon.ico') or request.path.startswith('/static'):
+        return
+    # Inaczej – sprawdź nagłówek
+    headers_key = request.headers.get("X-API-Key")
+    if headers_key != API_KEY_REQUIRED:
+        return jsonify({"error": "Invalid or missing API Key"}), 403
 
+# ———————————————————————————————————————————————
+# 2. Funkcje pomocnicze (lokalne obliczenia CPA/TCPA)
+# ———————————————————————————————————————————————
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
-    Oblicza dystans między dwoma punktami (lat1, lon1) i (lat2, lon2)
-    w milach morskich z użyciem wzoru Haversine.
+    Dystans pomiędzy (lat1, lon1) i (lat2, lon2) w milach morskich
+    z użyciem wzoru Haversine.
     """
     R = 3440.065  # Promień Ziemi w NM
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda / 2)**2
+    a = (math.sin(dphi / 2)**2
+         + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda / 2)**2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
 def to_xy(lat, lon):
-    """
-    Konwersja współrzędnych geograficznych (lat, lon) na przybliżone współrzędne kartezjańskie (w NM).
-    Pozwala potem łatwiej liczyć CPA/TCPA.
-    """
+    """Konwersja (lat,lon) na przybliżone współrzędne kartezjańskie (x,y) w NM."""
     x = lon * 60 * math.cos(math.radians(lat))
     y = lat * 60
     return x, y
 
 def cog_to_vector(cog, sog):
-    """
-    Konwertuje kurs (cog, w stopniach) i prędkość statku (sog, w kn) na wektor (vx, vy).
-    """
+    """Z kursu (°) i prędkości (kn) wylicza wektor (vx, vy) w układzie XY."""
     rad = math.radians(cog)
     vx = sog * math.sin(rad)
     vy = sog * math.cos(rad)
@@ -66,7 +78,8 @@ def cog_to_vector(cog, sog):
 
 def compute_cpa_tcpa(shipA, shipB):
     """
-    Oblicza CPA (Closest Point of Approach) i TCPA (Time to CPA) między dwoma statkami.
+    Wylicza CPA/TCPA dwóch statków:
+    - shipA i shipB to słowniki {latitude, longitude, cog, sog, ...}.
     """
     xA, yA = to_xy(shipA["latitude"], shipA["longitude"])
     xB, yB = to_xy(shipB["latitude"], shipB["longitude"])
@@ -80,64 +93,54 @@ def compute_cpa_tcpa(shipA, shipB):
 
     v2 = dvx**2 + dvy**2
     if v2 == 0:
+        # Statki nie mają względnego ruchu (sog=0 lub identyczny wektor) 
         tcpa = 0
     else:
-        tcpa = - (dx * dvx + dy * dvy) / v2
+        tcpa = - (dx*dvx + dy*dvy) / v2
         if tcpa < 0:
-            tcpa = 0  # jeśli wychodzi < 0, statki już się minęły
+            tcpa = 0  # Statki już się minęły
 
-    # Po ustaleniu tcpa, liczymy faktyczne położenie statków w tym momencie
+    # Po ustaleniu tcpa obliczamy odległość (CPA)
     xA_cpa = xA + vxA * tcpa
     yA_cpa = yA + vyA * tcpa
     xB_cpa = xB + vxB * tcpa
     yB_cpa = yB + vyB * tcpa
-
     cpa = math.sqrt((xA_cpa - xB_cpa)**2 + (yA_cpa - yB_cpa)**2)
+
     return cpa, tcpa
 
 def compute_distance(shipA, shipB):
     """
-    Oblicza dystans (NM) między dwoma statkami (na podstawie lat/lon) z użyciem Haversine.
+    Odległość Haversine w NM pomiędzy dwoma statkami.
     """
     return haversine_distance(
         shipA["latitude"], shipA["longitude"],
         shipB["latitude"], shipB["longitude"]
     )
 
-##################################################
-# Mechanizm sprawdzania klucza API
-##################################################
-@app.before_request
-def require_api_key():
-    # Zezwalamy na dostęp do ścieżek statycznych i '/' bez klucza
-    if request.path == '/' or request.path.startswith('/static') or request.path == '/favicon.ico':
-        return
-    headers_key = request.headers.get("X-API-Key")
-    if headers_key != API_KEY_REQUIRED:
-        return jsonify({"error": "Invalid or missing API Key"}), 403
-
-##################################################
-# Endpoint: / -> index.html
-##################################################
+# ———————————————————————————————————————————————
+# 3. Endpoint główny "/" – index.html
+# ———————————————————————————————————————————————
 @app.route('/')
 def index():
+    """Renderuje stronę główną (Live)"""
     return render_template('index.html')
 
-##################################################
-# Endpoint: /ships
-##################################################
+# ———————————————————————————————————————————————
+# 4. Endpoint /ships – pobranie najnowszych pozycji statków
+# ———————————————————————————————————————————————
 @app.route('/ships')
 def ships():
     """
-    Pobiera najnowsze wpisy z tabeli ships_positions (nowsze niż 2 min),
-    grupuje po MMSI i wybiera tylko najnowszy rekord, łączy z ships_static.
-    Cache 30s.
+    - Wybiera najnowszy (row_num=1) wpis z `ships_positions` dla każdego MMSI (ostatnie 2 min).
+    - Łączy z danymi statycznymi (ships_static) jeśli potrzebne.
+    - Cache w pamięci 30s (aby nie obciążać BQ).
     """
     now = datetime.datetime.utcnow()
     cache_age = 30  # sekundy
 
-    # Sprawdzenie cache
-    if SHIPS_CACHE["last_update"] is not None and \
+    # Cache
+    if SHIPS_CACHE["last_update"] and \
        (now - SHIPS_CACHE["last_update"]).total_seconds() < cache_age:
         return jsonify(SHIPS_CACHE["data"])
 
@@ -164,7 +167,6 @@ def ships():
       lp.sog,
       lp.heading,
       lp.timestamp,
-      -- Jeśli w ships_positions jest ship_name, a w ships_static inny, możesz wybrać COALESCE(...) lub preferować static
       COALESCE(s.ship_name, lp.ship_name) AS ship_name,
       s.dim_a,
       s.dim_b,
@@ -203,20 +205,21 @@ def ships():
     SHIPS_CACHE["last_update"] = now
     return jsonify(out)
 
-##################################################
-# Endpoint: /collisions
-##################################################
+# ———————————————————————————————————————————————
+# 5. Endpoint /collisions – pobranie najnowszych kolizji
+# ———————————————————————————————————————————————
 @app.route('/collisions')
 def collisions():
     """
-    Pobiera najnowszy wpis dla każdej pary z collisions (nowszy niż 2 min),
-    filtruje według max_cpa i max_tcpa.
-    Cache 10s.
+    - Z tabeli collisions pobieramy najnowszy wpis (row_num=1) dla każdej pary A-B 
+      (mmsi_a, mmsi_b) z ostatnich 2 minut.
+    - Filtrowanie według param max_cpa, max_tcpa.
+    - Cache w pamięci 10s.
     """
     now = datetime.datetime.utcnow()
     cache_age = 10
 
-    if COLLISIONS_CACHE["last_update"] is not None and \
+    if COLLISIONS_CACHE["last_update"] and \
        (now - COLLISIONS_CACHE["last_update"]).total_seconds() < cache_age:
         return jsonify(COLLISIONS_CACHE["data"])
 
@@ -236,7 +239,8 @@ def collisions():
         c.latitude_b,
         c.longitude_b,
         ROW_NUMBER() OVER (
-          PARTITION BY LEAST(c.mmsi_a, c.mmsi_b), GREATEST(c.mmsi_a, c.mmsi_b)
+          PARTITION BY LEAST(c.mmsi_a, c.mmsi_b),
+                       GREATEST(c.mmsi_a, c.mmsi_b)
           ORDER BY c.timestamp DESC
         ) AS row_num
       FROM `ais_dataset_us.collisions` c
@@ -264,7 +268,7 @@ def collisions():
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("param_cpa", "FLOAT64", max_cpa),
-            bigquery.ScalarQueryParameter("param_tcpa", "FLOAT64", max_tcpa)
+            bigquery.ScalarQueryParameter("param_tcpa", "FLOAT64", max_tcpa),
         ]
     )
 
@@ -276,7 +280,7 @@ def collisions():
 
     result = []
     for r in rows:
-        t_str = r.timestamp.isoformat() if r.timestamp else None
+        timestamp_str = r.timestamp.isoformat() if r.timestamp else None
         collision_id = None
         if r.timestamp:
             collision_id = f"{r.mmsi_a}_{r.mmsi_b}_{r.timestamp.strftime('%Y%m%d%H%M%S')}"
@@ -285,7 +289,7 @@ def collisions():
             "collision_id": collision_id,
             "mmsi_a": r.mmsi_a,
             "mmsi_b": r.mmsi_b,
-            "timestamp": t_str,
+            "timestamp": timestamp_str,
             "cpa": r.cpa,
             "tcpa": r.tcpa,
             "latitude_a": r.latitude_a,
@@ -298,11 +302,17 @@ def collisions():
     COLLISIONS_CACHE["last_update"] = now
     return jsonify(result)
 
-##################################################
-# Endpoint: /calculate_cpa_tcpa
-##################################################
+# ———————————————————————————————————————————————
+# 6. Endpoint /calculate_cpa_tcpa – on-demand obliczenia
+# ———————————————————————————————————————————————
 @app.route('/calculate_cpa_tcpa')
 def calculate_cpa_tcpa_endpoint():
+    """
+    Wywoływane w momencie zaznaczenia 2 statków (mmsi_a, mmsi_b) w froncie:
+    - Pobiera z ships_positions ostatnie 2-minutowe rekordy (row_num=1).
+    - Liczy cpa, tcpa i dystans z użyciem lokalnych funkcji.
+    - Zwraca JSON.
+    """
     mmsi_a = request.args.get('mmsi_a', type=int)
     mmsi_b = request.args.get('mmsi_b', type=int)
     if not mmsi_a or not mmsi_b:
@@ -339,6 +349,7 @@ def calculate_cpa_tcpa_endpoint():
         app.logger.error(f"Błąd zapytania BigQuery (/calculate_cpa_tcpa): {e}")
         return jsonify({"error": "Query failed"}), 500
 
+    # Konwersja do dict
     data_by_mmsi = {}
     for r in rows:
         data_by_mmsi[r.mmsi] = {
@@ -349,15 +360,13 @@ def calculate_cpa_tcpa_endpoint():
             'sog': r.sog
         }
 
+    # Sprawdzenie, czy mamy oba statki
     if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
         return jsonify({'error': 'No recent data for one or both ships'}), 404
 
-    # Lokalnie liczymy CPA, TCPA i dystans
+    # Liczymy cpa/tcpa i distance
     cpa_val, tcpa_val = compute_cpa_tcpa(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
-    dist_val = haversine_distance(
-        data_by_mmsi[mmsi_a]["latitude"], data_by_mmsi[mmsi_a]["longitude"],
-        data_by_mmsi[mmsi_b]["latitude"], data_by_mmsi[mmsi_b]["longitude"]
-    )
+    dist_val = compute_distance(data_by_mmsi[mmsi_a], data_by_mmsi[mmsi_b])
 
     return jsonify({
         'cpa': cpa_val,
@@ -365,9 +374,9 @@ def calculate_cpa_tcpa_endpoint():
         'distance': dist_val
     })
 
-##################################################
-# Moduł HISTORY (opcjonalny)
-##################################################
+# ———————————————————————————————————————————————
+# 7. Ewentualnie moduł HISTORY
+# ———————————————————————————————————————————————
 @app.route('/history')
 def history():
     return render_template('history.html')
@@ -376,9 +385,11 @@ def history():
 def history_filelist():
     days_back = int(request.args.get("days", 7))
     cutoff_utc = datetime.datetime.utcnow() - timedelta(days=days_back)
+
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_HISTORY_BUCKET)
     prefix = GCS_HISTORY_PREFIX.rstrip("/") + "/"
+
     try:
         blobs = list(bucket.list_blobs(prefix=prefix))
     except Exception as e:
@@ -389,12 +400,12 @@ def history_filelist():
     for blob in blobs:
         if not blob.time_created:
             continue
-        blob_t_utc = blob.time_created.replace(tzinfo=None)
-        if blob_t_utc >= cutoff_utc:
+        if blob.time_created.replace(tzinfo=None) >= cutoff_utc:
             files.append({
                 "name": blob.name,
                 "time_created": blob.time_created.isoformat()
             })
+
     files.sort(key=lambda f: f["time_created"])
     return jsonify({"files": files})
 
@@ -423,8 +434,8 @@ def history_file():
 
     return app.response_class(data_str, mimetype="application/json")
 
-##################################################
-# Uruchomienie serwera
-##################################################
+# ———————————————————————————————————————————————
+# 8. Uruchom serwer
+# ———————————————————————————————————————————————
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
