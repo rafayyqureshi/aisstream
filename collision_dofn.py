@@ -21,9 +21,10 @@ class CollisionGeneratorDoFn(beam.DoFn):
     """
     Dla każdej grupy statków o tym samym geohash generuje rekordy kolizyjne.
     Rekord zostaje wygenerowany, jeżeli:
-      - aktualny dystans (liczony metodą lokalną) jest mniejszy lub równy DISTANCE_THRESHOLD_NM,
-      - funkcja is_approaching() zwraca True,
-      - obliczone CPA < CPA_THRESHOLD oraz 0 <= TCPA < TCPA_THRESHOLD.
+      1) shipA["mmsi"] != shipB["mmsi"] (pomija kolizje samego statku z sobą),
+      2) aktualny dystans <= DISTANCE_THRESHOLD_NM,
+      3) statki się zbliżają (is_approaching),
+      4) CPA < CPA_THRESHOLD i 0 <= TCPA < TCPA_THRESHOLD.
       
     Side input (static_side) służy do uzupełnienia danych statycznych (np. ship_name).
     Wyjściowy rekord ma postać: (pair_key, record)
@@ -34,44 +35,48 @@ class CollisionGeneratorDoFn(beam.DoFn):
 
     def process(self, element, static_side):
         geohash, ships = element
+
         for i in range(len(ships)):
             for j in range(i + 1, len(ships)):
                 shipA = ships[i]
                 shipB = ships[j]
 
-                # Oblicz aktualny dystans
+                # Nowy warunek: pomijamy, jeśli to ten sam mmsi
+                if shipA["mmsi"] == shipB["mmsi"]:
+                    continue
+
                 dist_nm = local_distance_nm(shipA, shipB)
                 logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} dist_nm={dist_nm:.3f} nm for pair ({shipA['mmsi']}, {shipB['mmsi']})"
+                    f"[CollisionGeneratorDoFn] GH={geohash} dist_nm={dist_nm:.3f} nm for pair "
+                    f"({shipA['mmsi']}, {shipB['mmsi']})"
                 )
                 if dist_nm > DISTANCE_THRESHOLD_NM:
                     continue
 
-                # Sprawdź, czy statki się zbliżają
                 approaching = is_approaching(shipA, shipB)
                 logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} is_approaching={approaching} for pair ({shipA['mmsi']}, {shipB['mmsi']})"
+                    f"[CollisionGeneratorDoFn] GH={geohash} is_approaching={approaching} for pair "
+                    f"({shipA['mmsi']}, {shipB['mmsi']})"
                 )
                 if not approaching:
                     continue
 
-                # Oblicz CPA i TCPA
                 cpa, tcpa = compute_cpa_tcpa(shipA, shipB)
                 logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} cpa={cpa:.3f}, tcpa={tcpa:.3f} for pair ({shipA['mmsi']}, {shipB['mmsi']})"
+                    f"[CollisionGeneratorDoFn] GH={geohash} cpa={cpa:.3f}, tcpa={tcpa:.3f} "
+                    f"for pair ({shipA['mmsi']}, {shipB['mmsi']})"
                 )
                 if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
                     mA = shipA["mmsi"]
                     mB = shipB["mmsi"]
                     pair_key = tuple(sorted([mA, mB]))
-                    
+
                     # Uzupełnienie danych statycznych – nazwy statków
                     infoA = static_side.get(mA, {})
                     infoB = static_side.get(mB, {})
                     nameA = infoA.get("ship_name", "Unknown")
                     nameB = infoB.get("ship_name", "Unknown")
-                    
-                    # Przygotowanie rekordu kolizyjnego; is_active ustalimy później
+
                     record = {
                         "mmsi_a": mA,
                         "ship_name_a": nameA,
@@ -81,7 +86,7 @@ class CollisionGeneratorDoFn(beam.DoFn):
                         "cpa": cpa,
                         "tcpa": tcpa,
                         "distance": dist_nm,
-                        "is_active": None,  # Uzupełnienie w CollisionPairDoFn
+                        "is_active": None,
                         "latitude_a": shipA["latitude"],
                         "longitude_a": shipA["longitude"],
                         "latitude_b": shipB["latitude"],
@@ -92,15 +97,16 @@ class CollisionGeneratorDoFn(beam.DoFn):
 class CollisionPairDoFn(beam.DoFn):
     """
     DoFn ustalający flagę is_active na podstawie historii dystansu dla danej pary.
-    Używamy BagStateSpec do symulacji pojedynczej wartości (minimalnego dystansu) dla danej pary.
-      - Jeśli bieżący dystans jest mniejszy lub równy zapisanej wartości, is_active = True;
-      - W przeciwnym przypadku is_active = False.
+    Używamy BagStateSpec do przechowywania minimalnego dystansu:
+      - Jeśli bieżący dystans <= zapisana wartość => is_active=True i aktualizujemy min_dist.
+      - Inaczej is_active=False.
     """
     MIN_DIST_STATE = BagStateSpec('min_dist', FloatCoder())
 
     def process(self, element, min_dist_state=beam.DoFn.StateParam(MIN_DIST_STATE)):
         pair_key, record = element
         current_distance = record['distance']
+
         current_state = list(min_dist_state.read())
         if current_state:
             min_dist = current_state[0]
