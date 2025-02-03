@@ -401,7 +401,7 @@ function clearSelectedShips() {
 
 // Lokalna implementacja obliczeń, analogiczna do cpa_utils:
 // (Można przenieść do common.js, jeśli chcesz)
-function toXY(lat, lon) {
+ffunction toXY(lat, lon) {
   // Konwersja współrzędnych geograficznych na przybliżone współrzędne kartezjańskie (NM)
   const x = lon * 60 * Math.cos(lat * Math.PI / 180);
   const y = lat * 60;
@@ -409,7 +409,7 @@ function toXY(lat, lon) {
 }
 
 function cogToVector(cog, sog) {
-  // Przekształcenie kursu (w stopniach) i prędkości (w knotach) w wektor prędkości (NM/h)
+  // Przekształcenie kursu (stopnie) i prędkości (kn) w wektor prędkości (NM/h)
   const rad = (cog * Math.PI) / 180;
   const vx = sog * Math.sin(rad);
   const vy = sog * Math.cos(rad);
@@ -417,40 +417,39 @@ function cogToVector(cog, sog) {
 }
 
 function computeLocalCPATCPA(shipA, shipB) {
-  // Obliczamy współrzędne kartezjańskie w NM
+  // Obliczenia na podstawie przybliżenia "flat earth" – wszystkie jednostki są w NM lub NM/h.
   const [xA, yA] = toXY(shipA.latitude, shipA.longitude);
   const [xB, yB] = toXY(shipB.latitude, shipB.longitude);
   const dx = xA - xB;
   const dy = yA - yB;
-  
-  // Obliczamy wektory prędkości
+
   const [vxA, vyA] = cogToVector(shipA.cog, shipA.sog);
   const [vxB, vyB] = cogToVector(shipB.cog, shipB.sog);
   const dvx = vxA - vxB;
   const dvy = vyA - vyB;
-  
-  // Obliczenie kwadratu względnej prędkości
+
   const v2 = dvx * dvx + dvy * dvy;
   let tcpaHours = 0;
   if (v2 !== 0) {
-    // tcpa (w godzinach)
+    // tcpa w godzinach – jednostki: [NM * (NM/h)] / [(NM/h)²] = h
     tcpaHours = - (dx * dvx + dy * dvy) / v2;
     if (tcpaHours < 0) {
       tcpaHours = 0;
     }
   }
-  // Przelicz tcpa na minuty
+  // Przeliczamy tcpa z godzin na minuty
   const tcpaMinutes = tcpaHours * 60;
-  
-  // Obliczenie pozycji statków w momencie CPA
+
+  // Obliczamy pozycje w momencie CPA
   const xA_cpa = xA + vxA * tcpaHours;
   const yA_cpa = yA + vyA * tcpaHours;
   const xB_cpa = xB + vxB * tcpaHours;
   const yB_cpa = yB + vyB * tcpaHours;
-  
-  // Obliczenie CPA (w NM)
-  const cpa = Math.sqrt(Math.pow(xA_cpa - xB_cpa, 2) + Math.pow(yA_cpa - yB_cpa, 2));
-  
+
+  // CPA – dystans między statkami w punkcie najbliższego podejścia (NM)
+  const cpa = Math.sqrt((xA_cpa - xB_cpa) ** 2 + (yA_cpa - yB_cpa) ** 2);
+
+  // Zwracamy CPA w NM oraz TCPA w minutach
   return [cpa, tcpaMinutes];
 }
 
@@ -461,8 +460,7 @@ function haversineNM(lat1, lon1, lat2, lon2) {
   const dLat = (lat2 - lat1) * rad;
   const dLon = (lon2 - lon1) * rad;
   const a = Math.sin(dLat / 2) ** 2 +
-            Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
-            Math.sin(dLon / 2) ** 2;
+            Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R_NM * c;
 }
