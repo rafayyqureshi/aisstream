@@ -409,7 +409,7 @@ function toXY(lat, lon) {
 }
 
 function cogToVector(cog, sog) {
-  // Przekształcenie kursu (deg) i prędkości (kn) w wektor prędkości (w NM/h)
+  // Przekształcenie kursu (w stopniach) i prędkości (w knotach) w wektor prędkości (NM/h)
   const rad = (cog * Math.PI) / 180;
   const vx = sog * Math.sin(rad);
   const vy = sog * Math.cos(rad);
@@ -417,45 +417,46 @@ function cogToVector(cog, sog) {
 }
 
 function computeLocalCPATCPA(shipA, shipB) {
-  // Obliczenia na podstawie przybliżenia "flat earth" w NM
+  // Obliczamy współrzędne kartezjańskie w NM
   const [xA, yA] = toXY(shipA.latitude, shipA.longitude);
   const [xB, yB] = toXY(shipB.latitude, shipB.longitude);
   const dx = xA - xB;
   const dy = yA - yB;
-
+  
+  // Obliczamy wektory prędkości
   const [vxA, vyA] = cogToVector(shipA.cog, shipA.sog);
   const [vxB, vyB] = cogToVector(shipB.cog, shipB.sog);
   const dvx = vxA - vxB;
   const dvy = vyA - vyB;
-
+  
   // Obliczenie kwadratu względnej prędkości
   const v2 = dvx * dvx + dvy * dvy;
   let tcpaHours = 0;
   if (v2 !== 0) {
-    // Wzór: tcpa = - (dx * dvx + dy * dvy) / |dv|²
+    // tcpa (w godzinach)
     tcpaHours = - (dx * dvx + dy * dvy) / v2;
     if (tcpaHours < 0) {
-      tcpaHours = 0;  // Jeśli wynikiem jest ujemna wartość, ustawiamy 0
+      tcpaHours = 0;
     }
   }
-  // Konwersja tcpa z godzin na minuty
+  // Przelicz tcpa na minuty
   const tcpaMinutes = tcpaHours * 60;
-
+  
   // Obliczenie pozycji statków w momencie CPA
   const xA_cpa = xA + vxA * tcpaHours;
   const yA_cpa = yA + vyA * tcpaHours;
   const xB_cpa = xB + vxB * tcpaHours;
   const yB_cpa = yB + vyB * tcpaHours;
-
-  // Obliczenie CPA jako dystansu w NM w punkcie najbliższego podejścia
-  const dist = Math.sqrt(Math.pow(xA_cpa - xB_cpa, 2) + Math.pow(yA_cpa - yB_cpa, 2));
-
-  return [dist, tcpaMinutes];
+  
+  // Obliczenie CPA (w NM)
+  const cpa = Math.sqrt(Math.pow(xA_cpa - xB_cpa, 2) + Math.pow(yA_cpa - yB_cpa, 2));
+  
+  return [cpa, tcpaMinutes];
 }
 
 function haversineNM(lat1, lon1, lat2, lon2) {
   // Oblicza dystans w milach morskich przy użyciu wzoru Haversine
-  const R_NM = 3440.065; // Promień Ziemi w NM
+  const R_NM = 3440.065;
   const rad = Math.PI / 180;
   const dLat = (lat2 - lat1) * rad;
   const dLon = (lon2 - lon1) * rad;
