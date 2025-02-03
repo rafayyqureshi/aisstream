@@ -170,7 +170,7 @@ def ships():
           ORDER BY sp.timestamp DESC
         ) AS rn
       FROM `ais_dataset_us.ships_positions` sp
-      WHERE sp.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 4 MINUTE)
+      WHERE sp.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
     )
     SELECT
       mmsi,
@@ -258,7 +258,7 @@ def collisions():
           ORDER BY c.timestamp DESC
         ) AS rn
       FROM `ais_dataset_us.collisions` c
-      WHERE c.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 4 MINUTE)
+      WHERE c.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
     )
     SELECT
       mmsi_a,
@@ -351,7 +351,7 @@ def calculate_cpa_tcpa_endpoint():
           ORDER BY sp.timestamp DESC
         ) AS rn
       FROM `ais_dataset_us.ships_positions` sp
-      WHERE sp.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 4 MINUTE)
+      WHERE sp.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
         AND sp.mmsi IN ({mmsi_a}, {mmsi_b})
     )
     SELECT
