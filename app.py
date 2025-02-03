@@ -323,73 +323,7 @@ def collisions():
     COLLISIONS_CACHE["last_update"] = now
     return jsonify(out)
 
-##################################################
-# Endpoint /calculate_cpa_tcpa
-##################################################
-@app.route('/calculate_cpa_tcpa')
-def calculate_cpa_tcpa_endpoint():
-    """
-    Pobiera najnowsze (<=4 min) wpisy 2 statków z ships_positions, liczy CPA/TCPA lokalnie.
-    """
-    maybe_refresh_static_dict()
 
-    mmsi_a = request.args.get('mmsi_a', type=int)
-    mmsi_b = request.args.get('mmsi_b', type=int)
-    if not mmsi_a or not mmsi_b:
-        return jsonify({"error": "Missing mmsi_a or mmsi_b"}), 400
-
-    query = f"""
-    WITH latest_positions AS (
-      SELECT
-        sp.mmsi,
-        sp.latitude,
-        sp.longitude,
-        sp.cog,
-        sp.sog,
-        ROW_NUMBER() OVER (
-          PARTITION BY sp.mmsi
-          ORDER BY sp.timestamp DESC
-        ) AS rn
-      FROM `ais_dataset_us.ships_positions` sp
-      WHERE sp.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-        AND sp.mmsi IN ({mmsi_a}, {mmsi_b})
-    )
-    SELECT
-      mmsi,
-      latitude,
-      longitude,
-      cog,
-      sog
-    FROM latest_positions
-    WHERE rn=1
-    """
-
-    try:
-        rows = list(client.query(query).result())
-    except Exception as e:
-        app.logger.error(f"[/calculate_cpa_tcpa] BQ error: {e}")
-        return jsonify({"error": "Query failed"}), 500
-
-    data_by_mmsi = {}
-    for r in rows:
-        data_by_mmsi[r.mmsi] = {
-            "mmsi": r.mmsi,
-            "latitude": r.latitude,
-            "longitude": r.longitude,
-            "cog": r.cog,
-            "sog": r.sog
-        }
-
-    if mmsi_a not in data_by_mmsi or mmsi_b not in data_by_mmsi:
-        return jsonify({"error": "No recent data for one or both ships"}), 404
-
-    # Liczymy lokalnie
-    shipA = data_by_mmsi[mmsi_a]
-    shipB = data_by_mmsi[mmsi_b]
-    cpa_val, tcpa_val = compute_cpa_tcpa(shipA, shipB)
-    dist_val = haversine_distance(shipA["latitude"], shipA["longitude"],
-                                  shipB["latitude"], shipB["longitude"])
-    return jsonify({"cpa": cpa_val, "tcpa": tcpa_val, "distance": dist_val})
 
 ##################################################
 # Moduł HISTORY (opcjonalny)
