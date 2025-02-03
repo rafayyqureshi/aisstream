@@ -401,7 +401,7 @@ function clearSelectedShips() {
 
 // Lokalna implementacja obliczeń, analogiczna do cpa_utils:
 // (Można przenieść do common.js, jeśli chcesz)
-ffunction toXY(lat, lon) {
+function toXY(lat, lon) {
   // Konwersja współrzędnych geograficznych na przybliżone współrzędne kartezjańskie (NM)
   const x = lon * 60 * Math.cos(lat * Math.PI / 180);
   const y = lat * 60;
