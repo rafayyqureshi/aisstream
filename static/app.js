@@ -191,46 +191,69 @@ function updateShips(shipsArray) {
       delete overlayVectors[mmsi];
     }
 
-    if (zoomLevel < 14) {
-      // Marker
-      if (shipPolygonLayers[mmsi]) {
-        map.removeLayer(shipPolygonLayers[mmsi]);
-        delete shipPolygonLayers[mmsi];
-      }
-      let marker = shipMarkers[mmsi];
-      if (!marker) {
-        const icon = createShipIcon(ship, isSelected, zoomLevel);
-        marker = L.marker([latitude, longitude], { icon })
-          .on('click', () => selectShip(mmsi));
-        marker.shipData = ship;
-        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
-        shipMarkers[mmsi] = marker;
-        markerClusterGroup.addLayer(marker);
-      } else {
-        marker.setLatLng([latitude, longitude]);
-        marker.setIcon(createShipIcon(ship, isSelected, zoomLevel));
-        marker.shipData = ship;
-        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
-      }
-    } else {
-      // Poligon
-      if (shipMarkers[mmsi]) {
-        markerClusterGroup.removeLayer(shipMarkers[mmsi]);
-        delete shipMarkers[mmsi];
-      }
-      if (shipPolygonLayers[mmsi]) {
-        map.removeLayer(shipPolygonLayers[mmsi]);
-        delete shipPolygonLayers[mmsi];
-      }
-      const poly = createShipPolygon(ship);
-      if (poly) {
-        poly.on('click', () => selectShip(mmsi));
-        poly.addTo(map);
-        poly.shipData = ship;
-        poly.bindTooltip(tooltipContent, { direction: 'top', sticky: true });
-        shipPolygonLayers[mmsi] = poly;
-      }
-    }
+    const hasLength = (ship.dim_a && ship.dim_b);
+
+if (!hasLength) {
+  // Nieznana długość – zawsze rysuj marker
+  if (shipPolygonLayers[mmsi]) {
+    map.removeLayer(shipPolygonLayers[mmsi]);
+    delete shipPolygonLayers[mmsi];
+  }
+  let marker = shipMarkers[mmsi];
+  if (!marker) {
+    const icon = createShipIcon(ship, isSelected, zoomLevel);
+    marker = L.marker([latitude, longitude], { icon })
+      .on('click', () => selectShip(mmsi));
+    marker.shipData = ship;
+    marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
+    shipMarkers[mmsi] = marker;
+    markerClusterGroup.addLayer(marker);
+  } else {
+    marker.setLatLng([latitude, longitude]);
+    marker.setIcon(createShipIcon(ship, isSelected, zoomLevel));
+    marker.shipData = ship;
+    marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
+  }
+} else if (zoomLevel < 14) {
+  // Przy zoomie mniejszym niż 14 – rysujemy marker
+  if (shipPolygonLayers[mmsi]) {
+    map.removeLayer(shipPolygonLayers[mmsi]);
+    delete shipPolygonLayers[mmsi];
+  }
+  let marker = shipMarkers[mmsi];
+  if (!marker) {
+    const icon = createShipIcon(ship, isSelected, zoomLevel);
+    marker = L.marker([latitude, longitude], { icon })
+      .on('click', () => selectShip(mmsi));
+    marker.shipData = ship;
+    marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
+    shipMarkers[mmsi] = marker;
+    markerClusterGroup.addLayer(marker);
+  } else {
+    marker.setLatLng([latitude, longitude]);
+    marker.setIcon(createShipIcon(ship, isSelected, zoomLevel));
+    marker.shipData = ship;
+    marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -5] });
+  }
+} else {
+  // Przy zoomie >= 14 i gdy znana jest długość – rysujemy poligon
+  if (shipMarkers[mmsi]) {
+    markerClusterGroup.removeLayer(shipMarkers[mmsi]);
+    delete shipMarkers[mmsi];
+  }
+  if (shipPolygonLayers[mmsi]) {
+    map.removeLayer(shipPolygonLayers[mmsi]);
+    delete shipPolygonLayers[mmsi];
+  }
+  const poly = createShipPolygon(ship);
+  if (poly) {
+    poly.on('click', () => selectShip(mmsi));
+    poly.addTo(map);
+    poly.shipData = ship;
+    poly.bindTooltip(tooltipContent, { direction: 'top', sticky: true });
+    shipPolygonLayers[mmsi] = poly;
+  }
+}
   });
 
   // Rysujemy ewentualne wektory (panel)

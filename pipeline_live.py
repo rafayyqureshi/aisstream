@@ -97,7 +97,11 @@ def parse_ais(record_bytes):
         hdg = data.get("heading")
         if hdg is not None:
             try:
-                data["heading"] = float(hdg)
+                hdg_val = float(hdg)
+                # --- Nowa poprawka: jeśli heading == 511, używamy cog ---
+                if hdg_val == 511:
+                    hdg_val = data["cog"]
+                data["heading"] = hdg_val
             except:
                 data["heading"] = None
         else:
