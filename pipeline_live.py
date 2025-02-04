@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import os
 import json
+import math
+import time
 import logging
 import datetime
+from datetime import timedelta
 from dotenv import load_dotenv
 
 import apache_beam as beam
@@ -10,17 +13,73 @@ from apache_beam.options.pipeline_options import PipelineOptions
 from google.cloud import bigquery
 from google.api_core.exceptions import NotFound
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
-from apache_beam.utils.timestamp import Duration
 from apache_beam import window
+from apache_beam.utils.timestamp import Duration
 
-# Import DoFns z collision_dofn.py
+# Import DoFns z collision_dofn.py 
 from collision_dofn import CollisionGeneratorDoFn, CollisionPairDoFn
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ----------------------------------------
+# Globalne struktury do deduplikacji static
+# ----------------------------------------
+GLOBAL_SEEN_MMSI = set()       # zbiór mmsi załadowanych z BQ
+LAST_REFRESH_TIME = 0          # ostatni czas odświeżenia
+REFRESH_INTERVAL_SEC = 43200   # 12 godzin (w sekundach)
+
+
+def refresh_static_set_if_needed():
+    """
+    Funkcja wczytująca z BigQuery wszystkie mmsi z tabeli ships_static,
+    co 12 godzin (43200 s). 
+    Jeśli minęło mniej, to nie wykonujemy zapytania.
+    """
+    global LAST_REFRESH_TIME, GLOBAL_SEEN_MMSI
+    now_sec = time.time()
+    if (now_sec - LAST_REFRESH_TIME) < REFRESH_INTERVAL_SEC:
+        return  # jeszcze nie odświeżamy
+
+    logger.info("=== Odświeżanie listy MMSI z tabeli ships_static ===")
+    try:
+        client = bigquery.Client()
+        query_str = """
+          SELECT mmsi
+          FROM `ais_dataset_us.ships_static`
+          GROUP BY mmsi
+        """
+        rows = list(client.query(query_str).result())
+        # Budujemy nowy set
+        new_set = set(row.mmsi for row in rows)
+        GLOBAL_SEEN_MMSI = new_set
+        LAST_REFRESH_TIME = now_sec
+        logger.info(f"Załadowano {len(GLOBAL_SEEN_MMSI)} mmsi z ships_static.")
+    except Exception as e:
+        logger.error(f"Nie udało się odświeżyć MMSI z ships_static: {e}")
+
+
+class DeduplicateStaticInMemoryDoFn(beam.DoFn):
+    """
+    Deduplikuje wpisy do ships_static wykorzystując globalny set() (GLOBAL_SEEN_MMSI).
+    Zanim wyśle rekord do BigQuery, sprawdza, czy dany mmsi jest już w zbiorze:
+      - jeśli tak -> pomijamy
+      - jeśli nie -> yield, a mmsi dodajemy do setu
+    Przy każdym wywołaniu process() sprawdzamy też, czy minął czas 12h na odświeżenie.
+    """
+    def process(self, row):
+        refresh_static_set_if_needed()  # sprawdź, czy trzeba załadować MMSI z BQ
+        mmsi_val = row["mmsi"]
+        if mmsi_val not in GLOBAL_SEEN_MMSI:
+            GLOBAL_SEEN_MMSI.add(mmsi_val)
+            yield row
+
+
 def parse_ais(record_bytes):
+    """
+    Parsuje JSON AIS z Pub/Sub.
+    """
     try:
         data = json.loads(record_bytes.decode("utf-8"))
         req = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
@@ -34,6 +93,7 @@ def parse_ais(record_bytes):
         data["sog"] = float(data["sog"])
         data.pop("ship_length", None)
 
+        # heading
         hdg = data.get("heading")
         if hdg is not None:
             try:
@@ -43,12 +103,16 @@ def parse_ais(record_bytes):
         else:
             data["heading"] = None
 
+        # wymiary
         for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
             v = data.get(d)
             data[d] = float(v) if v is not None else None
 
+        # nazwa
         data["ship_name"] = data.get("ship_name", "Unknown")
+        # geohash
         data["geohash"] = data.get("geohash", "none")
+
         return data
     except:
         return None
@@ -56,46 +120,25 @@ def parse_ais(record_bytes):
 def remove_geohash_and_dims(row):
     new_row = dict(row)
     new_row.pop("geohash", None)
-    for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
+    for d in ["dim_a","dim_b","dim_c","dim_d"]:
         new_row.pop(d, None)
     return new_row
-
-class DeduplicateStaticDoFn(beam.DoFn):
-    def __init__(self):
-        self.seen = set()
-    def process(self, row):
-        mmsi = row["mmsi"]
-        if mmsi not in self.seen:
-            self.seen.add(mmsi)
-            yield row
-
-def keep_static_fields(row):
-    return {
-        "mmsi": row["mmsi"],
-        "ship_name": row["ship_name"],
-        "dim_a": row["dim_a"],
-        "dim_b": row["dim_b"],
-        "dim_c": row["dim_c"],
-        "dim_d": row["dim_d"],
-        "update_time": datetime.datetime.utcnow().isoformat() + "Z"
-    }
 
 class CreateBQTableDoFn(beam.DoFn):
     def process(self, table_ref):
         from google.cloud import bigquery
         client_local = bigquery.Client()
+
         table_id = table_ref['table_id']
-        schema = table_ref['schema']['fields']
+        schema    = table_ref['schema']['fields']
         time_part = table_ref.get('time_partitioning')
-        cluster = table_ref.get('clustering_fields')
+        cluster   = table_ref.get('clustering_fields')
 
         table = bigquery.Table(table_id, schema=schema)
-
-        # Poprawka: klucz 'type' -> 'type_'
         if time_part:
-            time_part_corrected = {k if k != 'type' else 'type_': v for k, v in time_part.items()}
+            time_part_corrected = {k if k != 'type' else 'type_': v
+                                   for k, v in time_part.items()}
             table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
-
         if cluster:
             table.clustering_fields = cluster
 
@@ -118,22 +161,19 @@ def is_ship_long_enough(ship):
 def run():
     logging.getLogger().setLevel(logging.INFO)
 
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
-    dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
-    input_sub = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
-    region = os.getenv("REGION", "us-east1")
-    temp_loc = os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp")
-    staging_loc = os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging")
-    job_name = os.getenv("JOB_NAME", "ais-collision-job")
+    project_id   = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
+    dataset      = os.getenv("LIVE_DATASET", "ais_dataset_us")
+    input_sub    = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
+    region       = os.getenv("REGION", "us-east1")
+    temp_loc     = os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp")
+    staging_loc  = os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging")
+    job_name     = os.getenv("JOB_NAME", "ais-collision-job")
 
-    table_positions = f"{project_id}.{dataset}.ships_positions"
+    table_positions  = f"{project_id}.{dataset}.ships_positions"
     table_collisions = f"{project_id}.{dataset}.collisions"
-    table_static = f"{project_id}.{dataset}.ships_static"
+    table_static     = f"{project_id}.{dataset}.ships_static"
 
-    # Zmiana: retencja ships_positions -> 25 min, collisions -> 10 min
-    # 25 min = 25 * 60 * 1000 = 1500000 ms
-    # 10 min = 10 * 60 * 1000 = 600000 ms
-
+    # Definicje tabel BQ (opcjonalnie)
     tables_to_create = [
         {
             'table_id': table_positions,
@@ -152,7 +192,8 @@ def run():
             'time_partitioning': {
                 "type_": "DAY",
                 "field": "timestamp",
-                "expiration_ms": 1500000  # 25 minut
+                # Example: 25 min => 25*60*1000=1500000 ms (lub normalnie do testów)
+                "expiration_ms": 1500000
             },
             'clustering_fields': ["mmsi"]
         },
@@ -178,7 +219,8 @@ def run():
             'time_partitioning': {
                 "type_": "DAY",
                 "field": "timestamp",
-                "expiration_ms": 600000  # 10 minut
+                # 10 min => 600000 ms
+                "expiration_ms": 600000
             },
             'clustering_fields': ["mmsi_a","mmsi_b"]
         },
@@ -215,12 +257,14 @@ def run():
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
+
+        # 1) Tworzymy tabele (jeśli nie istnieją)
         _ = (
             tables_to_create
             | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
         )
 
-        # Odczyt z PubSub
+        # 2) Odczyt z PubSub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
         parsed = (
             lines
@@ -228,10 +272,10 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # ships_positions (okno 3 min zamiast 10 sek)
+        # 3) ships_positions
         w_pos = (
             parsed
-            | "WinPositions" >> beam.WindowInto(window.FixedWindows(180))  # 3 min = 180s
+            | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
             | "KeyPos" >> beam.Map(lambda r: (None, r))
             | "GroupPos" >> beam.GroupByKey()
             | "FlatPos" >> beam.FlatMap(lambda kv: kv[1])
@@ -251,21 +295,21 @@ def run():
             """,
             create_disposition=BigQueryDisposition.CREATE_NEVER,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
+            method="STREAMING_INSERTS"
         )
 
-        # ships_static
+        # 4) ships_static – deduplikacja in–memory
         ships_static = (
             parsed
             | "FilterDims" >> beam.Filter(
-                lambda r: any(r.get(dim) for dim in ["dim_a", "dim_b", "dim_c", "dim_d"])
+                lambda r: any(r.get(dim) for dim in ["dim_a","dim_b","dim_c","dim_d"])
             )
             | "WinStatic" >> beam.WindowInto(window.FixedWindows(300))
             | "KeyStatic" >> beam.Map(lambda r: (r["mmsi"], r))
-            | "GroupStaticByMMSI" >> beam.GroupByKey()
-            | "LatestStatic" >> beam.Map(lambda kv: max(kv[1], key=lambda x: x["timestamp"]))
-            | "DedupStatic" >> beam.ParDo(DeduplicateStaticDoFn())
-            | "PrepStatic" >> beam.Map(keep_static_fields)
+            | "GroupStatic" >> beam.GroupByKey()
+            | "LatestStaticPerMMSI" >> beam.Map(lambda kv: max(kv[1], key=lambda x: x["timestamp"]))
+            | "DeduplicateStaticMem" >> beam.ParDo(DeduplicateStaticInMemoryDoFn())
+            # Tutaj yieldujemy tylko te, które nie wystąpiły jeszcze w GLOBAL_SEEN_MMSI
         )
         ships_static | "WriteStatic" >> WriteToBigQuery(
             table=table_static,
@@ -280,30 +324,16 @@ def run():
             """,
             create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
+            method="STREAMING_INSERTS"
         )
 
-        # side input
-        static_dict = (
-            ships_static
-            | "MapStaticKey" >> beam.Map(lambda row: (row["mmsi"], row))
-            | "GroupStatic" >> beam.GroupByKey()
-            | "PickOne" >> beam.Map(lambda kv: (kv[0], list(kv[1])[0]))
-        )
-        side_static = beam.pvalue.AsDict(static_dict)
-
-        # collisions
+        # 5) collisions
         filtered_for_collisions = parsed | "FilterEnough" >> beam.Filter(is_ship_long_enough)
         keyed = filtered_for_collisions | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
-        # okno 3 min (z allowed_lateness=0)
-        windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(
-            window.FixedWindows(180), allowed_lateness=Duration(0)
-        )
+        windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(window.FixedWindows(10), allowed_lateness=Duration(0))
         grouped = windowed_keyed | "GroupByGeohash" >> beam.GroupByKey()
 
-        collisions_gen = grouped | "DetectCollisions" >> beam.ParDo(
-            CollisionGeneratorDoFn(side_static), side_static
-        )
+        collisions_gen = grouped | "DetectCollisions" >> beam.ParDo(CollisionGeneratorDoFn(side_static=None), None)
         final_collisions = collisions_gen | "ProcessCollisionPairs" >> beam.ParDo(CollisionPairDoFn())
 
         final_collisions | "WriteCollisions" >> WriteToBigQuery(
@@ -325,8 +355,9 @@ def run():
             """,
             create_disposition=BigQueryDisposition.CREATE_NEVER,
             write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
+            method="STREAMING_INSERTS"
         )
+
 
 if __name__ == "__main__":
     run()
