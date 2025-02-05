@@ -31,18 +31,34 @@ if not PROJECT_ID:
 publisher = pubsub_v1.PublisherClient()
 topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
-# Słownik pamiętający dane statyczne statków (mmsi -> dict)
+# Global dictionaries and counters
 ship_static_data = {}
+hdg511_corrected_count = 0  # Counts messages where TrueHeading was 511 and corrected
+TIMESTAMP_DIFFS = []  # List of timestamp differences (in minutes) for each message
 
-received_count = 0
-published_count = 0
-
-# Globalna lista do zbierania różnic timestamp (w minutach)
-TIMESTAMP_DIFFS = []
+# Logging summary: once per minute, log corrected hdg and timestamp differences
+async def log_summary_stats():
+    global hdg511_corrected_count, TIMESTAMP_DIFFS
+    while True:
+        await asyncio.sleep(60)
+        if TIMESTAMP_DIFFS:
+            avg_diff = sum(TIMESTAMP_DIFFS) / len(TIMESTAMP_DIFFS)
+            count_over_4 = len([d for d in TIMESTAMP_DIFFS if d > 4])
+        else:
+            avg_diff = 0
+            count_over_4 = 0
+        logger.info(
+            f"[SummaryStats] Wykryto {hdg511_corrected_count} statków z TrueHeading=511 (poprawiono na cog). "
+            f"Średnia różnica timestamp: {avg_diff:.2f} minut, "
+            f"{count_over_4} rekordów >4 min opóźnienia."
+        )
+        # Reset counters
+        hdg511_corrected_count = 0
+        TIMESTAMP_DIFFS.clear()
 
 async def log_stats():
     """
-    Co minutę loguje liczbę odebranych i opublikowanych wiadomości AIS.
+    Logs the count of received and published AIS messages every minute.
     """
     global received_count, published_count
     while True:
@@ -53,34 +69,17 @@ async def log_stats():
         received_count = 0
         published_count = 0
 
-async def log_timestamp_stats():
-    """
-    Co minutę loguje średnią różnicę między timestampami a bieżącym czasem
-    oraz liczbę wiadomości, których timestamp jest starszy niż 4 minuty.
-    Po logowaniu lista różnic jest czyszczona.
-    """
-    global TIMESTAMP_DIFFS
-    while True:
-        await asyncio.sleep(60)
-        if TIMESTAMP_DIFFS:
-            avg_diff = sum(TIMESTAMP_DIFFS) / len(TIMESTAMP_DIFFS)
-            count_old = len([d for d in TIMESTAMP_DIFFS if d > 4])
-            logger.info(
-                f"[TimestampStats] Średnia różnica: {avg_diff:.2f} minut, Rekordów >4 min: {count_old}"
-            )
-            TIMESTAMP_DIFFS = []
-
 async def connect_ais_stream():
     """
-    Główna pętla łącząca się z AISSTREAM.io i nasłuchująca wiadomości AIS.
+    Main loop: connects to AISSTREAM.io, subscribes, and processes incoming messages.
     """
     global received_count, published_count
     uri = "wss://stream.aisstream.io/v0/stream"
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-    # Uruchamiamy asynchroniczne zadania logujące statystyki
+    # Start background tasks for logging summary and general stats
     asyncio.create_task(log_stats())
-    asyncio.create_task(log_timestamp_stats())
+    asyncio.create_task(log_summary_stats())
 
     while True:
         try:
@@ -127,7 +126,7 @@ async def connect_ais_stream():
 
 def process_ship_static_data(message: dict):
     """
-    Przetwarza wiadomości typu ShipStaticData.
+    Processes ShipStaticData messages.
     """
     metadata = message.get("MetaData", {})
     mmsi = metadata.get('MMSI')
@@ -165,13 +164,13 @@ def is_valid_coordinate(value):
 
 async def process_position_report(message: dict):
     """
-    Przetwarza wiadomości typu PositionReport:
-    - Uzupełnia dane statyczne,
-    - Sprawdza i modyfikuje heading, gdy ma wartość 511,
-    - Loguje różnice timestampów,
-    - Publikuje do Pub/Sub.
+    Processes PositionReport messages:
+      - Enriches with static data,
+      - Checks if TrueHeading is 511; if so, replaces it with Cog and logs the correction,
+      - Checks timestamp differences and appends them to a global list,
+      - Publishes the reduced message to Pub/Sub.
     """
-    global published_count
+    global published_count, hdg511_corrected_count
     position_report = message.get("Message", {}).get("PositionReport", {})
     metadata = message.get("MetaData", {})
     mmsi = metadata.get('MMSI')
@@ -184,7 +183,7 @@ async def process_position_report(message: dict):
     cog = position_report.get('Cog')
     sog = position_report.get('Sog')
 
-    # Pobierz TrueHeading i przetwórz go
+    # Retrieve and process TrueHeading
     heading = position_report.get('TrueHeading')
     if heading is not None:
         try:
@@ -192,37 +191,38 @@ async def process_position_report(message: dict):
         except:
             heading = None
 
-    # Nowa logika: jeśli heading jest równy 511, zamień na wartość cog
+    # If heading equals 511, log and replace with cog
     if heading == 511:
-        logger.info(f"MMSI {mmsi}: TrueHeading jest 511, zastępuję wartością Cog: {cog}")
+        logger.info(f"MMSI {mmsi}: Detected TrueHeading=511; replacing with Cog value {cog}.")
         heading = cog
-        logger.info(f"MMSI {mmsi}: Nowa wartość heading: {heading}")
+        hdg511_corrected_count += 1
 
-    timestamp = metadata.get('<user__selection>TimeReceived</user__selection>')
-    if not timestamp:
-        timestamp = datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    # Use TimeReceived from MetaData
+    time_received = metadata.get("TimeReceived")
+    if not time_received:
+        time_received = datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     else:
-        if timestamp.endswith('+00:00'):
-            timestamp = timestamp.replace('+00:00', 'Z')
+        if time_received.endswith('+00:00'):
+            time_received = time_received.replace('+00:00', 'Z')
 
-    # Walidacja SOG i współrzędnych
+    # Validate sog and coordinates
     if sog is None or sog < 2:
         return
     if not is_valid_coordinate(latitude) or not is_valid_coordinate(longitude):
         return
 
-    # Sprawdzenie różnicy timestamp
+    # Check timestamp difference
     try:
-        received_time = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        received_time = datetime.datetime.fromisoformat(time_received.replace("Z", "+00:00"))
         now_time = datetime.datetime.now(timezone.utc)
         diff_minutes = (now_time - received_time).total_seconds() / 60
-        # Dodajemy różnicę do globalnej listy
         TIMESTAMP_DIFFS.append(diff_minutes)
         if diff_minutes > 3:
-            logger.warning(f"MMSI {mmsi}: Różnica timestamp wynosi {diff_minutes:.2f} minut (> 3 min).")
+            logger.warning(f"MMSI {mmsi}: TimeReceived is delayed by {diff_minutes:.2f} minutes (> 3 min).")
     except Exception as e:
-        logger.error(f"Błąd parsowania timestamp {timestamp} dla MMSI {mmsi}: {e}")
+        logger.error(f"Error parsing TimeReceived {time_received} for MMSI {mmsi}: {e}")
 
+    # Enrich with static data
     statics = ship_static_data.get(mmsi, {})
     ship_name = statics.get('ship_name', 'Unknown')
     dim_a = statics.get('dim_a')
@@ -238,7 +238,7 @@ async def process_position_report(message: dict):
         'sog': sog,
         'cog': cog,
         'heading': heading,
-        'timestamp': timestamp,
+        'timestamp': time_received,
         'dim_a': dim_a,
         'dim_b': dim_b,
         'dim_c': dim_c,
@@ -250,7 +250,7 @@ async def process_position_report(message: dict):
 
 async def publish_to_pubsub(msg: dict):
     """
-    Publikacja do Pub/Sub.
+    Publishes the message to Pub/Sub.
     """
     loop = asyncio.get_running_loop()
     data = json.dumps(msg).encode('utf-8')
