@@ -57,27 +57,27 @@ async def connect_ais_stream():
             await asyncio.sleep(5)
 
 async def process_position_report(message: dict):
-    metadata = message.get("MetaData", {})
-    report_ts_str = metadata.get("TimeReceived")
+    # Pobieramy dane raportu z obiektu Message
+    position_report = message.get("Message", {}).get("PositionReport", {})
+    if not position_report:
+        return
 
+    # Pobieramy znacznik czasu z pola "Timestamp"
+    report_ts_str = position_report.get("Timestamp")
     if not report_ts_str:
         return
 
     try:
-        report_ts_str = report_ts_str.replace('+00:00', 'Z').replace('Z', '+00:00')
+        # Zamieniamy 'Z' na '+00:00', jeśli występuje, aby uzyskać format ISO 8601
+        report_ts_str = report_ts_str.replace('Z', '+00:00')
         dt_report = datetime.fromisoformat(report_ts_str)
-        
-        if dt_report.tzinfo is None:
-            dt_report = dt_report.replace(tzinfo=timezone.utc)
-        else:
-            dt_report = dt_report.astimezone(timezone.utc)
-
-        now_utc = datetime.now(timezone.utc)
-        delay_sec = (now_utc - dt_report).total_seconds()
-        logger.info(f"Opóźnienie: {delay_sec:.1f}s")
-
     except Exception as e:
         logger.warning(f"Błąd parsowania czasu: {str(e)}")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    delay_sec = (now_utc - dt_report).total_seconds()
+    logger.info(f"Opóźnienie: {delay_sec:.1f}s")
 
 if __name__ == "__main__":
     try:
