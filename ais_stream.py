@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 import os
-import asyncio
+import math
 import json
-from datetime import datetime, timezone
-from google.cloud import pubsub_v1
-from dotenv import load_dotenv
-import websockets
 import logging
+import datetime
+from datetime import timezone, timedelta
+from dotenv import load_dotenv
+import asyncio
+import websockets
 import ssl
 import certifi
 import time
+
+from google.cloud import pubsub_v1
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,41 +32,60 @@ publisher = pubsub_v1.PublisherClient()
 topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
 # Słownik pamiętający dane statyczne statków (mmsi -> dict)
-# klucz: mmsi (int), wartość: { 'ship_name':..., 'dim_a':..., 'dim_b':..., 'dim_c':..., 'dim_d':... }
 ship_static_data = {}
 
 received_count = 0
 published_count = 0
 
+# Globalna lista do zbierania różnic timestamp (w minutach)
+TIMESTAMP_DIFFS = []
+
 async def log_stats():
     """
-    Zadanie asynchroniczne: co minutę logujemy liczbę odebranych
-    i opublikowanych wiadomości AIS.
+    Co minutę loguje liczbę odebranych i opublikowanych wiadomości AIS.
     """
     global received_count, published_count
     while True:
         await asyncio.sleep(60)
         logger.info(
-            f"Ostatnia minuta: odebrano {received_count} AIS, "
-            f"opublikowano {published_count} do Pub/Sub"
+            f"Ostatnia minuta: odebrano {received_count} AIS, opublikowano {published_count} do Pub/Sub"
         )
         received_count = 0
         published_count = 0
 
+async def log_timestamp_stats():
+    """
+    Co minutę loguje średnią różnicę między timestampami a bieżącym czasem
+    oraz liczbę wiadomości, których timestamp jest starszy niż 4 minuty.
+    Po logowaniu lista różnic jest czyszczona.
+    """
+    global TIMESTAMP_DIFFS
+    while True:
+        await asyncio.sleep(60)
+        if TIMESTAMP_DIFFS:
+            avg_diff = sum(TIMESTAMP_DIFFS) / len(TIMESTAMP_DIFFS)
+            count_old = len([d for d in TIMESTAMP_DIFFS if d > 4])
+            logger.info(
+                f"[TimestampStats] Średnia różnica: {avg_diff:.2f} minut, Rekordów >4 min: {count_old}"
+            )
+            TIMESTAMP_DIFFS = []
+
 async def connect_ais_stream():
     """
-    Główna pętla łącząca się z AISSTREAM.io i nasłuchująca wiadomości AIS (ShipStaticData, PositionReport).
+    Główna pętla łącząca się z AISSTREAM.io i nasłuchująca wiadomości AIS.
     """
     global received_count, published_count
     uri = "wss://stream.aisstream.io/v0/stream"
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-    asyncio.create_task(log_stats())  # statystyki co 60s
+    # Uruchamiamy asynchroniczne zadania logujące statystyki
+    asyncio.create_task(log_stats())
+    asyncio.create_task(log_timestamp_stats())
 
     while True:
         try:
             async with websockets.connect(uri, ping_interval=None, ssl=ssl_context) as websocket:
-                logger.info("=== AIS STREAM (NEW CODE) === connected to AISSTREAM.io")
+                logger.info("=== AIS STREAM === Connected to AISSTREAM.io")
 
                 subscribe_message = {
                     "APIKey": AISSTREAM_TOKEN,
@@ -101,14 +123,11 @@ async def connect_ais_stream():
 
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
-        # Po rozłączeniu: odczekaj 5s i spróbuj ponownie
         await asyncio.sleep(5)
 
 def process_ship_static_data(message: dict):
     """
-    Obrabia wiadomości typu ShipStaticData: 
-    - pobiera nazwy i wymiary A,B,C,D
-    - zapamiętuje w ship_static_data[mmsi].
+    Przetwarza wiadomości typu ShipStaticData.
     """
     metadata = message.get("MetaData", {})
     mmsi = metadata.get('MMSI')
@@ -120,10 +139,10 @@ def process_ship_static_data(message: dict):
     ship_name = static_part.get('ShipName') or static_part.get('Name') or 'Unknown'
 
     dimension = static_part.get('Dimension', {})
-    a = dimension.get('A')  # od anteny do dziobu
-    b = dimension.get('B')  # od anteny do rufy
-    c = dimension.get('C')  # od anteny do lewej burty
-    d = dimension.get('D')  # od anteny do prawej burty
+    a = dimension.get('A')
+    b = dimension.get('B')
+    c = dimension.get('C')
+    d = dimension.get('D')
 
     def to_float(val):
         return float(val) if isinstance(val, (int, float)) else None
@@ -142,16 +161,14 @@ def process_ship_static_data(message: dict):
     }
 
 def is_valid_coordinate(value):
-    """
-    Prosta walidacja współrzędnych lat/lon.
-    """
     return isinstance(value, (int, float)) and -180 <= value <= 180
 
 async def process_position_report(message: dict):
     """
-    Obrabia wiadomości typu PositionReport:
-    - dopisuje dane statyczne (dim_a, dim_b, etc.) z ship_static_data
-    - pobiera TrueHeading => heading
+    Przetwarza wiadomości typu PositionReport:
+    - Uzupełnia dane statyczne,
+    - Sprawdza i modyfikuje heading, gdy ma wartość 511,
+    - Loguje różnice timestampów,
     - Publikuje do Pub/Sub.
     """
     global published_count
@@ -167,29 +184,45 @@ async def process_position_report(message: dict):
     cog = position_report.get('Cog')
     sog = position_report.get('Sog')
 
-    # Nowy parametr: TrueHeading
-    heading = position_report.get('TrueHeading')  # według dokumentacji
+    # Pobierz TrueHeading i przetwórz go
+    heading = position_report.get('TrueHeading')
     if heading is not None:
         try:
             heading = float(heading)
         except:
             heading = None
 
-    # Timestamp
-    timestamp = metadata.get('TimeReceived')
+    # Nowa logika: jeśli heading jest równy 511, zamień na wartość cog
+    if heading == 511:
+        logger.info(f"MMSI {mmsi}: TrueHeading jest 511, zastępuję wartością Cog: {cog}")
+        heading = cog
+        logger.info(f"MMSI {mmsi}: Nowa wartość heading: {heading}")
+
+    timestamp = metadata.get('<user__selection>TimeReceived</user__selection>')
     if not timestamp:
-        timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        timestamp = datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     else:
         if timestamp.endswith('+00:00'):
             timestamp = timestamp.replace('+00:00', 'Z')
 
-    # Filtr SOG >= 2 + valid lat/lon
+    # Walidacja SOG i współrzędnych
     if sog is None or sog < 2:
         return
     if not is_valid_coordinate(latitude) or not is_valid_coordinate(longitude):
         return
 
-    # Dane statyczne z pamięci
+    # Sprawdzenie różnicy timestamp
+    try:
+        received_time = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        now_time = datetime.datetime.now(timezone.utc)
+        diff_minutes = (now_time - received_time).total_seconds() / 60
+        # Dodajemy różnicę do globalnej listy
+        TIMESTAMP_DIFFS.append(diff_minutes)
+        if diff_minutes > 3:
+            logger.warning(f"MMSI {mmsi}: Różnica timestamp wynosi {diff_minutes:.2f} minut (> 3 min).")
+    except Exception as e:
+        logger.error(f"Błąd parsowania timestamp {timestamp} dla MMSI {mmsi}: {e}")
+
     statics = ship_static_data.get(mmsi, {})
     ship_name = statics.get('ship_name', 'Unknown')
     dim_a = statics.get('dim_a')
@@ -197,7 +230,6 @@ async def process_position_report(message: dict):
     dim_c = statics.get('dim_c')
     dim_d = statics.get('dim_d')
 
-    # Wiadomość do Pub/Sub
     reduced_message = {
         'mmsi': mmsi,
         'ship_name': ship_name,
@@ -205,7 +237,7 @@ async def process_position_report(message: dict):
         'longitude': longitude,
         'sog': sog,
         'cog': cog,
-        'heading': heading,  # <-- nowa informacja
+        'heading': heading,
         'timestamp': timestamp,
         'dim_a': dim_a,
         'dim_b': dim_b,
@@ -218,7 +250,7 @@ async def process_position_report(message: dict):
 
 async def publish_to_pubsub(msg: dict):
     """
-    Publikacja asynchroniczna do Pub/Sub.
+    Publikacja do Pub/Sub.
     """
     loop = asyncio.get_running_loop()
     data = json.dumps(msg).encode('utf-8')
