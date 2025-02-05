@@ -24,60 +24,53 @@ BOUNDING_BOXES = [[[49.0, -2.0], [51.0, 2.0]]]
 async def connect_ais_stream():
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-    while True:
-        try:
-            async with websockets.connect(URI, ping_interval=None, ssl=ssl_context) as websocket:
-                logger.info("Połączono z AISSTREAM.io.")
+    async with websockets.connect(URI, ssl=ssl_context, ping_interval=None) as websocket:
+        logger.info("Połączono z AISSTREAM.io.")
 
-                subscribe_message = {
-                    "APIKey": AISSTREAM_TOKEN,
-                    "MessageType": "Subscribe",
-                    "BoundingBoxes": BOUNDING_BOXES,
-                    "OutputFormat": "JSON",
-                    "FilterMessageTypes": ["PositionReport", "ShipStaticData", "Error"]
-                }
-                await websocket.send(json.dumps(subscribe_message))
+        subscribe_message = {
+            "APIKey": AISSTREAM_TOKEN,
+            "MessageType": "Subscribe",
+            "BoundingBoxes": BOUNDING_BOXES,
+            "OutputFormat": "JSON",
+            "FilterMessageTypes": ["PositionReport"]
+        }
+        await websocket.send(json.dumps(subscribe_message))
+        logger.info("Wysłano subskrypcję do AISSTREAM.")
 
-                async for raw_msg in websocket:
-                    try:
-                        msg = json.loads(raw_msg)
-                        msg_type = msg.get("MessageType")
-
-                        if msg_type == "PositionReport":
-                            await process_position_report(msg)
-                        elif msg_type == "Error":
-                            logger.error(f"Błąd: {msg.get('Error', 'Nieznany błąd')}")
-                            break
-
-                    except json.JSONDecodeError:
-                        continue
-
-        except Exception as e:
-            logger.error(f"Błąd połączenia: {str(e)}")
-            await asyncio.sleep(5)
+        async for raw_msg in websocket:
+            try:
+                msg = json.loads(raw_msg)
+                if msg.get("MessageType") == "PositionReport":
+                    await process_position_report(msg)
+            except json.JSONDecodeError:
+                continue
 
 async def process_position_report(message: dict):
-    # Pobieramy dane raportu z obiektu Message
+    """
+    Funkcja odczytuje wiadomość typu PositionReport,
+    pobiera znacznik czasu (pole "Timestamp") i oblicza opóźnienie.
+    """
+    # Pobieramy dane raportu z wiadomości
     position_report = message.get("Message", {}).get("PositionReport", {})
     if not position_report:
         return
 
     # Pobieramy znacznik czasu z pola "Timestamp"
-    report_ts_str = position_report.get("Timestamp")
-    if not report_ts_str:
+    timestamp_str = position_report.get("Timestamp")
+    if not timestamp_str:
         return
 
     try:
-        # Zamieniamy 'Z' na '+00:00', jeśli występuje, aby uzyskać format ISO 8601
-        report_ts_str = report_ts_str.replace('Z', '+00:00')
-        dt_report = datetime.fromisoformat(report_ts_str)
+        # Zamieniamy 'Z' na '+00:00', jeśli występuje, aby format był zgodny z ISO 8601
+        timestamp_str = timestamp_str.replace("Z", "+00:00")
+        dt_report = datetime.fromisoformat(timestamp_str)
     except Exception as e:
-        logger.warning(f"Błąd parsowania czasu: {str(e)}")
+        logger.error(f"Błąd parsowania znacznika czasu: {e}")
         return
 
     now_utc = datetime.now(timezone.utc)
     delay_sec = (now_utc - dt_report).total_seconds()
-    logger.info(f"Opóźnienie: {delay_sec:.1f}s")
+    logger.info(f"Opóźnienie PositionReport: {delay_sec:.1f} s")
 
 if __name__ == "__main__":
     try:
