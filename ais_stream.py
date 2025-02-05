@@ -47,8 +47,8 @@ async def connect_ais_stream():
 
 async def process_position_report(message: dict):
     """
-    Funkcja odczytuje wiadomość typu PositionReport, korzystając z pełnego
-    znacznika czasu (pole "time_utc" z MetaData) i oblicza opóźnienie.
+    Odczytuje wiadomość typu PositionReport korzystając z pełnego znacznika czasu (pole "time_utc" z MetaData)
+    i oblicza opóźnienie.
     """
     meta = message.get("MetaData", {})
     time_utc_str = meta.get("time_utc")
@@ -57,12 +57,25 @@ async def process_position_report(message: dict):
         return
 
     try:
-        # Usuń ewentualne końcowe " UTC", aby format pasował do oczekiwanego schematu.
+        # Usuń końcowe " UTC" jeśli występuje
         time_utc_str = time_utc_str.replace(" UTC", "")
-        # Próba parsowania ze wzorcem z mikrosekundami, a w razie niepowodzenia bez mikrosekund.
-        try:
-            dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S.%f %z")
-        except ValueError:
+        # Jeśli występuje część ułamkowa, skracamy ją do 6 cyfr (microsekundy)
+        if '.' in time_utc_str:
+            date_part, frac_and_zone = time_utc_str.split('.', 1)
+            # Oczekujemy, że frac_and_zone ma format: "<ułamkowe> <strefa>"
+            # Przykład: "366066421 +0000"
+            if ' ' in frac_and_zone:
+                frac_str, tz_part = frac_and_zone.split(' ', 1)
+                # Skracamy część ułamkową do 6 cyfr
+                frac_str = frac_str[:6]
+                time_utc_str = f"{date_part}.{frac_str} {tz_part}"
+                dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S.%f %z")
+            else:
+                # Jeśli nie ma strefy czasowej oddzielonej spacją, spróbuj bez ułamkowej
+                dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S")
+                dt_report = dt_report.replace(tzinfo=timezone.utc)
+        else:
+            # Jeśli brak ułamkowej części
             dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S %z")
     except Exception as e:
         logger.error(f"Błąd parsowania time_utc: {e}")
