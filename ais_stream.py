@@ -47,25 +47,25 @@ async def connect_ais_stream():
 
 async def process_position_report(message: dict):
     """
-    Funkcja odczytuje wiadomość typu PositionReport,
-    pobiera znacznik czasu (pole "Timestamp") i oblicza opóźnienie.
+    Funkcja odczytuje wiadomość typu PositionReport, korzystając z pełnego
+    znacznika czasu (pole "time_utc" z MetaData) i oblicza opóźnienie.
     """
-    # Pobieramy dane raportu z wiadomości
-    position_report = message.get("Message", {}).get("PositionReport", {})
-    if not position_report:
-        return
-
-    # Pobieramy znacznik czasu z pola "Timestamp"
-    timestamp_str = position_report.get("Timestamp")
-    if not timestamp_str:
+    meta = message.get("MetaData", {})
+    time_utc_str = meta.get("time_utc")
+    if not time_utc_str:
+        logger.error("Brak pola time_utc w MetaData.")
         return
 
     try:
-        # Zamieniamy 'Z' na '+00:00', jeśli występuje, aby format był zgodny z ISO 8601
-        timestamp_str = timestamp_str.replace("Z", "+00:00")
-        dt_report = datetime.fromisoformat(timestamp_str)
+        # Usuń ewentualne końcowe " UTC", aby format pasował do oczekiwanego schematu.
+        time_utc_str = time_utc_str.replace(" UTC", "")
+        # Próba parsowania ze wzorcem z mikrosekundami, a w razie niepowodzenia bez mikrosekund.
+        try:
+            dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S.%f %z")
+        except ValueError:
+            dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S %z")
     except Exception as e:
-        logger.error(f"Błąd parsowania znacznika czasu: {e}")
+        logger.error(f"Błąd parsowania time_utc: {e}")
         return
 
     now_utc = datetime.now(timezone.utc)
