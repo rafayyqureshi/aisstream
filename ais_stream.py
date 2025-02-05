@@ -47,25 +47,54 @@ async def connect_ais_stream():
 
 async def process_position_report(message: dict):
     """
-    Pobiera znacznik czasu z pola 'Timestamp' w obiekcie PositionReport i oblicza opóźnienie.
-    Zakładamy, że pole Timestamp zawiera czas w formacie Unix epoch (sekundy).
+    Oblicza opóźnienie pomiędzy czasem zawartym w komunikacie a bieżącym czasem UTC.
+    
+    Najpierw próbuje wykorzystać pełny znacznik czasu z pola 'time_utc'
+    (dostarczanego w MetaData). Jeśli nie jest on dostępny, używa pola 'Timestamp'
+    z PositionReport – ale UWAGA: pole to zawiera tylko liczbę sekund (0–59)
+    i nie jest pełnym znacznikiem czasu.
     """
-    position_report = message.get("Message", {}).get("PositionReport", {})
-    if not position_report:
-        return
-
-    timestamp_value = position_report.get("Timestamp")
-    if timestamp_value is None:
-        logger.error("Brak pola Timestamp w PositionReport.")
-        return
-
-    try:
-        # Zakładamy, że Timestamp jest wartością liczbową reprezentującą sekundy od epoki Unix.
-        timestamp_int = int(timestamp_value)
-        dt_report = datetime.fromtimestamp(timestamp_int, tz=timezone.utc)
-    except Exception as e:
-        logger.error(f"Błąd konwersji Timestamp: {e}")
-        return
+    # Próba pobrania pełnego znacznika czasu z MetaData
+    meta = message.get("MetaData", {})
+    time_utc_str = meta.get("time_utc")
+    if time_utc_str:
+        try:
+            # Przykładowy format: "2025-02-05 06:43:45.366066421 +0000 UTC"
+            # Usuwamy ewentualne końcowe " UTC"
+            time_utc_str = time_utc_str.replace(" UTC", "")
+            if '.' in time_utc_str:
+                date_part, frac_and_zone = time_utc_str.split('.', 1)
+                if ' ' in frac_and_zone:
+                    frac_str, tz_part = frac_and_zone.split(' ', 1)
+                    # Skracamy część ułamkową do 6 cyfr (microsekundy)
+                    frac_str = frac_str[:6]
+                    fixed_time_str = f"{date_part}.{frac_str} {tz_part}"
+                    dt_report = datetime.strptime(fixed_time_str, "%Y-%m-%d %H:%M:%S.%f %z")
+                else:
+                    dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S.%f")
+                    dt_report = dt_report.replace(tzinfo=timezone.utc)
+            else:
+                dt_report = datetime.strptime(time_utc_str, "%Y-%m-%d %H:%M:%S %z")
+        except Exception as e:
+            logger.error(f"Błąd parsowania MetaData time_utc: {e}")
+            return
+    else:
+        # Jeśli MetaData nie zawiera pełnego czasu, wykorzystujemy pole Timestamp z PositionReport.
+        # UWAGA: Pole Timestamp zawiera tylko liczbę sekund (0–59) i nie jest pełnym czasem.
+        position_report = message.get("Message", {}).get("PositionReport", {})
+        timestamp_value = position_report.get("Timestamp")
+        if timestamp_value is None:
+            logger.error("Brak pola Timestamp w PositionReport.")
+            return
+        try:
+            timestamp_int = int(timestamp_value)
+            # Założenie: komunikat dotyczy bieżącej minuty.
+            now = datetime.now(timezone.utc)
+            dt_report = now.replace(second=timestamp_int, microsecond=0)
+            logger.warning("Używamy pola Timestamp z PositionReport – jest to tylko liczba sekund (0-59)!")
+        except Exception as e:
+            logger.error(f"Błąd konwersji Timestamp: {e}")
+            return
 
     now_utc = datetime.now(timezone.utc)
     delay_sec = (now_utc - dt_report).total_seconds()
