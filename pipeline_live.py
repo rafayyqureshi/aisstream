@@ -3,7 +3,6 @@ import os
 import json
 import logging
 import datetime
-import time
 from dotenv import load_dotenv
 from google.cloud import storage
 import apache_beam as beam
@@ -14,8 +13,49 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# In-memory dictionary to store static ship data (MMSI as key)
-static_data = {}
+class StaticDataManager:
+    def __init__(self):
+        self.static_data = {}
+
+    def update_static_data(self, element):
+        """Aktualizuje dane statyczne w pamięci."""
+        mmsi = element["mmsi"]
+        if any(element.get(dim) for dim in ["dim_a", "dim_b", "dim_c", "dim_d"]):
+            if mmsi not in self.static_data:
+                self.static_data[mmsi] = {
+                    "ship_name": element.get("ship_name", "Unknown"),
+                    "dim_a": element.get("dim_a"),
+                    "dim_b": element.get("dim_b"),
+                    "dim_c": element.get("dim_c"),
+                    "dim_d": element.get("dim_d"),
+                    "last_update": datetime.datetime.utcnow()
+                }
+                logging.info(f"Updated static data for MMSI: {mmsi}")
+        return element
+
+    def create_snapshot(self):
+        """Tworzy JSON z aktualnym stanem danych statycznych."""
+        return json.dumps(list(self.static_data.values()), indent=2)
+
+class UploadSnapshotFn(beam.DoFn):
+    def __init__(self, gcs_bucket, file_name):
+        self.gcs_bucket = gcs_bucket
+        self.file_name = file_name
+        self.data_manager = StaticDataManager()
+
+    def process(self, elements):
+        """Przetwarza partię elementów i uploaduje snapshot."""
+        # Aktualizuj dane statyczne dla wszystkich elementów w oknie
+        for element in elements:
+            self.data_manager.update_static_data(element)
+        
+        # Utwórz i uploaduj snapshot
+        json_data = self.data_manager.create_snapshot()
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(self.gcs_bucket)
+        blob = bucket.blob(self.file_name)
+        blob.upload_from_string(json_data, content_type="application/json")
+        logging.info(f"Uploaded snapshot to {self.gcs_bucket}/{self.file_name}")
 
 def parse_ais(record_bytes):
     try:
@@ -28,56 +68,11 @@ def parse_ais(record_bytes):
         data["longitude"] = float(data["longitude"])
         data["cog"] = float(data["cog"])
         data["sog"] = float(data["sog"])
-        data.pop("ship_length", None)
-        hdg = data.get("heading")
-        if hdg is not None:
-            try:
-                data["heading"] = float(hdg)
-            except:
-                data["heading"] = None
-        else:
-            data["heading"] = None
-        for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
-            v = data.get(d)
-            data[d] = float(v) if v is not None else None
-        data["ship_name"] = data.get("ship_name", "Unknown")
-        data["geohash"] = data.get("geohash", "none")
+        data["heading"] = float(data["heading"]) if data.get("heading") else None
         return data
     except Exception as e:
         logging.error(f"Error in parse_ais: {e}")
         return None
-
-def process_static_data(row):
-    """Process static data from Pub/Sub."""
-    mmsi = row["mmsi"]
-    if mmsi not in static_data:
-        static_data[mmsi] = {
-            "ship_name": row["ship_name"],
-            "dim_a": row["dim_a"],
-            "dim_b": row["dim_b"],
-            "dim_c": row["dim_c"],
-            "dim_d": row["dim_d"]
-        }
-        logging.info(f"New static ship data added: {mmsi}")
-    return row
-
-def create_json_snapshot():
-    """Create a snapshot of all static data and convert it to JSON."""
-    snapshot = []
-    for mmsi, info in static_data.items():
-        obj = {"mmsi": mmsi}
-        obj.update(info)
-        snapshot.append(obj)
-    json_str = json.dumps(snapshot, indent=2)
-    return json_str
-
-def upload_to_gcs(json_data, bucket_name, file_name):
-    """Upload JSON data to Google Cloud Storage."""
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(file_name)
-    blob.upload_from_string(json_data, content_type="application/json")
-    logging.info(f"File {file_name} uploaded to {bucket_name}.")
 
 def run():
     logging.getLogger().setLevel(logging.INFO)
@@ -97,10 +92,6 @@ def run():
         temp_location=temp_loc,
         staging_location=staging_loc,
         job_name=job_name,
-        num_workers=1,
-        max_num_workers=10,
-        autoscaling_algorithm='THROUGHPUT_BASED',
-        save_main_session=True,
         streaming=True
     )
 
@@ -113,17 +104,13 @@ def run():
             | "FilterNone" >> beam.Filter(lambda x: x is not None)
         )
 
-        # Process static data
-        processed_static_data = parsed | "ProcessStaticData" >> beam.Map(process_static_data)
-
-        # Timer for periodic snapshot creation and uploading to GCS (every 5 minutes for testing)
-        def create_and_upload_snapshot(window, elements):
-            json_data = create_json_snapshot()
-            upload_to_gcs(json_data, gcs_bucket, file_name)
-
-        # Apply the snapshot timer function every 5 minutes
-        processed_static_data | "CreateSnapshot" >> beam.WindowInto(window.FixedWindows(300)) \
-            | "UploadSnapshot" >> beam.ParDo(create_and_upload_snapshot)
+        # Przetwarzanie i okresowe snapshoty
+        _ = (
+            parsed
+            | "WindowInto" >> beam.WindowInto(window.FixedWindows(300))  # 5 minut
+            | "GroupAll" >> beam.CombineGlobally(beam.combiners.ToListCombineFn())
+            | "UploadSnapshot" >> beam.ParDo(UploadSnapshotFn(gcs_bucket, file_name))
+        )
 
 if __name__ == "__main__":
     run()
