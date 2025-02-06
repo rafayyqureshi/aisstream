@@ -19,18 +19,17 @@ class StaticDataManager:
 
     def update_static_data(self, element):
         """Aktualizuje dane statyczne w pamięci."""
-        mmsi = element["mmsi"]
         if any(element.get(dim) for dim in ["dim_a", "dim_b", "dim_c", "dim_d"]):
-            if mmsi not in self.static_data:
-                self.static_data[mmsi] = {
-                    "ship_name": element.get("ship_name", "Unknown"),
-                    "dim_a": element.get("dim_a"),
-                    "dim_b": element.get("dim_b"),
-                    "dim_c": element.get("dim_c"),
-                    "dim_d": element.get("dim_d"),
-                    "last_update": datetime.datetime.utcnow()
-                }
-                logging.info(f"Updated static data for MMSI: {mmsi}")
+            mmsi = element["mmsi"]
+            self.static_data[mmsi] = {
+                "mmsi": mmsi,
+                "ship_name": element.get("ship_name", "Unknown"),
+                "dim_a": element.get("dim_a"),
+                "dim_b": element.get("dim_b"),
+                "dim_c": element.get("dim_c"),
+                "dim_d": element.get("dim_d"),
+                "last_update": datetime.datetime.utcnow().isoformat()
+            }
         return element
 
     def create_snapshot(self):
@@ -45,6 +44,9 @@ class UploadSnapshotFn(beam.DoFn):
 
     def process(self, elements):
         """Przetwarza partię elementów i uploaduje snapshot."""
+        if not elements:
+            return
+
         # Aktualizuj dane statyczne dla wszystkich elementów w oknie
         for element in elements:
             self.data_manager.update_static_data(element)
@@ -55,7 +57,7 @@ class UploadSnapshotFn(beam.DoFn):
         bucket = storage_client.bucket(self.gcs_bucket)
         blob = bucket.blob(self.file_name)
         blob.upload_from_string(json_data, content_type="application/json")
-        logging.info(f"Uploaded snapshot to {self.gcs_bucket}/{self.file_name}")
+        logger.info(f"Uploaded snapshot to {self.gcs_bucket}/{self.file_name}")
 
 def parse_ais(record_bytes):
     try:
@@ -63,15 +65,22 @@ def parse_ais(record_bytes):
         req = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
         if not all(r in data for r in req):
             return None
-        data["mmsi"] = int(data["mmsi"])
-        data["latitude"] = float(data["latitude"])
-        data["longitude"] = float(data["longitude"])
-        data["cog"] = float(data["cog"])
-        data["sog"] = float(data["sog"])
-        data["heading"] = float(data["heading"]) if data.get("heading") else None
-        return data
+        return {
+            "mmsi": int(data["mmsi"]),
+            "latitude": float(data["latitude"]),
+            "longitude": float(data["longitude"]),
+            "cog": float(data["cog"]),
+            "sog": float(data["sog"]),
+            "heading": float(data["heading"]) if data.get("heading") else None,
+            "dim_a": float(data["dim_a"]) if data.get("dim_a") else None,
+            "dim_b": float(data["dim_b"]) if data.get("dim_b") else None,
+            "dim_c": float(data["dim_c"]) if data.get("dim_c") else None,
+            "dim_d": float(data["dim_d"]) if data.get("dim_d") else None,
+            "ship_name": data.get("ship_name", "Unknown"),
+            "timestamp": data["timestamp"]
+        }
     except Exception as e:
-        logging.error(f"Error in parse_ais: {e}")
+        logger.error(f"Error in parse_ais: {e}")
         return None
 
 def run():
@@ -108,7 +117,7 @@ def run():
         _ = (
             parsed
             | "WindowInto" >> beam.WindowInto(window.FixedWindows(300))  # 5 minut
-            | "GroupAll" >> beam.CombineGlobally(beam.combiners.ToListCombineFn())
+            | "CombineGlobally" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
             | "UploadSnapshot" >> beam.ParDo(UploadSnapshotFn(gcs_bucket, file_name))
         )
 
