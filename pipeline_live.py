@@ -232,7 +232,7 @@ def run():
             parsed
             | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
             | "WindowStatic" >> beam.WindowInto(
-                window.FixedWindows(600),
+                window.FixedWindows(1200), #20min
                 trigger=AfterWatermark(),
                 accumulation_mode=AccumulationMode.DISCARDING
             )
