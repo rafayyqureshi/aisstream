@@ -201,35 +201,39 @@ def run():
         # 1) Parsowanie unified
         parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-        # 2) Przetwarzanie danych statycznych
+       # 2) Przetwarzanie danych statycznych
         static_data = (
             parsed
-            | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
-            | "WindowStatic" >> beam.WindowInto(
-                  window.FixedWindows(600),  # okno 10 minut
-                  trigger=AfterWatermark(),
-                  accumulation_mode=AccumulationMode.DISCARDING
-            )
-            # Deduplikacja w oknie: klucz -> x["mmsi"]
-            | "DeduplicateStatic" >> beam.Distinct(key=lambda x: x["mmsi"])
-            # Zbieranie do listy w ramach okna, potem migawka
-            | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
-            | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
+        | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
+        | "WindowStatic" >> beam.WindowInto(
+            window.FixedWindows(600),  # okno 10 minut
+            trigger=AfterWatermark(),
+            accumulation_mode=AccumulationMode.DISCARDING
         )
+        # Deduplikacja w oknie: klucz -> x["mmsi"]
+        | "AddStaticKeys" >> beam.WithKeys(lambda x: x["mmsi"])  # Dodaj klucz dla deduplikacji
+        | "DeduplicateStatic" >> beam.Distinct()  # Deduplikacja po kluczu
+        | "RemoveStaticKeys" >> beam.Values()  # Usuń klucz i przywróć oryginalną strukturę
+        #   Zbieranie do listy w ramach okna, potem migawka
+        | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
+        | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
+    )
 
         # 3) Przetwarzanie danych pozycyjnych
         positions = (
             parsed
-            | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
-            | "WindowPositions" >> beam.WindowInto(
-                  window.FixedWindows(10),  # okno 10 sekund
-                  trigger=AfterWatermark(),
-                  accumulation_mode=AccumulationMode.DISCARDING
-            )
-            # Deduplikacja (mmsi, timestamp), by uniknąć wielokrotnych identycznych wpisów
-            | "DeduplicatePositions" >> beam.Distinct(key=lambda x: (x["mmsi"], x["timestamp"]))
-            | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
+        | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
+        | "WindowPositions" >> beam.WindowInto(
+            window.FixedWindows(10),  # okno 10 sekund
+            trigger=AfterWatermark(),
+            accumulation_mode=AccumulationMode.DISCARDING
         )
+    # Deduplikacja (mmsi, timestamp), by uniknąć wielokrotnych identycznych wpisów
+    | "AddPositionKeys" >> beam.WithKeys(lambda x: (x["mmsi"], x["timestamp"]))  # Dodaj klucz dla deduplikacji
+    | "DeduplicatePositions" >> beam.Distinct()  # Deduplikacja po kluczu
+    | "RemovePositionKeys" >> beam.Values()  # Usuń klucz i przywróć oryginalną strukturę
+    | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
+)
 
         # 4) Zapis do BQ z FILE_LOADS i trigger co 10 s
         _ = (
