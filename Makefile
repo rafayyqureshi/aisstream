@@ -18,10 +18,7 @@ live: pipeline_live
 pipeline_live:
 	@echo "Uruchamianie potoku Dataflow (LIVE, collisions) ..."
 	. venv/bin/activate && \
-	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && \
-	if [ -z "$$GCS_BUCKET" ]; then \
-	    echo "GCS_BUCKET is not set"; \
-	    exit 1; \
+	export $(shell sed '/^ *#/d; /^$$/d' .env | xargs) && 
 	fi && \
 	echo "GCS_BUCKET is set to $$GCS_BUCKET" && \
 	python pipeline_live.py \
