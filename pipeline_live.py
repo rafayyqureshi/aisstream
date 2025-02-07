@@ -46,6 +46,7 @@ class StaticDataManager:
                 logger.info("[StaticDataManager] No ships_static_latest.json found (starting empty).")
         except Exception as e:
             logger.warning(f"[StaticDataManager] Could not load initial data: {e}")
+            logger.info("[StaticDataManager] Starting with empty static data (no file found or read error).")
 
     def update_static(self, record: dict):
         """Aktualizuje dane statyczne; zapisuje rekord pod kluczem mmsi."""
@@ -81,7 +82,10 @@ class UploadSnapshotFn(beam.DoFn):
             bucket = storage_client.bucket(self.gcs_bucket)
             blob = bucket.blob("ships_static_latest.json")
             blob.upload_from_string(json_data, content_type="application/json")
-            logger.info(f"[UploadSnapshotFn] Snapshot updated with {len(self.manager.static_data)} static records.")
+            logger.info(
+                f"[UploadSnapshotFn] File ships_static_latest.json updated in GCS "
+                f"with {len(self.manager.static_data)} ships."
+            )
         except Exception as e:
             logger.error(f"[UploadSnapshotFn] Error during snapshot upload: {e}")
 
@@ -91,7 +95,8 @@ class UploadSnapshotFn(beam.DoFn):
 def parse_ais(record_bytes: bytes):
     try:
         raw = json.loads(record_bytes.decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[parse_ais] Could not parse JSON: {e}, skipping record.")
         return []
 
     outputs = []
@@ -117,13 +122,14 @@ def parse_ais(record_bytes: bytes):
         try:
             dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
         except:
+            logger.warning("[parse_ais] Invalid timestamp found - record dropped.")
             return []  # Odrzucamy dany rekord całkowicie
 
         heading = None
         if "heading" in raw and raw["heading"] is not None:
             try:
                 heading = float(raw["heading"])
-            except:
+            except Exception:
                 heading = None
 
         outputs.append({
@@ -155,7 +161,30 @@ class EnrichPositionFn(beam.DoFn):
             known = self.manager.find_ship_name(element["mmsi"])
             if known:
                 element["ship_name"] = known
+                logger.info(
+                    f"[EnrichPositionFn] Found unknown ship name for MMSI {element['mmsi']} "
+                    f"- enriched with '{known}'."
+                )
         yield element
+
+###############################################################################
+# Funkcja pomocnicza – usuwanie pól niewymienionych w schemacie BQ
+###############################################################################
+def filter_fields_for_bq(record):
+    """
+    Zwraca nowy słownik zawierający tylko pola zdefiniowane w schemacie BQ.
+    Usunięcie pola 'type' (i ewentualnie innych) zapobiega błędom wczytywania.
+    """
+    return {
+        "mmsi": record["mmsi"],
+        "ship_name": record["ship_name"],
+        "latitude": record["latitude"],
+        "longitude": record["longitude"],
+        "cog": record["cog"],
+        "sog": record["sog"],
+        "heading": record["heading"],
+        "timestamp": record["timestamp"],
+    }
 
 ###############################################################################
 # Główny potok
@@ -196,46 +225,49 @@ def run():
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
+        # 1) Odczyt z PubSub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # 1) Parsowanie unified
+        # 2) Parsowanie wiadomości AIS
         parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-       # 2) Przetwarzanie danych statycznych
+        # 3) Przetwarzanie danych statycznych
         static_data = (
             parsed
-        | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
-        | "WindowStatic" >> beam.WindowInto(
-            window.FixedWindows(600),  # okno 10 minut
-            trigger=AfterWatermark(),
-            accumulation_mode=AccumulationMode.DISCARDING
+            | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
+            | "WindowStatic" >> beam.WindowInto(
+                window.FixedWindows(600),  # okno 10 minut
+                trigger=AfterWatermark(),
+                accumulation_mode=AccumulationMode.DISCARDING
+            )
+            # Deduplikacja w oknie: klucz -> x["mmsi"]
+            | "AddStaticKeys" >> beam.WithKeys(lambda x: x["mmsi"])
+            | "DeduplicateStatic" >> beam.Distinct()
+            | "RemoveStaticKeys" >> beam.Values()
+            # Zbieranie do listy w ramach okna, potem migawka
+            | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
+            | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
         )
-        # Deduplikacja w oknie: klucz -> x["mmsi"]
-        | "AddStaticKeys" >> beam.WithKeys(lambda x: x["mmsi"])  # Dodaj klucz dla deduplikacji
-        | "DeduplicateStatic" >> beam.Distinct()  # Deduplikacja po kluczu
-        | "RemoveStaticKeys" >> beam.Values()  # Usuń klucz i przywróć oryginalną strukturę
-        #   Zbieranie do listy w ramach okna, potem migawka
-        | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
-        | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
-    )
 
-        # 3) Przetwarzanie danych pozycyjnych
+        # 4) Przetwarzanie danych pozycyjnych
         positions = (
             parsed
-        | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
-        | "WindowPositions" >> beam.WindowInto(
-            window.FixedWindows(10),  # okno 10 sekund
-            trigger=AfterWatermark(),
-            accumulation_mode=AccumulationMode.DISCARDING
+            | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
+            | "WindowPositions" >> beam.WindowInto(
+                window.FixedWindows(10),  # okno 10 sekund
+                trigger=AfterWatermark(),
+                accumulation_mode=AccumulationMode.DISCARDING
+            )
+            # Deduplikacja (mmsi, timestamp), by uniknąć wielokrotnych identycznych wpisów
+            | "AddPositionKeys" >> beam.WithKeys(lambda x: (x["mmsi"], x["timestamp"]))
+            | "DeduplicatePositions" >> beam.Distinct()
+            | "RemovePositionKeys" >> beam.Values()
+            | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
+            # Usunięcie pola 'type' i zachowanie wyłącznie pól zdefiniowanych w schemacie
+            | "FilterFieldsForBQ" >> beam.Map(filter_fields_for_bq)
         )
-    # Deduplikacja (mmsi, timestamp), by uniknąć wielokrotnych identycznych wpisów
-    | "AddPositionKeys" >> beam.WithKeys(lambda x: (x["mmsi"], x["timestamp"]))  # Dodaj klucz dla deduplikacji
-    | "DeduplicatePositions" >> beam.Distinct()  # Deduplikacja po kluczu
-    | "RemovePositionKeys" >> beam.Values()  # Usuń klucz i przywróć oryginalną strukturę
-    | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
-)
 
-        # 4) Zapis do BQ z FILE_LOADS i trigger co 10 s
+        # 5) Zapis do BQ z metodą FILE_LOADS i wyzwalaniem co 10 s
         _ = (
             positions
             | "WriteToBQ" >> WriteToBigQuery(
@@ -244,7 +276,10 @@ def run():
                 create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
                 write_disposition=BigQueryDisposition.WRITE_APPEND,
                 method="FILE_LOADS",
-                triggering_frequency=10  # co 10 sekund spływ danych do BQ
+                triggering_frequency=10
+                # Możesz też dopisać:
+                # additional_bq_parameters={"ignoreUnknownValues": True}
+                # aby bezpiecznie ignorować nieznane pola, jeśli jeszcze by się pojawiły
             )
         )
 
