@@ -12,9 +12,9 @@ from apache_beam import window
 from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 
-# Ładowanie zmiennych środowiskowych
+# Ładowanie zmiennych środowiskowych i konfiguracja logowania
 load_dotenv()
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GCS_BUCKET = os.getenv("GCS_BUCKET")
@@ -22,8 +22,7 @@ if not GCS_BUCKET:
     raise ValueError("Missing GCS_BUCKET environment variable.")
 
 ###############################################################################
-# Klasa zarządzająca danymi statycznymi – przechowuje dane w pamięci oraz
-# umożliwia zapisanie migawki do Cloud Storage.
+# Klasy do zarządzania danymi statycznymi (StaticDataManager) oraz ich migawką
 ###############################################################################
 class StaticDataManager:
     def __init__(self, gcs_bucket: str):
@@ -32,6 +31,7 @@ class StaticDataManager:
         self._load_initial_data()
 
     def _load_initial_data(self):
+        """Wczytuje plik ships_static_latest.json z GCS (jeśli istnieje)."""
         try:
             storage_client = storage.Client()
             bucket = storage_client.bucket(self.gcs_bucket)
@@ -43,23 +43,25 @@ class StaticDataManager:
                     self.static_data[item["mmsi"]] = item
                 logger.info(f"[StaticDataManager] Loaded {len(self.static_data)} static records from GCS.")
             else:
-                logger.info("[StaticDataManager] No snapshot found; starting with empty static data.")
+                logger.info("[StaticDataManager] No ships_static_latest.json found (starting empty).")
         except Exception as e:
             logger.warning(f"[StaticDataManager] Could not load initial data: {e}")
 
     def update_static(self, record: dict):
+        """Aktualizuje dane statyczne; zapisuje rekord pod kluczem mmsi."""
         mmsi = record["mmsi"]
         self.static_data[mmsi] = record
         return record
 
     def get_snapshot(self):
+        """Zwraca migawkę danych jako JSON."""
         return json.dumps(list(self.static_data.values()), indent=2)
 
     def find_ship_name(self, mmsi: int):
         return self.static_data.get(mmsi, {}).get("ship_name")
 
 ###############################################################################
-# Funkcja zapisująca migawkę danych statycznych do Cloud Storage
+# DoFn zapisujący migawkę danych statycznych do Cloud Storage
 ###############################################################################
 class UploadSnapshotFn(beam.DoFn):
     def __init__(self, gcs_bucket: str):
@@ -84,7 +86,7 @@ class UploadSnapshotFn(beam.DoFn):
             logger.error(f"[UploadSnapshotFn] Error during snapshot upload: {e}")
 
 ###############################################################################
-# Funkcja parse_ais – jednocześnie przetwarza dane statyczne i pozycyjne
+# Funkcja parse_ais – parsuje wiadomość i zwraca listę słowników typu "static" oraz "position"
 ###############################################################################
 def parse_ais(record_bytes: bytes):
     try:
@@ -94,7 +96,7 @@ def parse_ais(record_bytes: bytes):
 
     outputs = []
 
-    # Sprawdzenie danych statycznych: wymagane pola: mmsi, ship_name, dim_a, dim_b, dim_c, dim_d.
+    # Sprawdzamy, czy wiadomość zawiera dane statyczne: wymagane pola to mmsi, ship_name, dim_a, dim_b, dim_c, dim_d.
     static_fields = ["mmsi", "ship_name", "dim_a", "dim_b", "dim_c", "dim_d"]
     if all(field in raw and raw[field] is not None for field in static_fields):
         if str(raw["ship_name"]).strip().lower() != "unknown":
@@ -108,7 +110,7 @@ def parse_ais(record_bytes: bytes):
                 "dim_d": float(raw["dim_d"]),
             })
 
-    # Sprawdzenie danych pozycyjnych: wymagane: mmsi, latitude, longitude, cog, sog, timestamp.
+    # Sprawdzamy dane pozycyjne: wymagane pola to mmsi, latitude, longitude, cog, sog, timestamp.
     pos_fields = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
     if all(field in raw and raw[field] is not None for field in pos_fields):
         heading = None
@@ -136,7 +138,7 @@ def parse_ais(record_bytes: bytes):
     return outputs
 
 ###############################################################################
-# Funkcja wzbogacająca dane pozycyjne – uzupełnia nazwę statku z danych statycznych, jeśli "Unknown"
+# DoFn wzbogacająca dane pozycyjne – uzupełnia ship_name z danych statycznych, jeśli "Unknown"
 ###############################################################################
 class EnrichPositionFn(beam.DoFn):
     def __init__(self, gcs_bucket: str):
@@ -146,6 +148,7 @@ class EnrichPositionFn(beam.DoFn):
         self.manager = StaticDataManager(self.gcs_bucket)
 
     def process(self, element):
+        # Element to pojedynczy rekord pozycyjny (słownik)
         if element.get("ship_name", "Unknown").strip().lower() == "unknown":
             known = self.manager.find_ship_name(element["mmsi"])
             if known:
@@ -194,35 +197,37 @@ def run():
         # Unifikowany parser – generuje 0..2 obiektów (static i/lub position)
         parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-        # Static pipeline: zbiera dane statyczne w oknie 10 minut i zapisuje snapshot do GCS.
+        # 1) STATIC pipeline: okno 10-minutowe; dane statyczne są zbierane i snapshot zapisywany do GCS.
         _ = (
             parsed
             | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
-            | "WindowStatic" >> beam.WindowInto(window.FixedWindows(600),
-                                                  trigger=AfterWatermark(),
-                                                  accumulation_mode=AccumulationMode.DISCARDING)
+            | "WindowStatic" >> beam.WindowInto(
+                  window.FixedWindows(600),
+                  trigger=AfterWatermark(),
+                  accumulation_mode=AccumulationMode.DISCARDING)
             | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
             | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
         )
 
-        # Positions pipeline: zbiera dane pozycyjne w oknach 10-sekundowych, wzbogaca je i zapisuje do BQ.
+        # 2) POSITIONS pipeline: okno 10-sekundowe; każdy rekord jest wzbogacany, a następnie zapisywany do BQ.
         positions = (
             parsed
             | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
-            | "WindowPositions" >> beam.WindowInto(window.FixedWindows(10),
-                                                     trigger=AfterWatermark(),
-                                                     accumulation_mode=AccumulationMode.DISCARDING)
-            | "CombinePositions" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
+            | "WindowPositions" >> beam.WindowInto(
+                  window.FixedWindows(10),
+                  trigger=AfterWatermark(),
+                  accumulation_mode=AccumulationMode.DISCARDING)
             | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
         )
+
         _ = (
             positions
             | "WriteToBQ" >> WriteToBigQuery(
-                table=table_positions,
-                schema=positions_schema,
-                write_disposition=BigQueryDisposition.WRITE_APPEND,
-                create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
-                method="STREAMING_INSERTS"
+                  table=table_positions,
+                  schema=positions_schema,
+                  write_disposition=BigQueryDisposition.WRITE_APPEND,
+                  create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+                  method="STREAMING_INSERTS"
             )
         )
 
