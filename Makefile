@@ -24,7 +24,6 @@ pipeline_live:
 		--runner=DataflowRunner \
 		--project=$$GOOGLE_CLOUD_PROJECT \
 		--region=$$REGION \
-		--zone=us-east1-d \
 		--staging_location=$$STAGING_LOCATION \
 		--temp_location=$$TEMP_LOCATION \
 		--job_name=$$JOB_NAME \

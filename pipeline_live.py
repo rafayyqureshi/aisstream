@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from google.cloud import storage
 import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
 from apache_beam import window
 from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
@@ -281,6 +281,7 @@ def run():
         ]
     }
 
+    # Tworzymy PipelineOptions
     pipeline_options = PipelineOptions(
         runner='DataflowRunner',
         project=project_id,
@@ -291,12 +292,15 @@ def run():
         streaming=True,
         save_main_session=True
     )
+    # Ustawiamy service_account_email tak, by wymusić użycie domyślnego compute service account
+    dataflow_options = pipeline_options.view_as(GoogleCloudOptions)
+    dataflow_options.service_account_email = "563902983475-compute@developer.gserviceaccount.com"
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # Odczyt z PubSub
+        # 1) Odczyt z PubSub
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # Parse z dead-letter queue
+        # 2) Parsowanie z dead-letter queue
         parsed_with_errors = (
             lines
             | "ParseAISUnified" >> beam.FlatMap(parse_ais).with_outputs("error", main="main")
@@ -304,7 +308,7 @@ def run():
         parsed = parsed_with_errors["main"]
         errors = parsed_with_errors["error"]
 
-        # 1) Dead-letter queue – zapis błędnych rekordów do GCS
+        # 3) Dead-letter queue: zapis błędnych rekordów do GCS
         _ = (
             errors
             | "ErrorsToJSON" >> beam.Map(json.dumps)
@@ -314,7 +318,7 @@ def run():
             )
         )
 
-        # 2) Przetwarzanie danych statycznych
+        # 4) Przetwarzanie danych statycznych
         static_data = (
             parsed
             | "FilterStatic" >> beam.Filter(lambda x: x.get("type") == "static")
@@ -330,7 +334,7 @@ def run():
             | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
         )
 
-        # 3) Przetwarzanie danych pozycyjnych
+        # 5) Przetwarzanie danych pozycyjnych
         positions = (
             parsed
             | "FilterPositions" >> beam.Filter(lambda x: x.get("type") == "position")
@@ -347,7 +351,7 @@ def run():
             | "DropInvalidRecords" >> beam.Filter(lambda x: x is not None)
         )
 
-        # 4) Zapis do BigQuery z obsługą błędów
+        # 6) Zapis do BigQuery (FILE_LOADS) z parametrami maxBadRecords i ignoreUnknownValues
         _ = (
             positions
             | "WriteToBQ" >> WriteToBigQuery(
