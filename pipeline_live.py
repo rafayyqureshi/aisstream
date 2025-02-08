@@ -14,6 +14,7 @@ from apache_beam import window
 from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.util import WithKeys
+from apache_beam import pvalue
 
 # Ładowanie zmiennych środowiskowych i konfiguracja logowania
 load_dotenv()
@@ -113,19 +114,21 @@ class UploadSnapshotFn(beam.DoFn):
             logger.error(f"[UploadSnapshotFn] Unexpected error: {e}")
 
 ###############################################################################
-# Funkcja parse_ais – parsuje wiadomość i zwraca listę słowników typu "static"/"position"
+# Funkcja parse_ais – parsuje wiadomość i zwraca rekordy główne (static/position)
+# przez yield, a błędy przez yield pvalue.TaggedOutput('error', ...)
 ###############################################################################
-def parse_ais(record_bytes: bytes):
+def parse_ais(record_bytes):
     try:
-        raw = json.loads(record_bytes.decode("utf-8"))
+        raw_str = record_bytes.decode("utf-8")
+        raw = json.loads(raw_str)
     except Exception as e:
         logger.warning(f"[parse_ais] Could not parse JSON: {e}, skipping record.")
-        # Zwracamy None, by wyrzucić to do dead-letter. (Zamiast [] -> None)
-        return [beam.pvalue.TaggedOutput('error', {"error": str(e), "raw": record_bytes.decode("utf-8")})]
+        yield pvalue.TaggedOutput('error', {"error": str(e), "raw": raw_str})
+        return
 
     outputs = []
 
-    # Statyczne
+    # --- DANE STATYCZNE ---
     static_fields = ["mmsi", "ship_name", "dim_a", "dim_b", "dim_c", "dim_d"]
     if all(field in raw and raw[field] is not None for field in static_fields):
         if str(raw["ship_name"]).strip().lower() != "unknown":
@@ -146,20 +149,22 @@ def parse_ais(record_bytes: bytes):
                 })
             except Exception as e:
                 logger.warning(f"[parse_ais] Could not parse static dims: {e}, skipping static record.")
-                # Możemy wyrzucić do dead-letter
-                return [beam.pvalue.TaggedOutput('error', {"error": str(e), "raw": raw})]
+                yield pvalue.TaggedOutput('error', {"error": str(e), "raw": raw})
+                return
 
-    # Pozycyjne
+    # --- DANE POZYCYJNE ---
     pos_fields = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
     if all(field in raw and raw[field] is not None for field in pos_fields):
         try:
             dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
             if dt.year < 2000 or dt.year > 2100:
                 logger.warning(f"[parse_ais] Out-of-range timestamp ({dt}) - record dropped.")
-                return [beam.pvalue.TaggedOutput('error', {"error": "Out-of-range timestamp", "raw": raw})]
+                yield pvalue.TaggedOutput('error', {"error": "Out-of-range timestamp", "raw": raw})
+                return
         except Exception as e:
             logger.warning(f"[parse_ais] Invalid timestamp found - record dropped. {e}")
-            return [beam.pvalue.TaggedOutput('error', {"error": str(e), "raw": raw})]
+            yield pvalue.TaggedOutput('error', {"error": str(e), "raw": raw})
+            return
 
         try:
             mmsi_pos = int(raw["mmsi"])
@@ -185,13 +190,17 @@ def parse_ais(record_bytes: bytes):
             })
         except Exception as e:
             logger.warning(f"[parse_ais] Could not parse position fields: {e}, skipping record.")
-            return [beam.pvalue.TaggedOutput('error', {"error": str(e), "raw": raw})]
+            yield pvalue.TaggedOutput('error', {"error": str(e), "raw": raw})
+            return
 
-    # Jeśli nie ma ani danych statycznych, ani poprawnych pozycyjnych:
+    # Jeśli nie ma nic w outputs, to też błąd
     if not outputs:
-        return [beam.pvalue.TaggedOutput('error', {"error": "No valid fields found", "raw": raw})]
+        yield pvalue.TaggedOutput('error', {"error": "No valid fields found", "raw": raw})
+        return
 
-    return outputs
+    # Emitujemy poprawne rekordy do głównego wyjścia
+    for out in outputs:
+        yield out
 
 ###############################################################################
 # DoFn wzbogacająca dane pozycyjne – uzupełnia ship_name z danych statycznych
