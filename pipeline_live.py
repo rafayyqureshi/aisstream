@@ -101,29 +101,53 @@ def parse_ais(record_bytes: bytes):
 
     outputs = []
 
-    # Sprawdzamy, czy wiadomość zawiera dane statyczne
+    # Próbujemy zbudować rekord typu "static" tylko jeśli dim_* nie są None:
     static_fields = ["mmsi", "ship_name", "dim_a", "dim_b", "dim_c", "dim_d"]
     if all(field in raw and raw[field] is not None for field in static_fields):
         if str(raw["ship_name"]).strip().lower() != "unknown":
-            outputs.append({
-                "type": "static",
-                "mmsi": int(raw["mmsi"]),
-                "ship_name": str(raw["ship_name"]),
-                "dim_a": float(raw["dim_a"]),
-                "dim_b": float(raw["dim_b"]),
-                "dim_c": float(raw["dim_c"]),
-                "dim_d": float(raw["dim_d"]),
-            })
+            try:
+                # Rzutowania do float
+                dim_a = float(raw["dim_a"])
+                dim_b = float(raw["dim_b"])
+                dim_c = float(raw["dim_c"])
+                dim_d = float(raw["dim_d"])
+                mmsi_static = int(raw["mmsi"])
+            except Exception as e:
+                logger.warning(f"[parse_ais] Could not parse static dims: {e}, skipping static record.")
+            else:
+                outputs.append({
+                    "type": "static",
+                    "mmsi": mmsi_static,
+                    "ship_name": str(raw["ship_name"]).strip(),
+                    "dim_a": dim_a,
+                    "dim_b": dim_b,
+                    "dim_c": dim_c,
+                    "dim_d": dim_d,
+                })
 
-    # Sprawdzamy dane pozycyjne
+    # Budujemy rekord pozycyjny, jeżeli wszystkie niezbędne pola występują i nie są None:
     pos_fields = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
     if all(field in raw and raw[field] is not None for field in pos_fields):
-        # Odrzucanie nieprawidłowych timestampów
         try:
             dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
-        except:
+            # Opcjonalny check rozsądnego zakresu lat, np. 2000 - 2100:
+            if dt.year < 2000 or dt.year > 2100:
+                logger.warning(f"[parse_ais] Out-of-range timestamp ({dt}) - record dropped.")
+                return []
+        except Exception:
             logger.warning("[parse_ais] Invalid timestamp found - record dropped.")
-            return []  # Odrzucamy dany rekord całkowicie
+            return []
+
+        # Rzutowania
+        try:
+            mmsi_pos = int(raw["mmsi"])
+            lat = float(raw["latitude"])
+            lon = float(raw["longitude"])
+            cog = float(raw["cog"])
+            sog = float(raw["sog"])
+        except Exception as e:
+            logger.warning(f"[parse_ais] Could not parse position fields: {e}, skipping record.")
+            return []
 
         heading = None
         if "heading" in raw and raw["heading"] is not None:
@@ -132,22 +156,24 @@ def parse_ais(record_bytes: bytes):
             except Exception:
                 heading = None
 
+        ship_name = str(raw.get("ship_name", "Unknown")).strip()
+
         outputs.append({
             "type": "position",
-            "mmsi": int(raw["mmsi"]),
-            "latitude": float(raw["latitude"]),
-            "longitude": float(raw["longitude"]),
-            "cog": float(raw["cog"]),
-            "sog": float(raw["sog"]),
+            "mmsi": mmsi_pos,
+            "latitude": lat,
+            "longitude": lon,
+            "cog": cog,
+            "sog": sog,
             "heading": heading,
             "timestamp": dt.isoformat() + "Z",
-            "ship_name": str(raw.get("ship_name", "Unknown"))
+            "ship_name": ship_name
         })
 
     return outputs
 
 ###############################################################################
-# DoFn wzbogacająca dane pozycyjne – uzupełnia ship_name z danych statycznych, jeśli "Unknown"
+# DoFn wzbogacająca dane pozycyjne – uzupełnia ship_name z danych statycznych
 ###############################################################################
 class EnrichPositionFn(beam.DoFn):
     def __init__(self, gcs_bucket: str):
@@ -157,7 +183,7 @@ class EnrichPositionFn(beam.DoFn):
         self.manager = StaticDataManager(self.gcs_bucket)
 
     def process(self, element):
-        if element.get("ship_name", "Unknown").strip().lower() == "unknown":
+        if element.get("ship_name", "Unknown").lower() == "unknown":
             known = self.manager.find_ship_name(element["mmsi"])
             if known:
                 element["ship_name"] = known
@@ -173,7 +199,7 @@ class EnrichPositionFn(beam.DoFn):
 def filter_fields_for_bq(record):
     """
     Zwraca nowy słownik zawierający tylko pola zdefiniowane w schemacie BQ.
-    Usunięcie pola 'type' (i ewentualnie innych) zapobiega błędom wczytywania.
+    Usunięcie pola 'type' zapobiega błędom wczytywania (nie ma go w schemacie).
     """
     return {
         "mmsi": record["mmsi"],
@@ -231,7 +257,7 @@ def run():
         # 2) Parsowanie wiadomości AIS
         parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-        # 3) Przetwarzanie danych statycznych
+        # 3) Przetwarzanie danych statycznych (tylko jeśli wszystkie wymiary != None)
         static_data = (
             parsed
             | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
@@ -263,7 +289,7 @@ def run():
             | "DeduplicatePositions" >> beam.Distinct()
             | "RemovePositionKeys" >> beam.Values()
             | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
-            # Usunięcie pola 'type' i zachowanie wyłącznie pól zdefiniowanych w schemacie
+            # Usunięcie pola 'type'
             | "FilterFieldsForBQ" >> beam.Map(filter_fields_for_bq)
         )
 
@@ -277,9 +303,8 @@ def run():
                 write_disposition=BigQueryDisposition.WRITE_APPEND,
                 method="FILE_LOADS",
                 triggering_frequency=10
-                # Możesz też dopisać:
-                # additional_bq_parameters={"ignoreUnknownValues": True}
-                # aby bezpiecznie ignorować nieznane pola, jeśli jeszcze by się pojawiły
+                # Możesz dodać, jeśli chcesz pominąć sporadycznie błędne rekordy:
+                # additional_bq_parameters={"maxBadRecords": 5, "ignoreUnknownValues": True}
             )
         )
 
