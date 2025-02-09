@@ -5,186 +5,184 @@ import logging
 import datetime
 from dotenv import load_dotenv
 
+from google.cloud import storage
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
-from google.cloud import bigquery
-from google.api_core.exceptions import NotFound
-from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
-from apache_beam.utils.timestamp import Duration
 from apache_beam import window
+from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
+from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 
-# Import DoFns z collision_dofn.py
-from collision_dofn import CollisionGeneratorDoFn, CollisionPairDoFn
-
+# Ładowanie zmiennych środowiskowych i konfiguracja logowania
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def parse_ais(record_bytes):
-    try:
-        data = json.loads(record_bytes.decode("utf-8"))
-        req = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
-        if not all(r in data for r in req):
-            return None
-        data["mmsi"] = int(data["mmsi"])
-        data["latitude"] = float(data["latitude"])
-        data["longitude"] = float(data["longitude"])
-        data["cog"] = float(data["cog"])
-        data["sog"] = float(data["sog"])
-        data.pop("ship_length", None)
-        hdg = data.get("heading")
-        if hdg is not None:
-            try:
-                data["heading"] = float(hdg)
-            except:
-                data["heading"] = None
-        else:
-            data["heading"] = None
-        for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
-            v = data.get(d)
-            data[d] = float(v) if v is not None else None
-        data["ship_name"] = data.get("ship_name", "Unknown")
-        data["geohash"] = data.get("geohash", "none")
-        return data
-    except Exception as e:
-        logging.error(f"Error in parse_ais: {e}")
-        return None
+GCS_BUCKET = os.getenv("GCS_BUCKET")
+if not GCS_BUCKET:
+    raise ValueError("Missing GCS_BUCKET environment variable.")
 
-def remove_geohash_and_dims(row):
-    new_row = dict(row)
-    new_row.pop("geohash", None)
-    for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
-        new_row.pop(d, None)
-    return new_row
+###############################################################################
+# Klasy do zarządzania danymi statycznymi (StaticDataManager) oraz ich migawką
+###############################################################################
+class StaticDataManager:
+    def __init__(self, gcs_bucket: str):
+        self.gcs_bucket = gcs_bucket
+        self.static_data = {}
+        self._load_initial_data()
 
-class DeduplicateStaticDoFn(beam.DoFn):
-    def __init__(self):
-        self.seen = set()
-    def process(self, row):
-        mmsi = row["mmsi"]
-        if mmsi not in self.seen:
-            self.seen.add(mmsi)
-            yield row
-
-def keep_static_fields(row):
-    return {
-        "mmsi": row["mmsi"],
-        "ship_name": row["ship_name"],
-        "dim_a": row["dim_a"],
-        "dim_b": row["dim_b"],
-        "dim_c": row["dim_c"],
-        "dim_d": row["dim_d"],
-        "update_time": datetime.datetime.utcnow().isoformat() + "Z"
-    }
-
-class CreateBQTableDoFn(beam.DoFn):
-    def process(self, table_ref):
-        from google.cloud import bigquery
-        client_local = bigquery.Client()
-        table_id = table_ref['table_id']
-        schema = table_ref['schema']['fields']
-        time_part = table_ref.get('time_partitioning')
-        cluster = table_ref.get('clustering_fields')
-        table = bigquery.Table(table_id, schema=schema)
-        if time_part:
-            time_part_corrected = { k if k != 'type' else 'type_': v for k, v in time_part.items() }
-            table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
-        if cluster:
-            table.clustering_fields = cluster
+    def _load_initial_data(self):
+        """Wczytuje plik ships_static_latest.json z GCS (jeśli istnieje)."""
         try:
-            client_local.get_table(table_id)
-            logging.info(f"Table {table_id} already exists.")
-        except NotFound:
-            client_local.create_table(table)
-            logging.info(f"Created table: {table_id}")
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(self.gcs_bucket)
+            blob = bucket.blob("ships_static_latest.json")
+            if blob.exists():
+                content = blob.download_as_text()
+                records = json.loads(content)
+                for item in records:
+                    self.static_data[item["mmsi"]] = item
+                logger.info(f"[StaticDataManager] Loaded {len(self.static_data)} static records from GCS.")
+            else:
+                logger.info("[StaticDataManager] No ships_static_latest.json found (starting empty).")
         except Exception as e:
-            logging.error(f"Error creating table {table_id}: {e}")
+            logger.warning(f"[StaticDataManager] Could not load initial data: {e}")
 
-def is_ship_long_enough(ship):
-    dim_a = ship.get("dim_a")
-    dim_b = ship.get("dim_b")
-    if dim_a is None or dim_b is None:
-        return False
-    return (dim_a + dim_b) > 50
+    def update_static(self, record: dict):
+        """Aktualizuje dane statyczne; zapisuje rekord pod kluczem mmsi."""
+        mmsi = record["mmsi"]
+        self.static_data[mmsi] = record
+        return record
 
+    def get_snapshot(self):
+        """Zwraca migawkę danych jako JSON."""
+        return json.dumps(list(self.static_data.values()), indent=2)
+
+    def find_ship_name(self, mmsi: int):
+        return self.static_data.get(mmsi, {}).get("ship_name")
+
+###############################################################################
+# DoFn zapisujący migawkę danych statycznych do Cloud Storage
+###############################################################################
+class UploadSnapshotFn(beam.DoFn):
+    def __init__(self, gcs_bucket: str):
+        self.gcs_bucket = gcs_bucket
+
+    def setup(self):
+        self.manager = StaticDataManager(self.gcs_bucket)
+
+    def process(self, batch):
+        if not batch:
+            return
+        try:
+            for r in batch:
+                self.manager.update_static(r)
+            json_data = self.manager.get_snapshot()
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(self.gcs_bucket)
+            blob = bucket.blob("ships_static_latest.json")
+            blob.upload_from_string(json_data, content_type="application/json")
+            logger.info(f"[UploadSnapshotFn] Snapshot updated with {len(self.manager.static_data)} static records.")
+        except Exception as e:
+            logger.error(f"[UploadSnapshotFn] Error during snapshot upload: {e}")
+
+###############################################################################
+# Funkcja parse_ais – parsuje wiadomość i zwraca listę słowników typu "static" oraz "position"
+###############################################################################
+def parse_ais(record_bytes: bytes):
+    try:
+        raw = json.loads(record_bytes.decode("utf-8"))
+    except Exception:
+        return []
+
+    outputs = []
+
+    # Sprawdzamy, czy wiadomość zawiera dane statyczne
+    static_fields = ["mmsi", "ship_name", "dim_a", "dim_b", "dim_c", "dim_d"]
+    if all(field in raw and raw[field] is not None for field in static_fields):
+        if str(raw["ship_name"]).strip().lower() != "unknown":
+            outputs.append({
+                "type": "static",
+                "mmsi": int(raw["mmsi"]),
+                "ship_name": str(raw["ship_name"]),
+                "dim_a": float(raw["dim_a"]),
+                "dim_b": float(raw["dim_b"]),
+                "dim_c": float(raw["dim_c"]),
+                "dim_d": float(raw["dim_d"]),
+            })
+
+    # Sprawdzamy dane pozycyjne
+    pos_fields = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
+    if all(field in raw and raw[field] is not None for field in pos_fields):
+        # Odrzucanie nieprawidłowych timestampów
+        try:
+            dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
+        except:
+            return []  # Odrzucamy dany rekord całkowicie
+
+        heading = None
+        if "heading" in raw and raw["heading"] is not None:
+            try:
+                heading = float(raw["heading"])
+            except:
+                heading = None
+
+        outputs.append({
+            "type": "position",
+            "mmsi": int(raw["mmsi"]),
+            "latitude": float(raw["latitude"]),
+            "longitude": float(raw["longitude"]),
+            "cog": float(raw["cog"]),
+            "sog": float(raw["sog"]),
+            "heading": heading,
+            "timestamp": dt.isoformat() + "Z",
+            "ship_name": str(raw.get("ship_name", "Unknown"))
+        })
+
+    return outputs
+
+###############################################################################
+# DoFn wzbogacająca dane pozycyjne – uzupełnia ship_name z danych statycznych, jeśli "Unknown"
+###############################################################################
+class EnrichPositionFn(beam.DoFn):
+    def __init__(self, gcs_bucket: str):
+        self.gcs_bucket = gcs_bucket
+
+    def setup(self):
+        self.manager = StaticDataManager(self.gcs_bucket)
+
+    def process(self, element):
+        if element.get("ship_name", "Unknown").strip().lower() == "unknown":
+            known = self.manager.find_ship_name(element["mmsi"])
+            if known:
+                element["ship_name"] = known
+        yield element
+
+###############################################################################
+# Główny potok
+###############################################################################
 def run():
-    logging.getLogger().setLevel(logging.INFO)
+    # Pobieranie zmiennych środowiskowych
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
-    dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
     input_sub = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
     region = os.getenv("REGION", "us-east1")
     temp_loc = os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp")
     staging_loc = os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging")
     job_name = os.getenv("JOB_NAME", "ais-collision-detection-job")
-    table_positions = f"{project_id}.{dataset}.ships_positions"
-    table_collisions = f"{project_id}.{dataset}.collisions"
-    table_static = f"{project_id}.{dataset}.ships_static"
+    table_positions = f"{project_id}.ais_dataset_us.ships_positions"
 
-    tables_to_create = [
-        {
-            'table_id': table_positions,
-            'schema': {
-                "fields": [
-                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "latitude", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "longitude", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "cog", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "sog", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "heading", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
-                ]
-            },
-            'time_partitioning': {
-                "type_": "DAY",
-                "field": "timestamp",
-                "expiration_ms": 1500000  # 25 minutes
-            },
-            'clustering_fields': ["mmsi"]
-        },
-        {
-            'table_id': table_collisions,
-            'schema': {
-                "fields": [
-                    {"name": "mmsi_a", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name_a", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "mmsi_b", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name_b", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"},
-                    {"name": "cpa", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "tcpa", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "distance", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "is_active", "type": "BOOL", "mode": "REQUIRED"},
-                    {"name": "latitude_a", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "longitude_a", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "latitude_b", "type": "FLOAT", "mode": "REQUIRED"},
-                    {"name": "longitude_b", "type": "FLOAT", "mode": "REQUIRED"}
-                ]
-            },
-            'time_partitioning': {
-                "type_": "DAY",
-                "field": "timestamp",
-                "expiration_ms": 600000  # 10 minutes
-            },
-            'clustering_fields': ["mmsi_a", "mmsi_b"]
-        },
-        {
-            'table_id': table_static,
-            'schema': {
-                "fields": [
-                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
-                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "dim_a", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "dim_b", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "dim_c", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "dim_d", "type": "FLOAT", "mode": "NULLABLE"},
-                    {"name": "update_time", "type": "TIMESTAMP", "mode": "REQUIRED"}
-                ]
-            },
-            'time_partitioning': None,
-            'clustering_fields': ["mmsi"]
-        }
-    ]
+    # Schemat
+    positions_schema = {
+        "fields": [
+            {"name": "mmsi", "type": "INTEGER"},
+            {"name": "ship_name", "type": "STRING"},
+            {"name": "latitude", "type": "FLOAT"},
+            {"name": "longitude", "type": "FLOAT"},
+            {"name": "cog", "type": "FLOAT"},
+            {"name": "sog", "type": "FLOAT"},
+            {"name": "heading", "type": "FLOAT"},
+            {"name": "timestamp", "type": "TIMESTAMP"}
+        ]
+    }
 
     pipeline_options = PipelineOptions(
         runner='DataflowRunner',
@@ -193,116 +191,57 @@ def run():
         temp_location=temp_loc,
         staging_location=staging_loc,
         job_name=job_name,
-        num_workers=1,
-        max_num_workers=10,
-        autoscaling_algorithm='THROUGHPUT_BASED',
-        save_main_session=True,
-        streaming=True
+        streaming=True,
+        save_main_session=True
     )
 
     with beam.Pipeline(options=pipeline_options) as p:
-        _ = (
-            tables_to_create
-            | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
-        )
-
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
-        parsed = (
-            lines
-            | "ParseAIS" >> beam.Map(parse_ais)
-            | "FilterNone" >> beam.Filter(lambda x: x is not None)
-        )
 
-        w_pos = (
-            parsed
-            | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
-            | "KeyPos" >> beam.Map(lambda r: (None, r))
-            | "GroupPos" >> beam.GroupByKey()
-            | "FlatPos" >> beam.FlatMap(lambda kv: kv[1])
-            | "RmGeohash" >> beam.Map(remove_geohash_and_dims)
-        )
-        w_pos | "WritePositions" >> WriteToBigQuery(
-            table=table_positions,
-            schema="""
-              mmsi:INTEGER,
-              ship_name:STRING,
-              latitude:FLOAT,
-              longitude:FLOAT,
-              cog:FLOAT,
-              sog:FLOAT,
-              heading:FLOAT,
-              timestamp:TIMESTAMP
-            """,
-            create_disposition=BigQueryDisposition.CREATE_NEVER,
-            write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
-        )
+        # 1) Parsowanie unified
+        parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-        ships_static = (
+        # 2) Przetwarzanie danych statycznych
+        static_data = (
             parsed
-            | "FilterDims" >> beam.Filter(
-                lambda r: any(r.get(dim) for dim in ["dim_a", "dim_b", "dim_c", "dim_d"])
+            | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
+            | "WindowStatic" >> beam.WindowInto(
+                  window.FixedWindows(600),  # okno 10 minut
+                  trigger=AfterWatermark(),
+                  accumulation_mode=AccumulationMode.DISCARDING
             )
-            | "WinStatic" >> beam.WindowInto(window.FixedWindows(300))
-            | "KeyStatic" >> beam.Map(lambda r: (r["mmsi"], r))
-            | "GroupStaticByMMSI" >> beam.GroupByKey()
-            | "LatestStatic" >> beam.Map(lambda kv: max(kv[1], key=lambda x: x["timestamp"]))
-            | "DedupStatic" >> beam.ParDo(DeduplicateStaticDoFn())
-            | "PrepStatic" >> beam.Map(keep_static_fields)
-        )
-        ships_static | "WriteStatic" >> WriteToBigQuery(
-            table=table_static,
-            schema="""
-              mmsi:INTEGER,
-              ship_name:STRING,
-              dim_a:FLOAT,
-              dim_b:FLOAT,
-              dim_c:FLOAT,
-              dim_d:FLOAT,
-              update_time:TIMESTAMP
-            """,
-            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
-            write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
+            # Deduplikacja w oknie: klucz -> x["mmsi"]
+            | "DeduplicateStatic" >> beam.Distinct(key=lambda x: x["mmsi"])
+            # Zbieranie do listy w ramach okna, potem migawka
+            | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
+            | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
         )
 
-        static_dict = (
-            ships_static
-            | "MapStaticKey" >> beam.Map(lambda row: (row["mmsi"], row))
-            | "GroupStatic" >> beam.GroupByKey()
-            | "PickOne" >> beam.Map(lambda kv: (kv[0], list(kv[1])[0]))
+        # 3) Przetwarzanie danych pozycyjnych
+        positions = (
+            parsed
+            | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
+            | "WindowPositions" >> beam.WindowInto(
+                  window.FixedWindows(10),  # okno 10 sekund
+                  trigger=AfterWatermark(),
+                  accumulation_mode=AccumulationMode.DISCARDING
+            )
+            # Deduplikacja (mmsi, timestamp), by uniknąć wielokrotnych identycznych wpisów
+            | "DeduplicatePositions" >> beam.Distinct(key=lambda x: (x["mmsi"], x["timestamp"]))
+            | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
         )
-        side_static = beam.pvalue.AsDict(static_dict)
 
-        filtered_for_collisions = parsed | "FilterEnough" >> beam.Filter(is_ship_long_enough)
-        keyed = filtered_for_collisions | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
-        windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(window.FixedWindows(10), allowed_lateness=Duration(0))
-        grouped = windowed_keyed | "GroupByGeohash" >> beam.GroupByKey()
-
-        # Uwaga: Teraz tworzymy CollisionGeneratorDoFn bez przekazywania side_static do konstruktora.
-        collisions_gen = grouped | "DetectCollisions" >> beam.ParDo(CollisionGeneratorDoFn(), side_static)
-        final_collisions = collisions_gen | "ProcessCollisionPairs" >> beam.ParDo(CollisionPairDoFn())
-
-        final_collisions | "WriteCollisions" >> WriteToBigQuery(
-            table=table_collisions,
-            schema="""
-              mmsi_a:INTEGER,
-              ship_name_a:STRING,
-              mmsi_b:INTEGER,
-              ship_name_b:STRING,
-              timestamp:TIMESTAMP,
-              cpa:FLOAT,
-              tcpa:FLOAT,
-              distance:FLOAT,
-              is_active:BOOL,
-              latitude_a:FLOAT,
-              longitude_a:FLOAT,
-              latitude_b:FLOAT,
-              longitude_b:FLOAT
-            """,
-            create_disposition=BigQueryDisposition.CREATE_NEVER,
-            write_disposition=BigQueryDisposition.WRITE_APPEND,
-            method="STREAMING_INSERTS",
+        # 4) Zapis do BQ z FILE_LOADS i trigger co 10 s
+        _ = (
+            positions
+            | "WriteToBQ" >> WriteToBigQuery(
+                table=table_positions,
+                schema=positions_schema,
+                create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                method="FILE_LOADS",
+                triggering_frequency=10  # co 10 sekund spływ danych do BQ
+            )
         )
 
 if __name__ == "__main__":
