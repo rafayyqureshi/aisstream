@@ -1,121 +1,309 @@
-import time
+#!/usr/bin/env python3
+import os
+import json
 import logging
+import datetime
+from dotenv import load_dotenv
+
 import apache_beam as beam
-from apache_beam.transforms.userstate import BagStateSpec
-from apache_beam.coders import FloatCoder
+from apache_beam.options.pipeline_options import PipelineOptions
+from google.cloud import bigquery
+from google.api_core.exceptions import NotFound
+from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
+from apache_beam.utils.timestamp import Duration
+from apache_beam import window
 
-# Import funkcji z cpa_utils.py
-from cpa_utils import (
-    compute_cpa_tcpa,
-    local_distance_nm,
-    is_approaching
-)
+# Import DoFns z collision_dofn.py
+from collision_dofn import CollisionGeneratorDoFn, CollisionPairDoFn
 
-# Ustawienia progów
-CPA_THRESHOLD = 0.5            # mile morskie
-TCPA_THRESHOLD = 10.0          # minuty
-STATE_RETENTION_SEC = 120      # 2 minuty
-DISTANCE_THRESHOLD_NM = 5.0    # mile morskie
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class CollisionGeneratorDoFn(beam.DoFn):
-    """
-    Dla każdej grupy statków o tym samym geohash generuje rekordy kolizyjne.
-    Rekord zostaje wygenerowany, jeżeli:
-      1) shipA["mmsi"] != shipB["mmsi"] (pomija kolizje samego statku z sobą),
-      2) aktualny dystans <= DISTANCE_THRESHOLD_NM,
-      3) statki się zbliżają (is_approaching),
-      4) CPA < CPA_THRESHOLD i 0 <= TCPA < TCPA_THRESHOLD.
-      
-    Side input (static_side) służy do uzupełnienia danych statycznych (np. ship_name).
-    Wyjściowy rekord ma postać: (pair_key, record)
-    """
-    # Usunięto __init__; side input jest przekazywany do process.
-    def process(self, element, static_side):
-        geohash, ships = element
-        for i in range(len(ships)):
-            for j in range(i + 1, len(ships)):
-                shipA = ships[i]
-                shipB = ships[j]
-
-                # Pomijamy, jeśli to ten sam MMSI
-                if shipA["mmsi"] == shipB["mmsi"]:
-                    continue
-
-                dist_nm = local_distance_nm(shipA, shipB)
-                logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} dist_nm={dist_nm:.3f} nm for pair ({shipA['mmsi']}, {shipB['mmsi']})"
-                )
-                if dist_nm > DISTANCE_THRESHOLD_NM:
-                    continue
-
-                approaching = is_approaching(shipA, shipB)
-                logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} is_approaching={approaching} for pair ({shipA['mmsi']}, {shipB['mmsi']})"
-                )
-                if not approaching:
-                    continue
-
-                cpa, tcpa = compute_cpa_tcpa(shipA, shipB)
-                logging.warning(
-                    f"[CollisionGeneratorDoFn] GH={geohash} cpa={cpa:.3f}, tcpa={tcpa:.3f} for pair ({shipA['mmsi']}, {shipB['mmsi']})"
-                )
-                if cpa < CPA_THRESHOLD and 0 <= tcpa < TCPA_THRESHOLD:
-                    mA = shipA["mmsi"]
-                    mB = shipB["mmsi"]
-                    pair_key = tuple(sorted([mA, mB]))
-
-                    infoA = static_side.get(mA, {})
-                    infoB = static_side.get(mB, {})
-                    nameA = infoA.get("ship_name", "Unknown")
-                    nameB = infoB.get("ship_name", "Unknown")
-
-                    record = {
-                        "mmsi_a": mA,
-                        "ship_name_a": nameA,
-                        "mmsi_b": mB,
-                        "ship_name_b": nameB,
-                        "timestamp": shipB["timestamp"],
-                        "cpa": cpa,
-                        "tcpa": tcpa,
-                        "distance": dist_nm,
-                        "is_active": None,
-                        "latitude_a": shipA["latitude"],
-                        "longitude_a": shipA["longitude"],
-                        "latitude_b": shipB["latitude"],
-                        "longitude_b": shipB["longitude"]
-                    }
-                    yield (pair_key, record)
-
-class CollisionPairDoFn(beam.DoFn):
-    """
-    DoFn ustalający flagę is_active na podstawie historii dystansu dla danej pary.
-    Używamy BagStateSpec do przechowywania minimalnego dystansu:
-      - Jeśli bieżący dystans <= zapisana wartość => is_active=True i aktualizujemy min_dist.
-      - Inaczej is_active=False.
-    """
-    MIN_DIST_STATE = BagStateSpec('min_dist', FloatCoder())
-
-    def process(self, element, min_dist_state=beam.DoFn.StateParam(MIN_DIST_STATE)):
-        pair_key, record = element
-        current_distance = record['distance']
-        current_state = list(min_dist_state.read())
-        if current_state:
-            min_dist = current_state[0]
+def parse_ais(record_bytes):
+    try:
+        data = json.loads(record_bytes.decode("utf-8"))
+        req = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
+        if not all(r in data for r in req):
+            return None
+        data["mmsi"] = int(data["mmsi"])
+        data["latitude"] = float(data["latitude"])
+        data["longitude"] = float(data["longitude"])
+        data["cog"] = float(data["cog"])
+        data["sog"] = float(data["sog"])
+        data.pop("ship_length", None)
+        hdg = data.get("heading")
+        if hdg is not None:
+            try:
+                data["heading"] = float(hdg)
+            except:
+                data["heading"] = None
         else:
-            min_dist = current_distance
+            data["heading"] = None
+        for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
+            v = data.get(d)
+            data[d] = float(v) if v is not None else None
+        data["ship_name"] = data.get("ship_name", "Unknown")
+        data["geohash"] = data.get("geohash", "none")
+        return data
+    except Exception as e:
+        logging.error(f"Error in parse_ais: {e}")
+        return None
 
-        if current_distance <= min_dist:
-            min_dist = current_distance
-            is_active = True
-        else:
-            is_active = False
+def remove_geohash_and_dims(row):
+    new_row = dict(row)
+    new_row.pop("geohash", None)
+    for d in ["dim_a", "dim_b", "dim_c", "dim_d"]:
+        new_row.pop(d, None)
+    return new_row
 
-        min_dist_state.clear()
-        min_dist_state.add(min_dist)
-        record['is_active'] = is_active
+class DeduplicateStaticDoFn(beam.DoFn):
+    def __init__(self):
+        self.seen = set()
+    def process(self, row):
+        mmsi = row["mmsi"]
+        if mmsi not in self.seen:
+            self.seen.add(mmsi)
+            yield row
 
-        logging.info(
-            f"[CollisionPairDoFn] Pair {pair_key}: current_distance={current_distance:.3f}, "
-            f"min_dist={min_dist:.3f}, is_active={is_active}"
+def keep_static_fields(row):
+    return {
+        "mmsi": row["mmsi"],
+        "ship_name": row["ship_name"],
+        "dim_a": row["dim_a"],
+        "dim_b": row["dim_b"],
+        "dim_c": row["dim_c"],
+        "dim_d": row["dim_d"],
+        "update_time": datetime.datetime.utcnow().isoformat() + "Z"
+    }
+
+class CreateBQTableDoFn(beam.DoFn):
+    def process(self, table_ref):
+        from google.cloud import bigquery
+        client_local = bigquery.Client()
+        table_id = table_ref['table_id']
+        schema = table_ref['schema']['fields']
+        time_part = table_ref.get('time_partitioning')
+        cluster = table_ref.get('clustering_fields')
+        table = bigquery.Table(table_id, schema=schema)
+        if time_part:
+            time_part_corrected = { k if k != 'type' else 'type_': v for k, v in time_part.items() }
+            table.time_partitioning = bigquery.TimePartitioning(**time_part_corrected)
+        if cluster:
+            table.clustering_fields = cluster
+        try:
+            client_local.get_table(table_id)
+            logging.info(f"Table {table_id} already exists.")
+        except NotFound:
+            client_local.create_table(table)
+            logging.info(f"Created table: {table_id}")
+        except Exception as e:
+            logging.error(f"Error creating table {table_id}: {e}")
+
+def is_ship_long_enough(ship):
+    dim_a = ship.get("dim_a")
+    dim_b = ship.get("dim_b")
+    if dim_a is None or dim_b is None:
+        return False
+    return (dim_a + dim_b) > 50
+
+def run():
+    logging.getLogger().setLevel(logging.INFO)
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "ais-collision-detection")
+    dataset = os.getenv("LIVE_DATASET", "ais_dataset_us")
+    input_sub = os.getenv("INPUT_SUBSCRIPTION", "projects/ais-collision-detection/subscriptions/ais-data-sub")
+    region = os.getenv("REGION", "us-east1")
+    temp_loc = os.getenv("TEMP_LOCATION", "gs://ais-collision-detection-bucket/temp")
+    staging_loc = os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging")
+    job_name = os.getenv("JOB_NAME", "ais-collision-detection-job")
+    table_positions = f"{project_id}.{dataset}.ships_positions"
+    table_collisions = f"{project_id}.{dataset}.collisions"
+    table_static = f"{project_id}.{dataset}.ships_static"
+
+    tables_to_create = [
+        {
+            'table_id': table_positions,
+            'schema': {
+                "fields": [
+                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "latitude", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "longitude", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "cog", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "sog", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "heading", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
+                ]
+            },
+            'time_partitioning': {
+                "type_": "DAY",
+                "field": "timestamp",
+                "expiration_ms": 1500000  # 25 minutes
+            },
+            'clustering_fields': ["mmsi"]
+        },
+        {
+            'table_id': table_collisions,
+            'schema': {
+                "fields": [
+                    {"name": "mmsi_a", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name_a", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "mmsi_b", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name_b", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"},
+                    {"name": "cpa", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "tcpa", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "distance", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "is_active", "type": "BOOL", "mode": "REQUIRED"},
+                    {"name": "latitude_a", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "longitude_a", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "latitude_b", "type": "FLOAT", "mode": "REQUIRED"},
+                    {"name": "longitude_b", "type": "FLOAT", "mode": "REQUIRED"}
+                ]
+            },
+            'time_partitioning': {
+                "type_": "DAY",
+                "field": "timestamp",
+                "expiration_ms": 600000  # 10 minutes
+            },
+            'clustering_fields': ["mmsi_a", "mmsi_b"]
+        },
+        {
+            'table_id': table_static,
+            'schema': {
+                "fields": [
+                    {"name": "mmsi", "type": "INTEGER", "mode": "REQUIRED"},
+                    {"name": "ship_name", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "dim_a", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "dim_b", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "dim_c", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "dim_d", "type": "FLOAT", "mode": "NULLABLE"},
+                    {"name": "update_time", "type": "TIMESTAMP", "mode": "REQUIRED"}
+                ]
+            },
+            'time_partitioning': None,
+            'clustering_fields': ["mmsi"]
+        }
+    ]
+
+    pipeline_options = PipelineOptions(
+        runner='DataflowRunner',
+        project=project_id,
+        region=region,
+        temp_location=temp_loc,
+        staging_location=staging_loc,
+        job_name=job_name,
+        num_workers=1,
+        max_num_workers=10,
+        autoscaling_algorithm='THROUGHPUT_BASED',
+        save_main_session=True,
+        streaming=True
+    )
+
+    with beam.Pipeline(options=pipeline_options) as p:
+        _ = (
+            tables_to_create
+            | "CreateTables" >> beam.ParDo(CreateBQTableDoFn())
         )
-        yield record
+
+        lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
+        parsed = (
+            lines
+            | "ParseAIS" >> beam.Map(parse_ais)
+            | "FilterNone" >> beam.Filter(lambda x: x is not None)
+        )
+
+        w_pos = (
+            parsed
+            | "WinPositions" >> beam.WindowInto(window.FixedWindows(10))
+            | "KeyPos" >> beam.Map(lambda r: (None, r))
+            | "GroupPos" >> beam.GroupByKey()
+            | "FlatPos" >> beam.FlatMap(lambda kv: kv[1])
+            | "RmGeohash" >> beam.Map(remove_geohash_and_dims)
+        )
+        w_pos | "WritePositions" >> WriteToBigQuery(
+            table=table_positions,
+            schema="""
+              mmsi:INTEGER,
+              ship_name:STRING,
+              latitude:FLOAT,
+              longitude:FLOAT,
+              cog:FLOAT,
+              sog:FLOAT,
+              heading:FLOAT,
+              timestamp:TIMESTAMP
+            """,
+            create_disposition=BigQueryDisposition.CREATE_NEVER,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            method="STREAMING_INSERTS",
+        )
+
+        ships_static = (
+            parsed
+            | "FilterDims" >> beam.Filter(
+                lambda r: any(r.get(dim) for dim in ["dim_a", "dim_b", "dim_c", "dim_d"])
+            )
+            | "WinStatic" >> beam.WindowInto(window.FixedWindows(300))
+            | "KeyStatic" >> beam.Map(lambda r: (r["mmsi"], r))
+            | "GroupStaticByMMSI" >> beam.GroupByKey()
+            | "LatestStatic" >> beam.Map(lambda kv: max(kv[1], key=lambda x: x["timestamp"]))
+            | "DedupStatic" >> beam.ParDo(DeduplicateStaticDoFn())
+            | "PrepStatic" >> beam.Map(keep_static_fields)
+        )
+        ships_static | "WriteStatic" >> WriteToBigQuery(
+            table=table_static,
+            schema="""
+              mmsi:INTEGER,
+              ship_name:STRING,
+              dim_a:FLOAT,
+              dim_b:FLOAT,
+              dim_c:FLOAT,
+              dim_d:FLOAT,
+              update_time:TIMESTAMP
+            """,
+            create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            method="STREAMING_INSERTS",
+        )
+
+        static_dict = (
+            ships_static
+            | "MapStaticKey" >> beam.Map(lambda row: (row["mmsi"], row))
+            | "GroupStatic" >> beam.GroupByKey()
+            | "PickOne" >> beam.Map(lambda kv: (kv[0], list(kv[1])[0]))
+        )
+        side_static = beam.pvalue.AsDict(static_dict)
+
+        filtered_for_collisions = parsed | "FilterEnough" >> beam.Filter(is_ship_long_enough)
+        keyed = filtered_for_collisions | "KeyByGeohash" >> beam.Map(lambda r: (r["geohash"], r))
+        windowed_keyed = keyed | "WindowForCollisions" >> beam.WindowInto(window.FixedWindows(10), allowed_lateness=Duration(0))
+        grouped = windowed_keyed | "GroupByGeohash" >> beam.GroupByKey()
+
+        # Uwaga: Teraz tworzymy CollisionGeneratorDoFn bez przekazywania side_static do konstruktora.
+        collisions_gen = grouped | "DetectCollisions" >> beam.ParDo(CollisionGeneratorDoFn(), side_static)
+        final_collisions = collisions_gen | "ProcessCollisionPairs" >> beam.ParDo(CollisionPairDoFn())
+
+        final_collisions | "WriteCollisions" >> WriteToBigQuery(
+            table=table_collisions,
+            schema="""
+              mmsi_a:INTEGER,
+              ship_name_a:STRING,
+              mmsi_b:INTEGER,
+              ship_name_b:STRING,
+              timestamp:TIMESTAMP,
+              cpa:FLOAT,
+              tcpa:FLOAT,
+              distance:FLOAT,
+              is_active:BOOL,
+              latitude_a:FLOAT,
+              longitude_a:FLOAT,
+              latitude_b:FLOAT,
+              longitude_b:FLOAT
+            """,
+            create_disposition=BigQueryDisposition.CREATE_NEVER,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            method="STREAMING_INSERTS",
+        )
+
+if __name__ == "__main__":
+    run()
