@@ -12,7 +12,9 @@ from apache_beam import window
 from apache_beam.transforms.trigger import AfterWatermark, AccumulationMode
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 
+###############################################################################
 # Load environment variables and configure logging
+###############################################################################
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,7 +24,7 @@ if not GCS_BUCKET:
     raise ValueError("Missing GCS_BUCKET environment variable.")
 
 ###############################################################################
-# Static data manager classes and functions
+# Static data management classes and functions
 ###############################################################################
 class StaticDataManager:
     def __init__(self, gcs_bucket: str):
@@ -31,7 +33,7 @@ class StaticDataManager:
         self._load_initial_data()
 
     def _load_initial_data(self):
-        """Load the snapshot file (ships_static_latest.json) from GCS (if it exists)."""
+        """Loads the snapshot file (ships_static_latest.json) from GCS if it exists."""
         try:
             storage_client = storage.Client()
             bucket = storage_client.bucket(self.gcs_bucket)
@@ -48,20 +50,20 @@ class StaticDataManager:
             logger.warning(f"[StaticDataManager] Could not load initial data: {e}")
 
     def update_static(self, record: dict):
-        """Update static data by storing the record under its MMSI."""
+        """Updates static data by storing the record under its MMSI."""
         mmsi = record["mmsi"]
         self.static_data[mmsi] = record
         return record
 
     def get_snapshot(self):
-        """Return a JSON snapshot of the current static data."""
+        """Returns a JSON snapshot of the current static data."""
         return json.dumps(list(self.static_data.values()), indent=2)
 
     def find_ship_name(self, mmsi: int):
         return self.static_data.get(mmsi, {}).get("ship_name")
 
 class UploadSnapshotFn(beam.DoFn):
-    """DoFn that batches static data records from a window and writes a snapshot to GCS."""
+    """DoFn that collects static records over a window and writes a snapshot to GCS."""
     def __init__(self, gcs_bucket: str):
         self.gcs_bucket = gcs_bucket
 
@@ -84,17 +86,17 @@ class UploadSnapshotFn(beam.DoFn):
             logger.error(f"[UploadSnapshotFn] Error during snapshot upload: {e}")
 
 ###############################################################################
-# Parsing function for AIS messages (unified for static and position data)
+# Parsing function – unified for static and position data
 ###############################################################################
 def parse_ais(record_bytes: bytes):
     try:
         raw = json.loads(record_bytes.decode("utf-8"))
     except Exception:
         return []
-    
+
     outputs = []
-    
-    # Check for static data (required fields: mmsi, ship_name, dim_a, dim_b, dim_c, dim_d)
+
+    # Static data: required fields are mmsi, ship_name, dim_a, dim_b, dim_c, dim_d
     static_fields = ["mmsi", "ship_name", "dim_a", "dim_b", "dim_c", "dim_d"]
     if all(field in raw and raw[field] is not None for field in static_fields):
         if str(raw["ship_name"]).strip().lower() != "unknown":
@@ -107,14 +109,15 @@ def parse_ais(record_bytes: bytes):
                 "dim_c": float(raw["dim_c"]),
                 "dim_d": float(raw["dim_d"]),
             })
-    
-    # Check for position data (required: mmsi, latitude, longitude, cog, sog, timestamp)
+
+    # Position data: required fields are mmsi, latitude, longitude, cog, sog, timestamp
     pos_fields = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
     if all(field in raw and raw[field] is not None for field in pos_fields):
         try:
             dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
         except:
             # Reject record with invalid timestamp
+            logger.info("[parse_ais] Invalid timestamp; record discarded.")
             return []
         heading = None
         if "heading" in raw and raw["heading"] is not None:
@@ -133,11 +136,11 @@ def parse_ais(record_bytes: bytes):
             "timestamp": dt.isoformat() + "Z",
             "ship_name": str(raw.get("ship_name", "Unknown"))
         })
-    
+
     return outputs
 
 ###############################################################################
-# DoFn that enriches position data by replacing "Unknown" ship_name using static data
+# DoFn to enrich position data – replace "Unknown" ship_name with the static value if available
 ###############################################################################
 class EnrichPositionFn(beam.DoFn):
     def __init__(self, gcs_bucket: str):
@@ -151,8 +154,23 @@ class EnrichPositionFn(beam.DoFn):
             known = self.manager.find_ship_name(element["mmsi"])
             if known:
                 element["ship_name"] = known
-                logger.info(f"[EnrichPositionFn] Enriched MMSI {element['mmsi']} with ship_name {known}.")
+                logger.info(f"[EnrichPositionFn] Enriched MMSI {element['mmsi']} with ship_name '{known}'.")
         yield element
+
+###############################################################################
+# Clean position records to remove extra fields before writing to BigQuery
+###############################################################################
+def clean_position_record(record: dict):
+    return {
+        "mmsi": record["mmsi"],
+        "ship_name": record["ship_name"],
+        "latitude": record["latitude"],
+        "longitude": record["longitude"],
+        "cog": record["cog"],
+        "sog": record["sog"],
+        "heading": record.get("heading"),
+        "timestamp": record["timestamp"]
+    }
 
 ###############################################################################
 # Main pipeline
@@ -195,10 +213,10 @@ def run():
     with beam.Pipeline(options=pipeline_options) as p:
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # Unified parser: produces 0..2 dictionaries (static and/or position)
+        # Unified parser produces 0..2 dictionaries (static and/or position)
         parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-        # 1) STATIC pipeline: 10-minute window to batch static records and write snapshot to GCS
+        # 1) STATIC pipeline: 10-minute window for static records; snapshot is written to GCS.
         _ = (
             parsed
             | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
@@ -219,18 +237,19 @@ def run():
                   trigger=AfterWatermark(),
                   accumulation_mode=AccumulationMode.DISCARDING)
             | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
+            | "CleanPositions" >> beam.Map(clean_position_record)
         )
 
-        # Write positions to BigQuery using FILE_LOADS with triggering frequency set to 60 seconds.
+        # Write positions to BigQuery using FILE_LOADS with a triggering frequency of 60 seconds.
         _ = (
             positions
             | "WriteToBQ" >> WriteToBigQuery(
                   table=table_positions,
                   schema=positions_schema,
-                  write_disposition=BigQueryDisposition.WRITE_APPEND,
                   create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+                  write_disposition=BigQueryDisposition.WRITE_APPEND,
                   method="FILE_LOADS",
-                  triggering_frequency=60  # Batch load every 60 seconds
+                  triggering_frequency=60  # batch load every 60 seconds
             )
         )
 
