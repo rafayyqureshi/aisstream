@@ -74,8 +74,8 @@ class UploadSnapshotFn(beam.DoFn):
         if not batch:
             return
         try:
-            for r in batch:
-                self.manager.update_static(r)
+            for record in batch:
+                self.manager.update_static(record)
             json_data = self.manager.get_snapshot()
             storage_client = storage.Client()
             bucket = storage_client.bucket(self.gcs_bucket)
@@ -96,7 +96,7 @@ def parse_ais(record_bytes: bytes):
 
     outputs = []
 
-    # Sprawdzamy, czy wiadomość zawiera dane statyczne
+    # Sprawdzamy, czy wiadomość zawiera dane statyczne: wymagane pola to mmsi, ship_name, dim_a, dim_b, dim_c, dim_d.
     static_fields = ["mmsi", "ship_name", "dim_a", "dim_b", "dim_c", "dim_d"]
     if all(field in raw and raw[field] is not None for field in static_fields):
         if str(raw["ship_name"]).strip().lower() != "unknown":
@@ -110,22 +110,19 @@ def parse_ais(record_bytes: bytes):
                 "dim_d": float(raw["dim_d"]),
             })
 
-    # Sprawdzamy dane pozycyjne
+    # Sprawdzamy dane pozycyjne: wymagane pola to mmsi, latitude, longitude, cog, sog, timestamp.
     pos_fields = ["mmsi", "latitude", "longitude", "cog", "sog", "timestamp"]
     if all(field in raw and raw[field] is not None for field in pos_fields):
-        # Odrzucanie nieprawidłowych timestampów
-        try:
-            dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
-        except:
-            return []  # Odrzucamy dany rekord całkowicie
-
         heading = None
         if "heading" in raw and raw["heading"] is not None:
             try:
                 heading = float(raw["heading"])
             except:
                 heading = None
-
+        try:
+            dt = datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
+        except:
+            dt = datetime.datetime.utcnow()
         outputs.append({
             "type": "position",
             "mmsi": int(raw["mmsi"]),
@@ -151,6 +148,7 @@ class EnrichPositionFn(beam.DoFn):
         self.manager = StaticDataManager(self.gcs_bucket)
 
     def process(self, element):
+        # Element to pojedynczy rekord pozycyjny (słownik)
         if element.get("ship_name", "Unknown").strip().lower() == "unknown":
             known = self.manager.find_ship_name(element["mmsi"])
             if known:
@@ -169,8 +167,6 @@ def run():
     staging_loc = os.getenv("STAGING_LOCATION", "gs://ais-collision-detection-bucket/staging")
     job_name = os.getenv("JOB_NAME", "ais-collision-detection-job")
     table_positions = f"{project_id}.ais_dataset_us.ships_positions"
-
-    # Schemat
     positions_schema = {
         "fields": [
             {"name": "mmsi", "type": "INTEGER"},
@@ -198,49 +194,40 @@ def run():
     with beam.Pipeline(options=pipeline_options) as p:
         lines = p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=input_sub)
 
-        # 1) Parsowanie unified
+        # Unifikowany parser – generuje 0..2 obiektów (static i/lub position)
         parsed = lines | "ParseAISUnified" >> beam.FlatMap(parse_ais)
 
-        # 2) Przetwarzanie danych statycznych
-        static_data = (
+        # 1) STATIC pipeline: okno 10-minutowe; dane statyczne są zbierane i snapshot zapisywany do GCS.
+        _ = (
             parsed
             | "FilterStatic" >> beam.Filter(lambda x: x["type"] == "static")
             | "WindowStatic" >> beam.WindowInto(
-                  window.FixedWindows(600),  # okno 10 minut
+                  window.FixedWindows(600),
                   trigger=AfterWatermark(),
-                  accumulation_mode=AccumulationMode.DISCARDING
-            )
-            # Deduplikacja w oknie: klucz -> x["mmsi"]
-            | "DeduplicateStatic" >> beam.Distinct(key=lambda x: x["mmsi"])
-            # Zbieranie do listy w ramach okna, potem migawka
+                  accumulation_mode=AccumulationMode.DISCARDING)
             | "CombineStatic" >> beam.CombineGlobally(beam.combiners.ToListCombineFn()).without_defaults()
             | "UploadStaticSnapshot" >> beam.ParDo(UploadSnapshotFn(GCS_BUCKET))
         )
 
-        # 3) Przetwarzanie danych pozycyjnych
+        # 2) POSITIONS pipeline: okno 10-sekundowe; każdy rekord jest wzbogacany, a następnie zapisywany do BQ.
         positions = (
             parsed
             | "FilterPositions" >> beam.Filter(lambda x: x["type"] == "position")
             | "WindowPositions" >> beam.WindowInto(
-                  window.FixedWindows(10),  # okno 10 sekund
+                  window.FixedWindows(10),
                   trigger=AfterWatermark(),
-                  accumulation_mode=AccumulationMode.DISCARDING
-            )
-            # Deduplikacja (mmsi, timestamp), by uniknąć wielokrotnych identycznych wpisów
-            | "DeduplicatePositions" >> beam.Distinct(key=lambda x: (x["mmsi"], x["timestamp"]))
+                  accumulation_mode=AccumulationMode.DISCARDING)
             | "EnrichPositions" >> beam.ParDo(EnrichPositionFn(GCS_BUCKET))
         )
 
-        # 4) Zapis do BQ z FILE_LOADS i trigger co 10 s
         _ = (
             positions
             | "WriteToBQ" >> WriteToBigQuery(
-                table=table_positions,
-                schema=positions_schema,
-                create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
-                write_disposition=BigQueryDisposition.WRITE_APPEND,
-                method="FILE_LOADS",
-                triggering_frequency=10  # co 10 sekund spływ danych do BQ
+                  table=table_positions,
+                  schema=positions_schema,
+                  write_disposition=BigQueryDisposition.WRITE_APPEND,
+                  create_disposition=BigQueryDisposition.CREATE_IF_NEEDED,
+                  method="STREAMING_INSERTS"
             )
         )
 
