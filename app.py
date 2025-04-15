@@ -427,9 +427,21 @@ async def connect_ais_stream():
     uri = "wss://stream.aisstream.io/v0/stream"
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     
+    # Show full token for debugging
+    print(f"⚠️ Connecting to AIS Stream with token: {AISSTREAM_TOKEN}")
+    
+    connection_attempts = 0
+    max_attempts = 10
+    reconnect_delay = 5
+    
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=None, ssl=ssl_context) as websocket:
+            connection_attempts += 1
+            print(f"Connection attempt {connection_attempts}/{max_attempts}...")
+            
+            # More detailed debugging
+            print(f"Creating websocket connection to {uri}")
+            async with websockets.connect(uri, ping_interval=20, ssl=ssl_context, close_timeout=30) as websocket:
                 # Subscribe to AIS messages with expanded areas to get more data
                 subscribe_message = {
                     "APIKey": AISSTREAM_TOKEN,
@@ -445,8 +457,22 @@ async def connect_ais_stream():
                     "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
                 }
                 
-                await websocket.send(json.dumps(subscribe_message))
-                print("Connected to AIS Stream")
+                print(f"Sending subscription message to AIS Stream...")
+                message_json = json.dumps(subscribe_message)
+                print(f"Subscription JSON: {message_json}")
+                await websocket.send(message_json)
+                print("✅ Successfully connected to AIS Stream and sent subscription")
+                
+                # Wait for acknowledgment
+                try:
+                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                    print(f"Received subscription response: {response}")
+                except asyncio.TimeoutError:
+                    print("No subscription response received, continuing anyway")
+                
+                # Reset connection attempts after successful connection
+                connection_attempts = 0
+                reconnect_delay = 5
                 
                 # Process messages
                 async for message_json in websocket:
@@ -456,6 +482,7 @@ async def connect_ais_stream():
                         
                         if msg_type == "ShipStaticData":
                             process_ship_static_data(message)
+                            print("✅ Processed ship static data")
                         elif msg_type == "PositionReport":
                             ship_data = process_position_report(message)
                             if ship_data:
@@ -468,18 +495,39 @@ async def connect_ais_stream():
                                     # Keep only the last 100 ships
                                     if len(SHIPS_DATA) > 100:
                                         SHIPS_DATA = SHIPS_DATA[-100:]
+                                    
+                                    # Log data received for debugging
+                                    print(f"✅ Ships data updated, now tracking {len(SHIPS_DATA)} ships")
                                 
                                 # Check for collisions after receiving new ship data
                                 check_collisions()
-                    except json.JSONDecodeError:
+                        else:
+                            print(f"Received message of type: {msg_type}")
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error: {e}")
                         continue
                     except Exception as e:
                         print(f"Error processing AIS message: {e}")
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"⚠️ Websocket connection closed: {e}")
+        except asyncio.exceptions.TimeoutError:
+            print(f"⚠️ Websocket connection timeout")
         except Exception as e:
-            print(f"Connection error: {e}")
+            print(f"⚠️ Connection error: {e}, {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
         
-        print("Reconnecting to AIS Stream in 5 seconds...")
-        await asyncio.sleep(5)
+        # Check if we've reached the maximum number of attempts
+        if connection_attempts >= max_attempts:
+            print(f"❌ Failed to connect after {max_attempts} attempts. Will retry again later.")
+            # Longer delay after max attempts
+            await asyncio.sleep(60)
+            connection_attempts = 0
+            # Increase timeout with exponential backoff
+            reconnect_delay = min(reconnect_delay * 2, 60)
+        
+        print(f"Reconnecting to AIS Stream in {reconnect_delay} seconds...")
+        await asyncio.sleep(reconnect_delay)
 
 def start_ais_stream():
     """Start the AIS Stream in a separate thread"""
@@ -682,7 +730,32 @@ def handle_ws():
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    """Main route with diagnostic information"""
+    # Get diagnostic information
+    with data_lock:
+        ship_count = len(SHIPS_DATA)
+        collision_count = len(COLLISION_DATA)
+        last_update = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if ship_count > 0:
+            last_ship = SHIPS_DATA[-1]["timestamp"]
+        else:
+            last_ship = "No ships yet"
+    
+    # Include diagnostic info in a way that doesn't affect the UI
+    context = {
+        'diagnostics': {
+            'ship_count': ship_count,
+            'collision_count': collision_count,
+            'last_update': last_update,
+            'last_ship': last_ship,
+            'token_prefix': AISSTREAM_TOKEN[:5] + "..."
+        }
+    }
+    
+    # Log diagnostic info to console
+    print(f"Diagnostic info - Ships: {ship_count}, Collisions: {collision_count}, Last ship: {last_ship}")
+    
+    return render_template('index.html', **context)
 
 @app.route('/ships')
 def ships():
@@ -710,38 +783,47 @@ def history():
 
 @app.route("/history_filelist")
 def history_filelist():
-    demo_files = [
-        {"name": "history_2023-06-01-12", "size": 12345, "updated": "2023-06-01T12:00:00Z"}
-    ]
-    return jsonify(demo_files)
+    # Return real history files if they exist, otherwise empty list
+    return jsonify([])
 
 @app.route("/history_file")
 def history_file():
-    demo_history = [
-        {
-            "id": "hist-001",
-            "ship_a": {
-                "mmsi": 123456789,
-                "latitude": 54.35,
-                "longitude": 18.65,
-                "cog": 125.5,
-                "sog": 12.3,
-                "ship_name": "Demo Ship 1"
-            },
-            "ship_b": {
-                "mmsi": 987654321,
-                "latitude": 54.38,
-                "longitude": 18.70,
-                "cog": 215.5,
-                "sog": 8.5,
-                "ship_name": "Demo Ship 2"
-            },
-            "cpa": 0.5,
-            "tcpa": 10.2,
-            "timestamp": "2023-06-01T12:05:00Z"
-        }
-    ]
-    return jsonify(demo_history)
+    # Return real historical data or empty array
+    return jsonify([])
+
+@app.route('/api/status')
+def api_status():
+    """API endpoint for checking service health and data status"""
+    with data_lock:
+        ship_count = len(SHIPS_DATA)
+        collision_count = len(COLLISION_DATA)
+        last_update = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        
+        # Calculate how long the service has been receiving data
+        if ship_count > 0:
+            last_ship_time = SHIPS_DATA[-1]["timestamp"]
+            try:
+                last_ship_dt = datetime.fromisoformat(last_ship_time.replace("Z", "+00:00"))
+                time_since_last = (datetime.now(timezone.utc) - last_ship_dt).total_seconds()
+            except (ValueError, TypeError):
+                time_since_last = -1
+        else:
+            last_ship_time = "No ships yet"
+            time_since_last = -1
+    
+    status = {
+        "status": "ok",
+        "version": "1.0",
+        "ship_count": ship_count,
+        "collision_count": collision_count,
+        "last_update": last_update,
+        "last_ship": last_ship_time,
+        "seconds_since_last_ship": time_since_last,
+        "ais_token_valid": len(AISSTREAM_TOKEN) > 10,
+        "token_prefix": AISSTREAM_TOKEN[:5] + "..." if len(AISSTREAM_TOKEN) > 5 else "Invalid"
+    }
+    
+    return jsonify(status)
 
 ##################################################
 # Uruchomienie
