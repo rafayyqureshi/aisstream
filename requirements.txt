@@ -2,9 +2,12 @@ apache-beam[gcp]==2.48.0
 geopy==2.2.0
 geohash2==1.1
 python-dotenv==0.21.0
-websockets==10.4
+websockets==15.0.1
 Flask==2.3.2
 protobuf>=3.20.3,<4.24.0
 tenacity==8.2.2
 python-dateutil
 google-cloud-storage==2.19.0
+certifi==2025.1.31
+numpy==2.2.4
+gunicorn==21.2.0
