@@ -427,46 +427,40 @@ async def connect_ais_stream():
     uri = "wss://stream.aisstream.io/v0/stream"
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     
-    # Check if running on Railway
-    is_railway = os.environ.get('RAILWAY_ENVIRONMENT') is not None
-    if is_railway:
-        print("🚀 Running on Railway environment - using special connection settings")
+    # Much more verbose debugging
+    print(f"\n\n🔍 DEBUGGING CONNECTION ISSUES 🔍")
+    print(f"Token being used: {AISSTREAM_TOKEN}")
+    print(f"Token length: {len(AISSTREAM_TOKEN)}")
+    print(f"Host environment: {os.environ.get('RAILWAY_ENVIRONMENT', 'local')}")
+    print(f"URI: {uri}")
+    print(f"SSL context: {ssl_context}")
     
-    # Show full token for debugging
-    token_display = AISSTREAM_TOKEN if len(AISSTREAM_TOKEN) < 10 else f"{AISSTREAM_TOKEN[:5]}...{AISSTREAM_TOKEN[-5:]}"
-    print(f"⚠️ Connecting to AIS Stream with token: {token_display}")
-    
+    # Shorter reconnect cycle
     connection_attempts = 0
-    max_attempts = 5
+    max_attempts = 10000  # Keep trying basically forever
     reconnect_delay = 5
     
     while True:
         try:
             connection_attempts += 1
-            print(f"Connection attempt {connection_attempts}/{max_attempts}...")
+            print(f"🔄 Connection attempt {connection_attempts}...")
             
-            # More detailed debugging
+            # Using very basic connection parameters
             print(f"Creating websocket connection to {uri}")
-            
-            # Railway-optimized connection settings
-            connection_kwargs = {
-                'uri': uri,
-                'ping_interval': 20,
-                'ping_timeout': 60,
-                'close_timeout': 90,
-                'ssl': ssl_context,
-                'compression': None,
-                'max_size': 2**23  # Larger message size
-            }
-            
-            print(f"Connection parameters: {connection_kwargs}")
-            async with websockets.connect(**connection_kwargs) as websocket:
+            async with websockets.connect(
+                uri, 
+                ping_interval=10,
+                ping_timeout=30, 
+                close_timeout=30,
+                ssl=ssl_context,
+                extra_headers={"User-Agent": "AIS Collision Detection System/1.0"}
+            ) as websocket:
                 # Subscribe to AIS messages
                 subscribe_message = {
                     "APIKey": AISSTREAM_TOKEN,
                     "MessageType": "Subscribe",
                     "BoundingBoxes": [
-                        [[49.0, -8.0], [55.0, 8.0]],  # Expanded English Channel & North Sea 
+                        [[49.0, -8.0], [55.0, 8.0]],  # English Channel & North Sea 
                         [[35.0, -10.0], [45.0, 5.0]],  # Mediterranean area
                         [[20.0, -80.0], [40.0, -60.0]]  # North American eastern coast
                     ],
@@ -476,35 +470,38 @@ async def connect_ais_stream():
                     "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
                 }
                 
-                print(f"Sending subscription message to AIS Stream...")
+                # Send subscription with stringent timeout
+                print(f"⏳ Sending subscription message to AIS Stream...")
                 message_json = json.dumps(subscribe_message)
-                print(f"Subscription message length: {len(message_json)} bytes")
-                await websocket.send(message_json)
-                print("✅ Successfully connected to AIS Stream and sent subscription")
+                await asyncio.wait_for(websocket.send(message_json), timeout=10.0)
+                print("✅ Successfully sent subscription message")
                 
-                # Wait for acknowledgment
+                # Wait for acknowledgment with timeout
+                print("⏳ Waiting for subscription acknowledgment...")
                 try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=15.0)
-                    print(f"Received subscription response: {response}")
+                    response = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                    print(f"✅ Received subscription response: {response}")
                 except asyncio.TimeoutError:
-                    print("No subscription response received, continuing anyway")
+                    print("⚠️ No subscription response received, continuing anyway")
                 
-                # Reset connection attempts after successful connection
-                connection_attempts = 0
-                reconnect_delay = 5
-                
+                print("🌊 Starting to process AIS messages...")
                 # Process messages
                 message_count = 0
+                last_message_time = time.time()
+                
                 async for message_json in websocket:
                     try:
                         message_count += 1
+                        last_message_time = time.time()
+                        
+                        if message_count % 10 == 1:
+                            print(f"📊 Processed {message_count} messages so far, {len(SHIPS_DATA)} ships tracked")
+                        
                         message = json.loads(message_json)
                         msg_type = message.get("MessageType")
                         
                         if msg_type == "ShipStaticData":
                             process_ship_static_data(message)
-                            if message_count % 10 == 0:
-                                print(f"✅ Processed ship static data #{message_count}")
                         elif msg_type == "PositionReport":
                             ship_data = process_position_report(message)
                             if ship_data:
@@ -517,20 +514,21 @@ async def connect_ais_stream():
                                     # Keep only the last 100 ships
                                     if len(SHIPS_DATA) > 100:
                                         SHIPS_DATA = SHIPS_DATA[-100:]
-                                    
-                                    # Log data received for debugging
-                                    if message_count % 10 == 0:
-                                        print(f"✅ Ships data updated, now tracking {len(SHIPS_DATA)} ships (message #{message_count})")
                                 
                                 # Check for collisions after receiving new ship data
                                 check_collisions()
-                        else:
-                            print(f"Received message of type: {msg_type}")
                     except json.JSONDecodeError as e:
-                        print(f"JSON decode error: {e}")
+                        print(f"⚠️ JSON decode error: {e}")
                         continue
                     except Exception as e:
-                        print(f"Error processing AIS message: {e}")
+                        print(f"⚠️ Error processing AIS message: {e}")
+                        continue
+                        
+                    # Watchdog - if no messages for 60 seconds, reconnect
+                    if time.time() - last_message_time > 60:
+                        print("⚠️ No messages received for 60 seconds, forcing reconnection...")
+                        break
+                        
         except websockets.exceptions.ConnectionClosed as e:
             print(f"⚠️ Websocket connection closed: {e}")
         except asyncio.exceptions.TimeoutError:
@@ -540,16 +538,8 @@ async def connect_ais_stream():
             import traceback
             traceback.print_exc()
         
-        # Check if we've reached the maximum number of attempts
-        if connection_attempts >= max_attempts:
-            print(f"❌ Failed to connect after {max_attempts} attempts. Will retry again later.")
-            # Longer delay after max attempts
-            await asyncio.sleep(60)
-            connection_attempts = 0
-            # Increase timeout with exponential backoff
-            reconnect_delay = min(reconnect_delay * 2, 60)
-        
-        print(f"Reconnecting to AIS Stream in {reconnect_delay} seconds...")
+        # Very short reconnect delay
+        print(f"🔄 Reconnecting to AIS Stream in {reconnect_delay} seconds...")
         await asyncio.sleep(reconnect_delay)
 
 def start_ais_stream():
@@ -847,6 +837,109 @@ def api_status():
     }
     
     return jsonify(status)
+
+@app.route('/connection-status')
+def connection_status():
+    """Special status page for debugging connection issues"""
+    last_ships_count = len(SHIPS_DATA)
+    ships_sample = SHIPS_DATA[:5] if SHIPS_DATA else []
+    ais_token_display = AISSTREAM_TOKEN[:5] + "..." + AISSTREAM_TOKEN[-5:] if len(AISSTREAM_TOKEN) > 10 else AISSTREAM_TOKEN
+    
+    # Gather system info
+    import platform
+    import sys
+    
+    status_info = {
+        "app_status": "running",
+        "ships_count": last_ships_count,
+        "sample_ships": ships_sample,
+        "ais_token": ais_token_display,
+        "token_length": len(AISSTREAM_TOKEN),
+        "environment": os.environ.get('RAILWAY_ENVIRONMENT', 'local'),
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "websockets_version": websockets.__version__,
+        "ssl_version": ssl.OPENSSL_VERSION,
+        "host": request.host,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    }
+    
+    # Return as HTML
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>AIS Collision Detection - Connection Status</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            h1 { color: #2c3e50; }
+            .card { background: #f8f9fa; border-radius: 5px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .label { font-weight: bold; color: #34495e; }
+            .value { margin-left: 10px; }
+            pre { background: #eee; padding: 10px; border-radius: 3px; overflow-x: auto; }
+            .good { color: green; }
+            .bad { color: red; }
+        </style>
+    </head>
+    <body>
+        <h1>AIS Collision Detection - Connection Status</h1>
+        
+        <div class="card">
+            <h2>Connection Status</h2>
+            <p><span class="label">App Status:</span> <span class="value">%(app_status)s</span></p>
+            <p><span class="label">Environment:</span> <span class="value">%(environment)s</span></p>
+            <p><span class="label">Host:</span> <span class="value">%(host)s</span></p>
+            <p><span class="label">Time:</span> <span class="value">%(timestamp)s</span></p>
+        </div>
+        
+        <div class="card">
+            <h2>AIS Stream Connection</h2>
+            <p><span class="label">AIS Token:</span> <span class="value">%(ais_token)s</span></p>
+            <p><span class="label">Token Length:</span> <span class="value">%(token_length)s</span> <span class="%(token_class)s">(%(token_status)s)</span></p>
+            <p><span class="label">Ships Count:</span> <span class="value">%(ships_count)s</span> <span class="%(ships_class)s">(%(ships_status)s)</span></p>
+        </div>
+        
+        <div class="card">
+            <h2>System Info</h2>
+            <p><span class="label">Python Version:</span> <span class="value">%(python_version)s</span></p>
+            <p><span class="label">Platform:</span> <span class="value">%(platform)s</span></p>
+            <p><span class="label">WebSockets Version:</span> <span class="value">%(websockets_version)s</span></p>
+            <p><span class="label">SSL Version:</span> <span class="value">%(ssl_version)s</span></p>
+        </div>
+        
+        <div class="card">
+            <h2>Sample Ships Data</h2>
+            <pre>%(ships_sample)s</pre>
+        </div>
+        
+        <script>
+            // Auto-refresh every 10 seconds
+            setTimeout(function() {
+                location.reload();
+            }, 10000);
+        </script>
+    </body>
+    </html>
+    """ % {
+        "app_status": status_info["app_status"],
+        "environment": status_info["environment"],
+        "host": status_info["host"],
+        "timestamp": status_info["timestamp"],
+        "ais_token": status_info["ais_token"],
+        "token_length": status_info["token_length"],
+        "token_class": "good" if status_info["token_length"] > 20 else "bad",
+        "token_status": "Valid" if status_info["token_length"] > 20 else "Too short, may be invalid",
+        "ships_count": status_info["ships_count"],
+        "ships_class": "good" if status_info["ships_count"] > 0 else "bad",
+        "ships_status": "Connected" if status_info["ships_count"] > 0 else "No ships received yet",
+        "python_version": status_info["python_version"],
+        "platform": status_info["platform"],
+        "websockets_version": status_info["websockets_version"],
+        "ssl_version": status_info["ssl_version"],
+        "ships_sample": json.dumps(status_info["sample_ships"], indent=2)
+    }
+    
+    return html
 
 ##################################################
 # Uruchomienie
