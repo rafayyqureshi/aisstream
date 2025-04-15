@@ -665,22 +665,20 @@ def api_heatmap():
 ##################################################
 @app.route('/ws')
 def handle_ws():
-    """Handle the websocket polling - return latest data instead of error"""
-    try:
-        # Return a proper response with data instead of an error message
-        with data_lock:
-            ships_copy = SHIPS_DATA.copy()
-            collisions_copy = COLLISION_DATA.copy()
-        
-        return jsonify({
-            "message": "Websocket support is not available, use REST API endpoints instead",
-            "data": {
-                "ships": ships_copy[:5],  # Return limited data to avoid large responses
-                "collisions": collisions_copy[:2]
-            }
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    """Handle the websocket polling - return HTTP 200 to prevent errors"""
+    with data_lock:
+        ships_copy = SHIPS_DATA.copy()
+        collisions_copy = COLLISION_DATA.copy()
+    
+    # Return a proper response with data and 200 status code
+    return jsonify({
+        "message": "Websocket support is not available, use REST API endpoints instead",
+        "status": "ok",
+        "data": {
+            "ships": ships_copy[:5],
+            "collisions": collisions_copy[:2]
+        }
+    }), 200
 
 @app.route('/')
 def index():
