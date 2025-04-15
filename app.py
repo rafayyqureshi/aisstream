@@ -427,6 +427,11 @@ async def connect_ais_stream():
     uri = "wss://stream.aisstream.io/v0/stream"
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     
+    # Check if running on Render
+    is_render = os.environ.get('RENDER') == 'true'
+    if is_render:
+        print("🚀 Running on Render environment - using special connection settings")
+    
     # Show full token for debugging
     print(f"⚠️ Connecting to AIS Stream with token: {AISSTREAM_TOKEN}")
     
@@ -441,73 +446,31 @@ async def connect_ais_stream():
             
             # More detailed debugging
             print(f"Creating websocket connection to {uri}")
-            async with websockets.connect(uri, ping_interval=20, ssl=ssl_context, close_timeout=30) as websocket:
-                # Subscribe to AIS messages with expanded areas to get more data
-                subscribe_message = {
-                    "APIKey": AISSTREAM_TOKEN,
-                    "MessageType": "Subscribe",
-                    "BoundingBoxes": [
-                        [[49.0, -8.0], [55.0, 8.0]],  # Expanded English Channel & North Sea 
-                        [[35.0, -10.0], [45.0, 5.0]],  # Mediterranean area
-                        [[20.0, -80.0], [40.0, -60.0]]  # North American eastern coast
-                    ],
-                    "OutputFormat": "JSON",
-                    "Compression": "None",
-                    "BufferSize": 1,
-                    "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
-                }
-                
-                print(f"Sending subscription message to AIS Stream...")
-                message_json = json.dumps(subscribe_message)
-                print(f"Subscription JSON: {message_json}")
-                await websocket.send(message_json)
-                print("✅ Successfully connected to AIS Stream and sent subscription")
-                
-                # Wait for acknowledgment
-                try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                    print(f"Received subscription response: {response}")
-                except asyncio.TimeoutError:
-                    print("No subscription response received, continuing anyway")
-                
-                # Reset connection attempts after successful connection
-                connection_attempts = 0
-                reconnect_delay = 5
-                
-                # Process messages
-                async for message_json in websocket:
-                    try:
-                        message = json.loads(message_json)
-                        msg_type = message.get("MessageType")
-                        
-                        if msg_type == "ShipStaticData":
-                            process_ship_static_data(message)
-                            print("✅ Processed ship static data")
-                        elif msg_type == "PositionReport":
-                            ship_data = process_position_report(message)
-                            if ship_data:
-                                # Update the ships data with the new ship information
-                                with data_lock:
-                                    # Remove the old ship data if it exists
-                                    SHIPS_DATA = [s for s in SHIPS_DATA if s["mmsi"] != ship_data["mmsi"]]
-                                    # Add the new ship data
-                                    SHIPS_DATA.append(ship_data)
-                                    # Keep only the last 100 ships
-                                    if len(SHIPS_DATA) > 100:
-                                        SHIPS_DATA = SHIPS_DATA[-100:]
-                                    
-                                    # Log data received for debugging
-                                    print(f"✅ Ships data updated, now tracking {len(SHIPS_DATA)} ships")
-                                
-                                # Check for collisions after receiving new ship data
-                                check_collisions()
-                        else:
-                            print(f"Received message of type: {msg_type}")
-                    except json.JSONDecodeError as e:
-                        print(f"JSON decode error: {e}")
-                        continue
-                    except Exception as e:
-                        print(f"Error processing AIS message: {e}")
+            
+            # Different connection settings for Render
+            if is_render:
+                # Use longer timeouts and specific settings for Render
+                async with websockets.connect(
+                    uri, 
+                    ping_interval=30,
+                    ping_timeout=60, 
+                    close_timeout=60,
+                    ssl=ssl_context,
+                    compression=None,
+                    max_size=2**23,  # Larger message size
+                    max_queue=None   # No queue limit
+                ) as websocket:
+                    await handle_ais_connection(websocket, connection_attempts)
+            else:
+                # Regular settings for local development
+                async with websockets.connect(
+                    uri, 
+                    ping_interval=20, 
+                    ssl=ssl_context, 
+                    close_timeout=30
+                ) as websocket:
+                    await handle_ais_connection(websocket, connection_attempts)
+                    
         except websockets.exceptions.ConnectionClosed as e:
             print(f"⚠️ Websocket connection closed: {e}")
         except asyncio.exceptions.TimeoutError:
@@ -528,6 +491,75 @@ async def connect_ais_stream():
         
         print(f"Reconnecting to AIS Stream in {reconnect_delay} seconds...")
         await asyncio.sleep(reconnect_delay)
+
+async def handle_ais_connection(websocket, connection_attempts):
+    global SHIPS_DATA
+    
+    # Subscribe to AIS messages with expanded areas to get more data
+    subscribe_message = {
+        "APIKey": AISSTREAM_TOKEN,
+        "MessageType": "Subscribe",
+        "BoundingBoxes": [
+            [[49.0, -8.0], [55.0, 8.0]],  # Expanded English Channel & North Sea 
+            [[35.0, -10.0], [45.0, 5.0]],  # Mediterranean area
+            [[20.0, -80.0], [40.0, -60.0]]  # North American eastern coast
+        ],
+        "OutputFormat": "JSON",
+        "Compression": "None",
+        "BufferSize": 1,
+        "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
+    }
+    
+    print(f"Sending subscription message to AIS Stream...")
+    message_json = json.dumps(subscribe_message)
+    print(f"Subscription JSON: {message_json}")
+    await websocket.send(message_json)
+    print("✅ Successfully connected to AIS Stream and sent subscription")
+    
+    # Wait for acknowledgment
+    try:
+        response = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+        print(f"Received subscription response: {response}")
+    except asyncio.TimeoutError:
+        print("No subscription response received, continuing anyway")
+    
+    # Reset connection attempts after successful connection
+    connection_attempts = 0
+    
+    # Process messages
+    async for message_json in websocket:
+        try:
+            message = json.loads(message_json)
+            msg_type = message.get("MessageType")
+            
+            if msg_type == "ShipStaticData":
+                process_ship_static_data(message)
+                print("✅ Processed ship static data")
+            elif msg_type == "PositionReport":
+                ship_data = process_position_report(message)
+                if ship_data:
+                    # Update the ships data with the new ship information
+                    with data_lock:
+                        # Remove the old ship data if it exists
+                        SHIPS_DATA = [s for s in SHIPS_DATA if s["mmsi"] != ship_data["mmsi"]]
+                        # Add the new ship data
+                        SHIPS_DATA.append(ship_data)
+                        # Keep only the last 100 ships
+                        if len(SHIPS_DATA) > 100:
+                            SHIPS_DATA = SHIPS_DATA[-100:]
+                        
+                        # Log data received for debugging
+                        print(f"✅ Ships data updated, now tracking {len(SHIPS_DATA)} ships")
+                    
+                    # Check for collisions after receiving new ship data
+                    check_collisions()
+            else:
+                print(f"Received message of type: {msg_type}")
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}")
+            continue
+        except Exception as e:
+            print(f"Error processing AIS message: {e}")
 
 def start_ais_stream():
     """Start the AIS Stream in a separate thread"""
